@@ -4,8 +4,7 @@
 //! SSH config file management for sshenc install/uninstall.
 //!
 //! Manages a comment-delimited block in `~/.ssh/config` that configures
-//! `PKCS11Provider` to load the sshenc PKCS#11 dynamic library for all hosts.
-//! This means SSH loads the dylib on demand — no daemon required.
+//! `IdentityAgent` to point at the sshenc agent socket for all hosts.
 
 use crate::error::Result;
 use std::path::Path;
@@ -36,12 +35,12 @@ pub fn is_installed(ssh_config_path: &Path) -> Result<bool> {
     Ok(content.contains(BEGIN_MARKER))
 }
 
-/// Install the sshenc PKCS#11 provider block into the SSH config file.
+/// Install the sshenc agent block into the SSH config file.
 ///
-/// Adds a `Host *` block with `PKCS11Provider` pointing at the sshenc dylib.
+/// Adds a `Host *` block with `IdentityAgent` pointing at the sshenc agent socket.
 /// Creates `~/.ssh/` and the config file if they don't exist.
 /// Idempotent: returns `AlreadyPresent` if the block is already there.
-pub fn install_block(ssh_config_path: &Path, dylib_path: &Path) -> Result<InstallResult> {
+pub fn install_block(ssh_config_path: &Path, socket_path: &Path) -> Result<InstallResult> {
     // Ensure parent directory exists with 0700 permissions
     if let Some(parent) = ssh_config_path.parent() {
         if !parent.exists() {
@@ -64,9 +63,9 @@ pub fn install_block(ssh_config_path: &Path, dylib_path: &Path) -> Result<Instal
         return Ok(InstallResult::AlreadyPresent);
     }
 
-    let dylib_display = dylib_path.display();
+    let socket_display = socket_path.display();
     let block =
-        format!("{BEGIN_MARKER}\nHost *\n    PKCS11Provider {dylib_display}\n{END_MARKER}\n");
+        format!("{BEGIN_MARKER}\nHost *\n    IdentityAgent {socket_display}\n{END_MARKER}\n");
 
     let mut new_content = content;
     // Ensure existing content ends with newline
@@ -154,14 +153,14 @@ mod tests {
     fn test_install_new_file() {
         let dir = temp_dir("new-file");
         let config_path = dir.join("config");
-        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
-        let result = install_block(&config_path, &dylib).unwrap();
+        let result = install_block(&config_path, &socket).unwrap();
         assert_eq!(result, InstallResult::Installed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains(BEGIN_MARKER));
-        assert!(content.contains("PKCS11Provider /usr/local/lib/libsshenc_pkcs11.dylib"));
+        assert!(content.contains("IdentityAgent /tmp/.sshenc/agent.sock"));
         assert!(content.contains(END_MARKER));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -171,11 +170,11 @@ mod tests {
     fn test_install_existing_file() {
         let dir = temp_dir("existing-file");
         let config_path = dir.join("config");
-        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
         std::fs::write(&config_path, "Host example.com\n    User jay\n").unwrap();
 
-        let result = install_block(&config_path, &dylib).unwrap();
+        let result = install_block(&config_path, &socket).unwrap();
         assert_eq!(result, InstallResult::Installed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -191,11 +190,11 @@ mod tests {
     fn test_install_no_trailing_newline() {
         let dir = temp_dir("no-trailing-nl");
         let config_path = dir.join("config");
-        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
         std::fs::write(&config_path, "Host foo\n    User bar").unwrap(); // no trailing newline
 
-        let result = install_block(&config_path, &dylib).unwrap();
+        let result = install_block(&config_path, &socket).unwrap();
         assert_eq!(result, InstallResult::Installed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -210,12 +209,12 @@ mod tests {
     fn test_install_idempotent() {
         let dir = temp_dir("idempotent");
         let config_path = dir.join("config");
-        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
-        install_block(&config_path, &dylib).unwrap();
+        install_block(&config_path, &socket).unwrap();
         let content_after_first = std::fs::read_to_string(&config_path).unwrap();
 
-        let result = install_block(&config_path, &dylib).unwrap();
+        let result = install_block(&config_path, &socket).unwrap();
         assert_eq!(result, InstallResult::AlreadyPresent);
 
         let content_after_second = std::fs::read_to_string(&config_path).unwrap();
@@ -228,10 +227,10 @@ mod tests {
     fn test_uninstall() {
         let dir = temp_dir("uninstall");
         let config_path = dir.join("config");
-        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
         std::fs::write(&config_path, "Host foo\n    User bar\n").unwrap();
-        install_block(&config_path, &dylib).unwrap();
+        install_block(&config_path, &socket).unwrap();
 
         let result = uninstall_block(&config_path).unwrap();
         assert_eq!(result, UninstallResult::Removed);
@@ -239,7 +238,7 @@ mod tests {
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(!content.contains(BEGIN_MARKER));
         assert!(!content.contains(END_MARKER));
-        assert!(!content.contains("PKCS11Provider"));
+        assert!(!content.contains("IdentityAgent"));
         assert!(content.contains("Host foo"));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -268,11 +267,11 @@ mod tests {
     fn test_is_installed() {
         let dir = temp_dir("is-installed");
         let config_path = dir.join("config");
-        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
         assert!(!is_installed(&config_path).unwrap());
 
-        install_block(&config_path, &dylib).unwrap();
+        install_block(&config_path, &socket).unwrap();
         assert!(is_installed(&config_path).unwrap());
 
         uninstall_block(&config_path).unwrap();
@@ -286,10 +285,10 @@ mod tests {
         let dir = temp_dir("creates-parent");
         let ssh_dir = dir.join("newssh");
         let config_path = ssh_dir.join("config");
-        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
         assert!(!ssh_dir.exists());
-        install_block(&config_path, &dylib).unwrap();
+        install_block(&config_path, &socket).unwrap();
         assert!(ssh_dir.exists());
         assert!(config_path.exists());
 

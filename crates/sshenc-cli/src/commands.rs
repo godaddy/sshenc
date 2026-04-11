@@ -299,67 +299,67 @@ pub fn config_show() -> Result<()> {
 }
 
 pub fn install() -> Result<()> {
+    let config = Config::load_default()?;
     let ssh_config_path = dirs::home_dir()
         .expect("could not determine home directory")
         .join(".ssh")
         .join("config");
 
-    let dylib_path = find_pkcs11_dylib()?;
-
-    match sshenc_core::ssh_config::install_block(&ssh_config_path, &dylib_path)? {
+    match sshenc_core::ssh_config::install_block(&ssh_config_path, &config.socket_path)? {
         sshenc_core::ssh_config::InstallResult::Installed => {
-            println!(
-                "Installed sshenc PKCS#11 provider in {}",
-                ssh_config_path.display()
-            );
-            println!("  PKCS11Provider {}", dylib_path.display());
-            println!();
-            println!("SSH will now use sshenc for all connections. No agent needed.");
+            println!("Installed sshenc agent in {}", ssh_config_path.display());
+            println!("  IdentityAgent {}", config.socket_path.display());
         }
         sshenc_core::ssh_config::InstallResult::AlreadyPresent => {
             println!("sshenc already configured in {}", ssh_config_path.display());
         }
     }
+
+    // Start the agent as a daemon if it's not already running
+    if !config.socket_path.exists() {
+        let agent_bin = find_agent_binary()?;
+        std::process::Command::new(&agent_bin)
+            .arg("--socket")
+            .arg(&config.socket_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        println!("Started sshenc agent.");
+    } else {
+        println!("Agent already running.");
+    }
+
+    println!();
+    println!("SSH will now use sshenc for all connections.");
+    println!("Your existing ~/.ssh keys continue to work as fallback.");
     Ok(())
 }
 
-/// Find the sshenc PKCS#11 dylib. Search order:
-/// 1. Next to the current executable (same directory)
-/// 2. In the cargo target directory (for development)
-/// 3. Standard library paths
-fn find_pkcs11_dylib() -> Result<PathBuf> {
-    let dylib_name = "libsshenc_pkcs11.dylib";
-
-    // Check next to the current executable
+/// Find the sshenc-agent binary.
+fn find_agent_binary() -> Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join(dylib_name);
+            let candidate = dir.join("sshenc-agent");
             if candidate.exists() {
                 return Ok(candidate);
             }
         }
     }
-
-    // Check common install paths
-    let common_paths = ["/usr/local/lib", "/opt/homebrew/lib"];
-    for dir in &common_paths {
-        let candidate = PathBuf::from(dir).join(dylib_name);
-        if candidate.exists() {
-            return Ok(candidate);
+    // Check PATH
+    if let Ok(output) = std::process::Command::new("which")
+        .arg("sshenc-agent")
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(PathBuf::from(path));
+            }
         }
     }
-
-    // Fall back to looking next to the executable (even if it doesn't exist yet —
-    // the user may be about to build/install it)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            return Ok(dir.join(dylib_name));
-        }
-    }
-
-    bail!(
-        "could not find {dylib_name} — build with `cargo build -p sshenc-pkcs11 --release` first"
-    );
+    bail!("sshenc-agent not found");
 }
 
 pub fn uninstall() -> Result<()> {

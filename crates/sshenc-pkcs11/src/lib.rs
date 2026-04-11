@@ -116,7 +116,18 @@ pub unsafe extern "C" fn C_Initialize(_init_args: *mut std::ffi::c_void) -> CK_R
         Err(_) => return CKR_GENERAL_ERROR,
     };
 
-    let identities = agent.request_identities().unwrap_or_default();
+    // Only expose key types that PKCS#11 supports (ECDSA, RSA).
+    // Ed25519 keys are not supported by OpenSSH's PKCS#11 implementation
+    // and cause "invalid attribute length" errors.
+    let all_identities = agent.request_identities().unwrap_or_default();
+    let identities: Vec<_> = all_identities
+        .into_iter()
+        .filter(|id| {
+            extract_key_type(&id.key_blob)
+                .as_deref()
+                .is_some_and(|t| t.contains("ecdsa") || t.contains("rsa"))
+        })
+        .collect();
 
     *provider = Some(ProviderState {
         sessions: SessionManager::new(SSHENC_MAX_SESSIONS),
@@ -592,35 +603,44 @@ pub unsafe extern "C" fn C_Sign(
         return CKR_ARGUMENTS_BAD;
     }
 
-    let mut provider = match PROVIDER.lock() {
-        Ok(p) => p,
-        Err(_) => return CKR_GENERAL_ERROR,
+    // Extract what we need under the lock, then DROP IT before signing.
+    // OpenSSH may call other C_* functions (like C_GetAttributeValue) during
+    // the signing flow, which would deadlock if we held the mutex.
+    let (key_blob, input_vec) = {
+        let mut provider = match PROVIDER.lock() {
+            Ok(p) => p,
+            Err(_) => return CKR_GENERAL_ERROR,
+        };
+        let state = match provider.as_mut() {
+            Some(s) => s,
+            None => return CKR_CRYPTOKI_NOT_INITIALIZED,
+        };
+        let idx = match state.session_idx(session_handle) {
+            Some(i) => i,
+            None => return CKR_SESSION_HANDLE_INVALID,
+        };
+        let key_handle = match state.sign_state[idx] {
+            Some(h) => h,
+            None => return CKR_OPERATION_NOT_INITIALIZED,
+        };
+        let identity = match state.identity_for_handle(key_handle) {
+            Some(id) => id.clone(),
+            None => return CKR_OBJECT_HANDLE_INVALID,
+        };
+        state.sign_state[idx] = None; // single-shot
+        (
+            identity.key_blob,
+            std::slice::from_raw_parts(data, data_len as usize).to_vec(),
+        )
     };
-    let state = match provider.as_mut() {
-        Some(s) => s,
-        None => return CKR_CRYPTOKI_NOT_INITIALIZED,
-    };
-    let idx = match state.session_idx(session_handle) {
-        Some(i) => i,
-        None => return CKR_SESSION_HANDLE_INVALID,
-    };
+    // Mutex is now released
 
-    let key_handle = match state.sign_state[idx] {
-        Some(h) => h,
-        None => return CKR_OPERATION_NOT_INITIALIZED,
-    };
-
-    let identity = match state.identity_for_handle(key_handle) {
-        Some(id) => id.clone(),
-        None => return CKR_OBJECT_HANDLE_INVALID,
-    };
-
-    let input = std::slice::from_raw_parts(data, data_len as usize);
-
-    let sig_blob = match state.agent.sign(&identity.key_blob, input, 0) {
-        Ok(s) => s,
-        Err(_) => return CKR_GENERAL_ERROR,
-    };
+    // Sign via a fresh agent connection
+    let sig_blob =
+        match AgentConnection::connect().and_then(|mut conn| conn.sign(&key_blob, &input_vec, 0)) {
+            Ok(s) => s,
+            Err(_) => return CKR_GENERAL_ERROR,
+        };
 
     // Agent returns SSH signature blob: string(algo) + string(inner).
     // For ECDSA, inner = mpint(r) + mpint(s).
@@ -644,7 +664,6 @@ pub unsafe extern "C" fn C_Sign(
 
     std::ptr::copy_nonoverlapping(raw_sig.as_ptr(), signature, raw_sig.len());
     *signature_len = raw_sig.len() as u64;
-    state.sign_state[idx] = None;
     CKR_OK
 }
 

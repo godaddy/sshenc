@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 //! SSH agent Unix socket server implementation.
+//!
+//! Serves only Secure Enclave keys. Legacy SSH keys from ~/.ssh/ are
+//! handled by OpenSSH directly — the agent doesn't need to proxy them.
 
-use crate::legacy_keys::{self, LegacyKey};
 use anyhow::Result;
 use sshenc_agent_proto::message::{self, AgentRequest, AgentResponse, Identity};
 use sshenc_agent_proto::signature;
@@ -52,10 +54,6 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
     #[cfg(not(target_os = "macos"))]
     compile_error!("sshenc-agent requires macOS");
 
-    // Load legacy SSH keys from ~/.ssh/
-    let legacy = Arc::new(legacy_keys::load_legacy_keys(&ssh_dir));
-    tracing::info!(count = legacy.len(), "loaded legacy SSH keys");
-
     let allowed = Arc::new(allowed_labels);
 
     loop {
@@ -64,9 +62,8 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
                 let (stream, _addr) = accept_result?;
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
-                let legacy = Arc::clone(&legacy);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, &*backend, &allowed, &legacy).await {
+                    if let Err(e) = handle_connection(stream, &*backend, &allowed).await {
                         tracing::warn!("connection error: {e}");
                     }
                 });
@@ -87,7 +84,6 @@ async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     backend: &dyn KeyBackend,
     allowed_labels: &[String],
-    legacy_keys: &[LegacyKey],
 ) -> Result<()> {
     tracing::debug!("new agent connection");
 
@@ -113,7 +109,7 @@ async fn handle_connection(
 
         // Parse and handle
         let request = message::parse_request(&payload)?;
-        let response = handle_request(request, backend, allowed_labels, legacy_keys)?;
+        let response = handle_request(request, backend, allowed_labels)?;
         let response_payload = message::serialize_response(&response);
 
         // Write response
@@ -126,15 +122,13 @@ fn handle_request(
     request: AgentRequest,
     backend: &dyn KeyBackend,
     allowed_labels: &[String],
-    legacy_keys: &[LegacyKey],
 ) -> Result<AgentResponse> {
     match request {
         AgentRequest::RequestIdentities => {
             tracing::debug!("handling identity request");
 
-            // Collect Secure Enclave keys
             let keys = backend.list()?;
-            let mut identities: Vec<Identity> = keys
+            let identities: Vec<Identity> = keys
                 .into_iter()
                 .filter(|k| {
                     allowed_labels.is_empty()
@@ -156,17 +150,7 @@ fn handle_request(
                 })
                 .collect();
 
-            // Append legacy SSH keys
-            for lk in legacy_keys {
-                identities.push(lk.to_identity());
-            }
-
-            tracing::debug!(
-                se_keys = identities.len() - legacy_keys.len(),
-                legacy_keys = legacy_keys.len(),
-                total = identities.len(),
-                "returning identities"
-            );
+            tracing::debug!(count = identities.len(), "returning identities");
             Ok(AgentResponse::IdentitiesAnswer(identities))
         }
         AgentRequest::SignRequest {
@@ -180,7 +164,7 @@ fn handle_request(
                 "handling sign request"
             );
 
-            // Try Secure Enclave keys first
+            // Find which SE key matches this blob
             let keys = backend.list()?;
             let matching_key = keys.into_iter().find(|k| {
                 if let Ok(pubkey) = SshPublicKey::from_sec1_bytes(&k.public_key_bytes, None) {
@@ -190,60 +174,35 @@ fn handle_request(
                 }
             });
 
-            if let Some(key) = matching_key {
-                // Check allowed labels
-                if !allowed_labels.is_empty()
-                    && !allowed_labels.contains(&key.metadata.label.as_str().to_string())
-                {
-                    tracing::warn!(
-                        label = key.metadata.label.as_str(),
-                        "key not in allowed list"
-                    );
-                    return Ok(AgentResponse::Failure);
-                }
+            let Some(key) = matching_key else {
+                tracing::warn!("no matching key for sign request");
+                return Ok(AgentResponse::Failure);
+            };
 
-                // Sign with Secure Enclave
-                let der_sig = backend.sign(key.metadata.label.as_str(), &data)?;
-                let ssh_sig = signature::der_to_ssh_signature(&der_sig)?;
-
-                tracing::debug!(
+            // Check allowed labels
+            if !allowed_labels.is_empty()
+                && !allowed_labels.contains(&key.metadata.label.as_str().to_string())
+            {
+                tracing::warn!(
                     label = key.metadata.label.as_str(),
-                    sig_len = ssh_sig.len(),
-                    "SE signing complete"
+                    "key not in allowed list"
                 );
-
-                return Ok(AgentResponse::SignResponse {
-                    signature_blob: ssh_sig,
-                });
+                return Ok(AgentResponse::Failure);
             }
 
-            // Try legacy keys
-            let legacy_match = legacy_keys.iter().find(|lk| lk.key_blob == key_blob);
-            if let Some(lk) = legacy_match {
-                match lk.sign(&data) {
-                    Ok(sig_blob) => {
-                        tracing::debug!(
-                            comment = %lk.comment,
-                            sig_len = sig_blob.len(),
-                            "legacy signing complete"
-                        );
-                        return Ok(AgentResponse::SignResponse {
-                            signature_blob: sig_blob,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            comment = %lk.comment,
-                            error = %e,
-                            "legacy signing failed"
-                        );
-                        return Ok(AgentResponse::Failure);
-                    }
-                }
-            }
+            // Sign with Secure Enclave
+            let der_sig = backend.sign(key.metadata.label.as_str(), &data)?;
+            let ssh_sig = signature::der_to_ssh_signature(&der_sig)?;
 
-            tracing::warn!("no matching key for sign request");
-            Ok(AgentResponse::Failure)
+            tracing::debug!(
+                label = key.metadata.label.as_str(),
+                sig_len = ssh_sig.len(),
+                "signing complete"
+            );
+
+            Ok(AgentResponse::SignResponse {
+                signature_blob: ssh_sig,
+            })
         }
         AgentRequest::Unknown(msg_type) => {
             tracing::debug!(msg_type, "unknown message type");

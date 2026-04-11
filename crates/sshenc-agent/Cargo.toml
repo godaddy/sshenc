@@ -28,6 +28,4 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
-ssh-key = { workspace = true }
-signature = { workspace = true }
 libc = { workspace = true }

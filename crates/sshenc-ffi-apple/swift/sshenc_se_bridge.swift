@@ -117,9 +117,10 @@ public func sshenc_se_public_key(
     }
 }
 
-// MARK: - Sign
+// MARK: - Sign (message - hashes internally)
 
-/// Sign data using a key loaded from its data representation.
+/// Sign a message using a key loaded from its data representation.
+/// CryptoKit hashes the message with SHA-256 internally.
 /// Returns a DER-encoded ECDSA signature.
 ///
 /// - data_rep: the persisted data representation bytes
@@ -159,3 +160,4 @@ public func sshenc_se_sign(
         return SE_ERR_SIGN
     }
 }
+

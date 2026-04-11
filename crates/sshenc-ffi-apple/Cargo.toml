@@ -1,0 +1,16 @@
+[package]
+name = "sshenc-ffi-apple"
+description = "Minimal Apple Security.framework bridge layer for sshenc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { workspace = true }
+core-foundation-sys = { workspace = true }
+security-framework = { workspace = true }
+security-framework-sys = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

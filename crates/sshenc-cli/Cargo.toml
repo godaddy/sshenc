@@ -1,0 +1,26 @@
+[package]
+name = "sshenc-cli"
+description = "Main CLI for sshenc Secure Enclave SSH key management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sshenc"
+path = "src/main.rs"
+
+[dependencies]
+sshenc-core = { workspace = true }
+sshenc-se = { workspace = true }
+sshenc-agent = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }

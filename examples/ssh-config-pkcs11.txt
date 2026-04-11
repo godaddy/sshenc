@@ -1,0 +1,26 @@
+# ~/.ssh/config snippet for sshenc PKCS#11 mode
+#
+# Uses the sshenc PKCS#11 provider library directly with OpenSSH.
+# No agent process required, but each SSH connection triggers
+# Secure Enclave access (and a biometric prompt if configured).
+#
+# Build the provider:
+#   cargo build --release -p sshenc-pkcs11
+#
+# The library will be at:
+#   target/release/libsshenc_pkcs11.dylib
+
+# GitHub via PKCS#11
+Host github.com
+    PKCS11Provider /path/to/libsshenc_pkcs11.dylib
+    IdentitiesOnly yes
+
+# GitLab via PKCS#11
+Host gitlab.com
+    PKCS11Provider /path/to/libsshenc_pkcs11.dylib
+    IdentitiesOnly yes
+
+# Generic host via PKCS#11
+Host myserver.example.com
+    PKCS11Provider /path/to/libsshenc_pkcs11.dylib
+    IdentitiesOnly yes

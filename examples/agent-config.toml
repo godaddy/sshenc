@@ -1,0 +1,38 @@
+# sshenc agent configuration
+#
+# Default location: ~/Library/Application Support/sshenc/config.toml
+# Or: ~/.config/sshenc/config.toml
+#
+# All fields are optional. Values shown here are the defaults unless noted.
+
+# Path for the agent Unix socket.
+socket_path = "~/.sshenc/agent.sock"
+
+# Labels of keys the agent should expose.
+# Empty list means all sshenc-managed keys are available.
+allowed_labels = []
+
+# Example: restrict to specific keys
+# allowed_labels = ["github-personal", "work"]
+
+# User-presence prompt policy.
+#   "always"     - always require biometric/password for signing
+#   "never"      - never prompt (keys must be created without user-presence flag)
+#   "keydefault" - use whatever the key's access control requires
+prompt_policy = "keydefault"
+
+# Default directory for .pub file export.
+pub_dir = "~/.ssh"
+
+# Logging level: error, warn, info, debug, trace
+log_level = "info"
+
+# Host-specific identity preferences.
+# The agent will prefer the specified key label when signing for a given host.
+[[host_identities]]
+host = "github.com"
+label = "github-personal"
+
+# [[host_identities]]
+# host = "gitlab.com"
+# label = "work"

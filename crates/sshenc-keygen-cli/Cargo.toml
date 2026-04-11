@@ -1,0 +1,21 @@
+[package]
+name = "sshenc-keygen-cli"
+description = "Convenience keygen CLI for sshenc Secure Enclave SSH keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sshenc-keygen"
+path = "src/main.rs"
+
+[dependencies]
+sshenc-core = { workspace = true }
+sshenc-se = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs = { workspace = true }

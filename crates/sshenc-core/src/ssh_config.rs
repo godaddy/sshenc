@@ -1,0 +1,298 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! SSH config file management for sshenc install/uninstall.
+//!
+//! Manages a comment-delimited block in `~/.ssh/config` that configures
+//! `PKCS11Provider` to load the sshenc PKCS#11 dynamic library for all hosts.
+//! This means SSH loads the dylib on demand — no daemon required.
+
+use crate::error::Result;
+use std::path::Path;
+
+const BEGIN_MARKER: &str = "# BEGIN sshenc managed block -- do not edit";
+const END_MARKER: &str = "# END sshenc managed block";
+
+/// Result of an install operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InstallResult {
+    Installed,
+    AlreadyPresent,
+}
+
+/// Result of an uninstall operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UninstallResult {
+    Removed,
+    NotPresent,
+}
+
+/// Check whether the sshenc managed block is present in the SSH config file.
+pub fn is_installed(ssh_config_path: &Path) -> Result<bool> {
+    if !ssh_config_path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(ssh_config_path)?;
+    Ok(content.contains(BEGIN_MARKER))
+}
+
+/// Install the sshenc PKCS#11 provider block into the SSH config file.
+///
+/// Adds a `Host *` block with `PKCS11Provider` pointing at the sshenc dylib.
+/// Creates `~/.ssh/` and the config file if they don't exist.
+/// Idempotent: returns `AlreadyPresent` if the block is already there.
+pub fn install_block(ssh_config_path: &Path, dylib_path: &Path) -> Result<InstallResult> {
+    // Ensure parent directory exists with 0700 permissions
+    if let Some(parent) = ssh_config_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+    }
+
+    let content = if ssh_config_path.exists() {
+        std::fs::read_to_string(ssh_config_path)?
+    } else {
+        String::new()
+    };
+
+    if content.contains(BEGIN_MARKER) {
+        return Ok(InstallResult::AlreadyPresent);
+    }
+
+    let dylib_display = dylib_path.display();
+    let block =
+        format!("{BEGIN_MARKER}\nHost *\n    PKCS11Provider {dylib_display}\n{END_MARKER}\n");
+
+    let mut new_content = content;
+    // Ensure existing content ends with newline
+    if !new_content.is_empty() && !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    // Add blank separator line if there's existing content
+    if !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    new_content.push_str(&block);
+
+    std::fs::write(ssh_config_path, &new_content)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ssh_config_path, std::fs::Permissions::from_mode(0o644))?;
+    }
+
+    Ok(InstallResult::Installed)
+}
+
+/// Remove the sshenc managed block from the SSH config file.
+///
+/// Removes everything between (and including) the BEGIN and END markers,
+/// plus any single blank line immediately before the block.
+pub fn uninstall_block(ssh_config_path: &Path) -> Result<UninstallResult> {
+    if !ssh_config_path.exists() {
+        return Ok(UninstallResult::NotPresent);
+    }
+
+    let content = std::fs::read_to_string(ssh_config_path)?;
+    if !content.contains(BEGIN_MARKER) {
+        return Ok(UninstallResult::NotPresent);
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut new_lines: Vec<&str> = Vec::new();
+    let mut in_block = false;
+
+    for line in &lines {
+        if line.contains(BEGIN_MARKER) {
+            in_block = true;
+            // Remove a trailing blank line before the block
+            if let Some(last) = new_lines.last() {
+                if last.is_empty() {
+                    new_lines.pop();
+                }
+            }
+            continue;
+        }
+        if line.contains(END_MARKER) {
+            in_block = false;
+            continue;
+        }
+        if !in_block {
+            new_lines.push(line);
+        }
+    }
+
+    // Rebuild content
+    let mut new_content = new_lines.join("\n");
+    if !new_content.is_empty() {
+        new_content.push('\n');
+    }
+
+    std::fs::write(ssh_config_path, &new_content)?;
+    Ok(UninstallResult::Removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sshenc-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_install_new_file() {
+        let dir = temp_dir("new-file");
+        let config_path = dir.join("config");
+        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+
+        let result = install_block(&config_path, &dylib).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains(BEGIN_MARKER));
+        assert!(content.contains("PKCS11Provider /usr/local/lib/libsshenc_pkcs11.dylib"));
+        assert!(content.contains(END_MARKER));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_existing_file() {
+        let dir = temp_dir("existing-file");
+        let config_path = dir.join("config");
+        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+
+        std::fs::write(&config_path, "Host example.com\n    User jay\n").unwrap();
+
+        let result = install_block(&config_path, &dylib).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.starts_with("Host example.com"));
+        assert!(content.contains(BEGIN_MARKER));
+        // Blank separator line between existing content and block
+        assert!(content.contains("User jay\n\n"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_no_trailing_newline() {
+        let dir = temp_dir("no-trailing-nl");
+        let config_path = dir.join("config");
+        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+
+        std::fs::write(&config_path, "Host foo\n    User bar").unwrap(); // no trailing newline
+
+        let result = install_block(&config_path, &dylib).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        // Should have added newline before the block
+        assert!(!content.contains("bar#"));
+        assert!(content.contains(BEGIN_MARKER));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_idempotent() {
+        let dir = temp_dir("idempotent");
+        let config_path = dir.join("config");
+        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+
+        install_block(&config_path, &dylib).unwrap();
+        let content_after_first = std::fs::read_to_string(&config_path).unwrap();
+
+        let result = install_block(&config_path, &dylib).unwrap();
+        assert_eq!(result, InstallResult::AlreadyPresent);
+
+        let content_after_second = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(content_after_first, content_after_second);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall() {
+        let dir = temp_dir("uninstall");
+        let config_path = dir.join("config");
+        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+
+        std::fs::write(&config_path, "Host foo\n    User bar\n").unwrap();
+        install_block(&config_path, &dylib).unwrap();
+
+        let result = uninstall_block(&config_path).unwrap();
+        assert_eq!(result, UninstallResult::Removed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!content.contains(BEGIN_MARKER));
+        assert!(!content.contains(END_MARKER));
+        assert!(!content.contains("PKCS11Provider"));
+        assert!(content.contains("Host foo"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_not_present() {
+        let dir = temp_dir("uninstall-absent");
+        let config_path = dir.join("config");
+
+        std::fs::write(&config_path, "Host foo\n    User bar\n").unwrap();
+
+        let result = uninstall_block(&config_path).unwrap();
+        assert_eq!(result, UninstallResult::NotPresent);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_missing_file() {
+        let result = uninstall_block(Path::new("/nonexistent/config")).unwrap();
+        assert_eq!(result, UninstallResult::NotPresent);
+    }
+
+    #[test]
+    fn test_is_installed() {
+        let dir = temp_dir("is-installed");
+        let config_path = dir.join("config");
+        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+
+        assert!(!is_installed(&config_path).unwrap());
+
+        install_block(&config_path, &dylib).unwrap();
+        assert!(is_installed(&config_path).unwrap());
+
+        uninstall_block(&config_path).unwrap();
+        assert!(!is_installed(&config_path).unwrap());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_creates_parent_dir() {
+        let dir = temp_dir("creates-parent");
+        let ssh_dir = dir.join("newssh");
+        let config_path = ssh_dir.join("config");
+        let dylib = PathBuf::from("/usr/local/lib/libsshenc_pkcs11.dylib");
+
+        assert!(!ssh_dir.exists());
+        install_block(&config_path, &dylib).unwrap();
+        assert!(ssh_dir.exists());
+        assert!(config_path.exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

@@ -1,0 +1,76 @@
+[workspace]
+members = [
+    "crates/sshenc-core",
+    "crates/sshenc-se",
+    "crates/sshenc-agent-proto",
+    "crates/sshenc-agent",
+    "crates/sshenc-cli",
+    "crates/sshenc-keygen-cli",
+    "crates/sshenc-pkcs11",
+    "crates/sshenc-ffi-apple",
+    "crates/sshenc-test-support",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+repository = "https://github.com/jgowdy/sshenc"
+
+[workspace.dependencies]
+# Internal crates
+sshenc-core = { path = "crates/sshenc-core" }
+sshenc-se = { path = "crates/sshenc-se" }
+sshenc-agent-proto = { path = "crates/sshenc-agent-proto" }
+sshenc-agent = { path = "crates/sshenc-agent" }
+sshenc-ffi-apple = { path = "crates/sshenc-ffi-apple" }
+sshenc-test-support = { path = "crates/sshenc-test-support" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Encoding
+base64 = "0.22"
+hex = "0.4"
+
+# Crypto / hashing
+sha2 = "0.10"
+md-5 = "0.10"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Apple frameworks (macOS only)
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+security-framework = "3"
+security-framework-sys = "2"
+
+# Byte manipulation
+byteorder = "1"
+bytes = "1"
+
+# Config
+dirs = "6"
+toml = "0.8"
+
+# SSH key parsing and signing
+ssh-key = { version = "0.6", features = ["crypto"] }
+signature = "2"
+
+# Misc
+rand = "0.8"

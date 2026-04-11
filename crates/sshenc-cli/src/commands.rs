@@ -1,0 +1,426 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! CLI command implementations.
+
+use anyhow::{bail, Result};
+use sshenc_core::key::{KeyGenOptions, KeyLabel};
+use sshenc_core::pubkey::SshPublicKey;
+use sshenc_core::Config;
+use sshenc_se::KeyBackend;
+use std::io::{self, Write};
+use std::path::PathBuf;
+
+pub fn keygen(
+    backend: &dyn KeyBackend,
+    label: &str,
+    comment: Option<String>,
+    write_pub: Option<PathBuf>,
+    print_pub: bool,
+    require_user_presence: bool,
+    json: bool,
+) -> Result<()> {
+    let key_label = KeyLabel::new(label)?;
+
+    let opts = KeyGenOptions {
+        label: key_label,
+        comment,
+        requires_user_presence: require_user_presence,
+        write_pub_path: write_pub.clone(),
+    };
+
+    let info = backend.generate(&opts)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    } else {
+        println!("Generated Secure Enclave key: {label}");
+        println!("  Algorithm: {}", info.metadata.algorithm);
+        println!("  Fingerprint: {}", info.fingerprint_sha256);
+        if let Some(ref path) = info.pub_file_path {
+            println!("  Public key written to: {}", path.display());
+        }
+        if print_pub {
+            let pubkey = SshPublicKey::from_sec1_bytes(
+                &info.public_key_bytes,
+                info.metadata.comment.clone(),
+            )?;
+            println!();
+            println!("{}", pubkey.to_openssh_line());
+        }
+    }
+    Ok(())
+}
+
+pub fn list(backend: &dyn KeyBackend, json: bool) -> Result<()> {
+    let keys = backend.list()?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&keys)?);
+        return Ok(());
+    }
+
+    if keys.is_empty() {
+        println!("No sshenc-managed keys found.");
+        return Ok(());
+    }
+
+    for key in &keys {
+        println!("{}", key.metadata.label);
+        println!("  Algorithm:     {}", key.metadata.algorithm);
+        println!(
+            "  Key size:      {} bits",
+            key.metadata.algorithm.key_bits()
+        );
+        println!(
+            "  User presence: {}",
+            if key.metadata.requires_user_presence {
+                "required"
+            } else {
+                "not required"
+            }
+        );
+        println!("  App tag:       {}", key.metadata.app_tag);
+        println!("  SHA256:        {}", key.fingerprint_sha256);
+        println!("  MD5:           {}", key.fingerprint_md5);
+        if let Some(ref path) = key.pub_file_path {
+            println!("  Pub file:      {}", path.display());
+        }
+        println!();
+    }
+    println!("{} key(s) found.", keys.len());
+    Ok(())
+}
+
+pub fn inspect(backend: &dyn KeyBackend, label: &str, json: bool, show_pub: bool) -> Result<()> {
+    let info = backend.get(label)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        return Ok(());
+    }
+
+    println!("Key: {}", info.metadata.label);
+    println!("  Algorithm:       {}", info.metadata.algorithm);
+    println!(
+        "  Key size:        {} bits",
+        info.metadata.algorithm.key_bits()
+    );
+    println!(
+        "  Curve:           {}",
+        info.metadata.algorithm.ssh_curve_id()
+    );
+    println!(
+        "  SSH key type:    {}",
+        info.metadata.algorithm.ssh_key_type()
+    );
+    println!(
+        "  User presence:   {}",
+        if info.metadata.requires_user_presence {
+            "required"
+        } else {
+            "not required"
+        }
+    );
+    println!("  Application tag: {}", info.metadata.app_tag);
+    println!("  SHA256:          {}", info.fingerprint_sha256);
+    println!("  MD5:             {}", info.fingerprint_md5);
+    if let Some(ref path) = info.pub_file_path {
+        println!("  Pub file:        {}", path.display());
+    }
+    if let Some(ref comment) = info.metadata.comment {
+        println!("  Comment:         {comment}");
+    }
+
+    if show_pub {
+        let pubkey =
+            SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
+        println!();
+        println!("{}", pubkey.to_openssh_line());
+    }
+
+    Ok(())
+}
+
+pub fn delete(
+    backend: &dyn KeyBackend,
+    labels: &[String],
+    delete_pub: bool,
+    yes: bool,
+) -> Result<()> {
+    if labels.is_empty() {
+        bail!("no key labels specified");
+    }
+
+    // Verify all keys exist first
+    let mut keys_to_delete = Vec::new();
+    for label in labels {
+        let info = backend.get(label)?;
+        keys_to_delete.push(info);
+    }
+
+    if !yes {
+        print!("Delete {} key(s)? [y/N] ", keys_to_delete.len());
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    for key in &keys_to_delete {
+        let label = key.metadata.label.as_str();
+        backend.delete(label)?;
+        println!("Deleted key: {label}");
+
+        if delete_pub {
+            if let Some(ref path) = key.pub_file_path {
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                    println!("Deleted pub file: {}", path.display());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn export_pub(
+    backend: &dyn KeyBackend,
+    label: &str,
+    output: Option<PathBuf>,
+    authorized_keys: bool,
+    fingerprint_only: bool,
+    json: bool,
+) -> Result<()> {
+    let info = backend.get(label)?;
+
+    if fingerprint_only {
+        if json {
+            let fp = serde_json::json!({
+                "label": label,
+                "sha256": info.fingerprint_sha256,
+                "md5": info.fingerprint_md5,
+            });
+            println!("{}", serde_json::to_string_pretty(&fp)?);
+        } else {
+            println!("{}", info.fingerprint_sha256);
+        }
+        return Ok(());
+    }
+
+    let pubkey =
+        SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
+
+    let line = if authorized_keys {
+        pubkey.to_authorized_keys_line()
+    } else {
+        pubkey.to_openssh_line()
+    };
+
+    if json {
+        let out = serde_json::json!({
+            "label": label,
+            "public_key": line,
+            "fingerprint_sha256": info.fingerprint_sha256,
+            "fingerprint_md5": info.fingerprint_md5,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else if let Some(path) = output {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, format!("{line}\n"))?;
+        println!("Public key written to: {}", path.display());
+    } else {
+        println!("{line}");
+    }
+
+    Ok(())
+}
+
+pub fn agent(
+    socket: Option<PathBuf>,
+    _foreground: bool,
+    debug: bool,
+    labels: Vec<String>,
+) -> Result<()> {
+    let config = Config::load_default()?;
+    let socket_path = socket.unwrap_or(config.socket_path);
+
+    let level = if debug { "debug" } else { "info" };
+
+    // Re-initialize tracing for agent mode
+    // (the main CLI already initialized at warn level, but the agent needs more)
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(level))
+        .try_init();
+
+    let allowed_labels = if labels.is_empty() {
+        config.allowed_labels
+    } else {
+        labels
+    };
+
+    println!("Starting sshenc agent...");
+    println!("SSH_AUTH_SOCK={}", socket_path.display());
+    println!();
+    println!("To use in your shell:");
+    println!("  export SSH_AUTH_SOCK={}", socket_path.display());
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        // Import here to avoid the module path issue
+        let server = sshenc_agent::server::run_agent(socket_path, allowed_labels);
+        server.await
+    })?;
+
+    Ok(())
+}
+
+pub fn config_init() -> Result<()> {
+    let path = Config::init()?;
+    println!("Config file created: {}", path.display());
+    Ok(())
+}
+
+pub fn config_path() -> Result<()> {
+    println!("{}", Config::default_path().display());
+    Ok(())
+}
+
+pub fn config_show() -> Result<()> {
+    let config = Config::load_default()?;
+    println!("{}", toml::to_string_pretty(&config)?);
+    Ok(())
+}
+
+pub fn install() -> Result<()> {
+    let ssh_config_path = dirs::home_dir()
+        .expect("could not determine home directory")
+        .join(".ssh")
+        .join("config");
+
+    let dylib_path = find_pkcs11_dylib()?;
+
+    match sshenc_core::ssh_config::install_block(&ssh_config_path, &dylib_path)? {
+        sshenc_core::ssh_config::InstallResult::Installed => {
+            println!(
+                "Installed sshenc PKCS#11 provider in {}",
+                ssh_config_path.display()
+            );
+            println!("  PKCS11Provider {}", dylib_path.display());
+            println!();
+            println!("SSH will now use sshenc for all connections. No agent needed.");
+        }
+        sshenc_core::ssh_config::InstallResult::AlreadyPresent => {
+            println!("sshenc already configured in {}", ssh_config_path.display());
+        }
+    }
+    Ok(())
+}
+
+/// Find the sshenc PKCS#11 dylib. Search order:
+/// 1. Next to the current executable (same directory)
+/// 2. In the cargo target directory (for development)
+/// 3. Standard library paths
+fn find_pkcs11_dylib() -> Result<PathBuf> {
+    let dylib_name = "libsshenc_pkcs11.dylib";
+
+    // Check next to the current executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(dylib_name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // Check common install paths
+    let common_paths = ["/usr/local/lib", "/opt/homebrew/lib"];
+    for dir in &common_paths {
+        let candidate = PathBuf::from(dir).join(dylib_name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    // Fall back to looking next to the executable (even if it doesn't exist yet —
+    // the user may be about to build/install it)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            return Ok(dir.join(dylib_name));
+        }
+    }
+
+    bail!(
+        "could not find {dylib_name} — build with `cargo build -p sshenc-pkcs11 --release` first"
+    );
+}
+
+pub fn uninstall() -> Result<()> {
+    let ssh_config_path = dirs::home_dir()
+        .expect("could not determine home directory")
+        .join(".ssh")
+        .join("config");
+
+    match sshenc_core::ssh_config::uninstall_block(&ssh_config_path)? {
+        sshenc_core::ssh_config::UninstallResult::Removed => {
+            println!(
+                "Removed sshenc agent configuration from {}",
+                ssh_config_path.display()
+            );
+        }
+        sshenc_core::ssh_config::UninstallResult::NotPresent => {
+            println!(
+                "No sshenc configuration found in {}",
+                ssh_config_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn openssh_print_config(
+    backend: &dyn KeyBackend,
+    label: &str,
+    host: &str,
+    pkcs11: bool,
+) -> Result<()> {
+    let info = backend.get(label)?;
+
+    let pub_path = info
+        .pub_file_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| format!("~/.ssh/{label}.pub"));
+
+    let config = Config::load_default()?;
+
+    if pkcs11 {
+        println!("# sshenc PKCS#11 configuration for {label}");
+        println!("Host {host}");
+        println!("  PKCS11Provider /path/to/libsshenc_pkcs11.dylib");
+        println!("  IdentitiesOnly yes");
+        println!();
+        println!("# Note: Update the PKCS11Provider path to the actual location");
+        println!("# of the sshenc PKCS#11 library after building.");
+    } else {
+        println!("# sshenc agent configuration for {label}");
+        println!("Host {host}");
+        println!("  IdentityAgent {}", config.socket_path.display());
+        println!("  IdentityFile {pub_path}");
+        println!("  IdentitiesOnly yes");
+        println!();
+        println!("# Start the agent first:");
+        println!("#   sshenc agent --socket {}", config.socket_path.display());
+        println!("# Or:");
+        println!("#   export SSH_AUTH_SOCK={}", config.socket_path.display());
+    }
+
+    Ok(())
+}

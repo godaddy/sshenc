@@ -1,0 +1,24 @@
+# ~/.ssh/config snippet for sshenc agent mode
+#
+# Point SSH at the sshenc agent socket instead of the system agent.
+# Make sure sshenc-agent is running:
+#   sshenc agent --socket ~/.sshenc/agent.sock
+# Or:
+#   sshenc-agent --socket ~/.sshenc/agent.sock
+
+# GitHub via sshenc agent
+Host github.com
+    IdentityAgent ~/.sshenc/agent.sock
+    IdentitiesOnly yes
+
+# GitLab via sshenc agent
+Host gitlab.com
+    IdentityAgent ~/.sshenc/agent.sock
+    IdentitiesOnly yes
+
+# Generic host via sshenc agent
+Host myserver.example.com
+    IdentityAgent ~/.sshenc/agent.sock
+    IdentitiesOnly yes
+    # Optionally pin to a specific public key:
+    # IdentityFile ~/.ssh/myserver.pub

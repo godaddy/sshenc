@@ -1,0 +1,13 @@
+[package]
+name = "sshenc-test-support"
+description = "Test helpers, mocks, and fixtures for sshenc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+sshenc-core = { workspace = true }
+sshenc-se = { workspace = true }
+rand = { workspace = true }

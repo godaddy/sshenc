@@ -1,0 +1,15 @@
+[package]
+name = "sshenc-agent-proto"
+description = "SSH agent protocol types and encoding/decoding for sshenc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+sshenc-core = { workspace = true }
+byteorder = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "sshenc-pkcs11"
+description = "PKCS#11 provider for sshenc Secure Enclave SSH keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "sshenc_pkcs11"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sshenc-core = { workspace = true }
+sshenc-se = { workspace = true }
+sshenc-ffi-apple = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ssh-key = { workspace = true }
+signature = { workspace = true }
+dirs = { workspace = true }

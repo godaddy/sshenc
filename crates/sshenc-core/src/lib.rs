@@ -1,0 +1,19 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! Core domain models, SSH public key formatting, and shared types for sshenc.
+//!
+//! This crate contains no platform-specific code and provides the foundational
+//! types used across all other sshenc crates.
+
+pub mod config;
+pub mod error;
+pub mod fingerprint;
+pub mod key;
+pub mod pubkey;
+pub mod ssh_config;
+
+pub use config::Config;
+pub use error::Error;
+pub use key::{KeyInfo, KeyLabel, KeyMetadata};
+pub use pubkey::SshPublicKey;

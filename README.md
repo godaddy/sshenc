@@ -11,7 +11,9 @@ keys. Nothing breaks when you install sshenc.
 
 ## Installation
 
-### Homebrew
+**[Download latest release](https://github.com/jgowdy/sshenc/releases/latest)** — pre-built binaries for macOS and Windows.
+
+### Homebrew (macOS)
 
 ```sh
 brew tap jgowdy/sshenc https://github.com/jgowdy/sshenc

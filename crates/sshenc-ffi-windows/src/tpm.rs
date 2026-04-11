@@ -25,7 +25,6 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use thiserror::Error;
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::NTSTATUS;
 use windows::Win32::Security::Cryptography::*;
 
 /// Key name prefix for sshenc-managed TPM keys.
@@ -368,7 +367,7 @@ pub fn list_keys() -> Result<Vec<String>> {
     let mut enum_state: *mut NCryptKeyName = std::ptr::null_mut();
 
     loop {
-        let status = unsafe {
+        let result = unsafe {
             NCryptEnumKeys(
                 provider.as_prov(),
                 PCWSTR::null(),
@@ -378,11 +377,8 @@ pub fn list_keys() -> Result<Vec<String>> {
             )
         };
 
-        if status == NTSTATUS(0x8009002A_u32 as i32) {
-            // NTE_NO_MORE_ITEMS
-            break;
-        }
-        if status.is_err() {
+        if result.is_err() {
+            // NTE_NO_MORE_ITEMS or any other error ends enumeration
             break;
         }
 

@@ -700,6 +700,7 @@ dependencies = [
 name = "sshenc-ffi-windows"
 version = "0.2.8"
 dependencies = [
+ "base64",
  "dirs",
  "serde",
  "serde_json",

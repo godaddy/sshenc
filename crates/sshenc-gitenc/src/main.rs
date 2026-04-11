@@ -77,10 +77,31 @@ fn configure_repo(label: Option<&str>) {
         format!("{home}/.ssh/{effective_label}.pub")
     };
 
-    // Set SSH command for push/pull
+    // Find sshenc binary (same directory as gitenc, or in PATH)
+    let sshenc_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("sshenc")))
+        .filter(|p| p.exists())
+        .or_else(|| {
+            std::process::Command::new("which")
+                .arg("sshenc")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    String::from_utf8(o.stdout)
+                        .ok()
+                        .map(|s| std::path::PathBuf::from(s.trim()))
+                })
+        })
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "sshenc".to_string());
+
+    // Set SSH command for push/pull and commit signing
     let configs: &[(&str, &str)] = &[
         ("core.sshCommand", &ssh_command),
         ("gpg.format", "ssh"),
+        ("gpg.ssh.program", &sshenc_bin),
         ("user.signingkey", &signing_key),
         ("commit.gpgsign", "true"),
     ];

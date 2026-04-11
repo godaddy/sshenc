@@ -220,6 +220,13 @@ enum OpensshAction {
 }
 
 fn main() -> Result<()> {
+    // Intercept ssh-keygen-compatible signing mode before clap parsing.
+    // Git calls: sshenc -Y sign -n git -f <pubkey_path> <data_file>
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.len() >= 2 && raw_args[1] == "-Y" {
+        return commands::ssh_sign(&raw_args[1..]);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

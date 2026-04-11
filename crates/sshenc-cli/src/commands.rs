@@ -688,3 +688,144 @@ pub fn promote_to_default(label: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// Handle ssh-keygen-compatible signing mode.
+/// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
+/// We sign via the agent and write an SSH signature to <data_file>.sig.
+pub fn ssh_sign(args: &[String]) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    use sshenc_ffi_apple::se;
+    #[cfg(target_os = "windows")]
+    use sshenc_ffi_windows::tpm as se;
+
+    // Parse: -Y sign -n <namespace> -f <key_file> <data_file>
+    let mut namespace = "git";
+    let mut key_file = None;
+    let mut data_file = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-Y" => {
+                // skip "sign" after -Y
+                i += 1;
+            }
+            "-n" => {
+                i += 1;
+                if i < args.len() {
+                    namespace = Box::leak(args[i].clone().into_boxed_str());
+                }
+            }
+            "-f" => {
+                i += 1;
+                if i < args.len() {
+                    key_file = Some(args[i].clone());
+                }
+            }
+            other if !other.starts_with('-') && key_file.is_some() => {
+                data_file = Some(other.to_string());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let key_file = key_file.ok_or_else(|| anyhow::anyhow!("missing -f <key_file>"))?;
+    let data_file = data_file.ok_or_else(|| anyhow::anyhow!("missing data file argument"))?;
+
+    // Determine which label to use from the key file path
+    let key_path = std::path::Path::new(&key_file);
+    let label = if key_path.file_name().map(|f| f.to_string_lossy()) == Some("id_ecdsa.pub".into())
+    {
+        "default".to_string()
+    } else {
+        key_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string())
+    };
+
+    // Also check if this is an sshenc .ssh.pub file
+    let label = if label.ends_with(".ssh") {
+        label.strip_suffix(".ssh").unwrap_or(&label).to_string()
+    } else {
+        label
+    };
+
+    // Read data to sign
+    let data = std::fs::read(&data_file)?;
+
+    // Sign via the SE backend
+    let data_rep = se::load_key(&label)
+        .map_err(|_| anyhow::anyhow!("key '{label}' not found — is the label correct?"))?;
+    let der_sig = se::sign(&data_rep, &data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
+
+    // Get the public key for the signature header
+    let pub_bytes = se::load_pub_key(&label)?;
+    let ssh_pubkey = sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
+
+    // Build the SSH signature in the format ssh-keygen produces:
+    // MAGIC_PREAMBLE || uint32(version) || string(publickey) || string(namespace)
+    // || string(reserved) || string(hash_algorithm) || string(signature)
+    let sig_blob = build_ssh_signature(&ssh_pubkey, namespace, &der_sig)?;
+
+    // Write PEM-encoded signature to <data_file>.sig
+    let sig_path = format!("{data_file}.sig");
+    let pem = format!(
+        "-----BEGIN SSH SIGNATURE-----\n{}\n-----END SSH SIGNATURE-----\n",
+        base64_wrap(&sig_blob, 70)
+    );
+    std::fs::write(&sig_path, &pem)?;
+
+    Ok(())
+}
+
+/// Build an SSH signature blob per the SSH signature format spec.
+fn build_ssh_signature(
+    pubkey: &sshenc_core::pubkey::SshPublicKey,
+    namespace: &str,
+    der_sig: &[u8],
+) -> Result<Vec<u8>> {
+    use sshenc_core::pubkey::write_ssh_string;
+
+    let mut buf = Vec::new();
+
+    // Magic preamble
+    buf.extend_from_slice(b"SSHSIG");
+
+    // Version (uint32)
+    buf.extend_from_slice(&1u32.to_be_bytes());
+
+    // Public key blob
+    let pubkey_blob = pubkey.wire_blob();
+    write_ssh_string(&mut buf, &pubkey_blob);
+
+    // Namespace
+    write_ssh_string(&mut buf, namespace.as_bytes());
+
+    // Reserved (empty string)
+    write_ssh_string(&mut buf, b"");
+
+    // Hash algorithm
+    write_ssh_string(&mut buf, b"sha256");
+
+    // Signature: string(algo) || string(sig_data)
+    // Convert DER to SSH signature format
+    let ssh_sig = sshenc_agent_proto::signature::der_to_ssh_signature(der_sig)?;
+    write_ssh_string(&mut buf, &ssh_sig);
+
+    Ok(buf)
+}
+
+/// Base64-encode with line wrapping.
+fn base64_wrap(data: &[u8], width: usize) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    let encoded = STANDARD.encode(data);
+    encoded
+        .as_bytes()
+        .chunks(width)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+}

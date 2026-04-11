@@ -650,12 +650,14 @@ name = "sshenc-cli"
 version = "0.2.8"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "clap_complete",
  "dirs",
  "serde",
  "serde_json",
  "sshenc-agent",
+ "sshenc-agent-proto",
  "sshenc-core",
  "sshenc-ffi-apple",
  "sshenc-ffi-windows",

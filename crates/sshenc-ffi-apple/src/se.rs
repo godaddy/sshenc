@@ -165,11 +165,13 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8]) -> Result<()> {
     let ssh_line = format_ssh_pub_key(pub_key, label);
     std::fs::write(&ssh_pub_path, format!("{ssh_line}\n"))?;
 
-    // Restrictive permissions on the key reference
+    // Restrictive permissions on handle and ssh.pub files.
+    // SSH requires IdentityFile targets to be 0600 even for public keys.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&ssh_pub_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
     Ok(())
@@ -225,6 +227,11 @@ pub fn save_ssh_pub_key(label: &str, pub_key: &[u8]) -> Result<()> {
     let ssh_pub_path = dir.join(format!("{label}.ssh.pub"));
     let ssh_line = format_ssh_pub_key(pub_key, label);
     std::fs::write(&ssh_pub_path, format!("{ssh_line}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ssh_pub_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

@@ -73,17 +73,20 @@ fn main() -> Result<()> {
 
         // Check for existing files before overwriting (like ssh-keygen)
         if let Some(ref path) = write_pub {
-            if path.exists() {
-                let private_path = path.with_extension("");
-                let has_private = private_path.exists() && private_path != *path;
-                if has_private {
-                    eprintln!(
-                        "{} already exists (with matching private key).",
-                        path.display()
-                    );
-                } else {
-                    eprintln!("{} already exists.", path.display());
-                }
+            let private_path = path.with_extension("");
+            let has_private = private_path.exists() && private_path != *path;
+
+            if has_private {
+                use std::path::PathBuf;
+                let priv_bak = private_path.with_extension("bak");
+                let pub_bak = PathBuf::from(format!("{}.bak", path.display()));
+                eprintln!("Backing up existing key pair:");
+                eprintln!("  {} → {}", private_path.display(), priv_bak.display());
+                eprintln!("  {} → {}", path.display(), pub_bak.display());
+                std::fs::rename(&private_path, &priv_bak)?;
+                std::fs::rename(path, &pub_bak)?;
+            } else if path.exists() {
+                eprintln!("{} already exists.", path.display());
                 eprint!("Overwrite (y/n)? ");
                 use std::io::Write;
                 std::io::stderr().flush().ok();

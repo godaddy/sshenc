@@ -37,7 +37,7 @@ fn agent_is_reachable() -> bool {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&default_pipe_name())
+        .open(default_pipe_name())
         .is_ok()
 }
 

@@ -158,17 +158,23 @@ fn load_key(path: &Path) -> anyhow::Result<LegacyKey> {
 }
 
 /// Prompt for a passphrase on the terminal with echo disabled.
+/// Returns None if no terminal is available (e.g., when started by the PKCS#11 dylib).
 fn prompt_passphrase(key_path: &Path) -> anyhow::Result<String> {
+    // Only prompt if we have a controlling terminal.
+    // When the agent is started by the PKCS#11 dylib, there's no terminal.
+    let has_tty = unsafe { libc::isatty(0) == 1 };
+    if !has_tty {
+        anyhow::bail!("no terminal available for passphrase prompt");
+    }
+
     let filename = key_path.file_name().unwrap_or_default().to_string_lossy();
 
-    // Use stty to disable echo, read password, re-enable echo.
-    // This works even when stdout is redirected since we open /dev/tty directly.
     eprint!("Enter passphrase for {filename}: ");
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg("stty -echo 2>/dev/null; read -r pw < /dev/tty; stty echo 2>/dev/null; echo \"$pw\"")
         .output()?;
-    eprintln!(); // newline after hidden input
+    eprintln!();
 
     if !output.status.success() {
         anyhow::bail!("passphrase prompt failed");

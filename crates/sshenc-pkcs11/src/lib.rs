@@ -622,9 +622,16 @@ pub unsafe extern "C" fn C_Sign(
         Err(_) => return CKR_GENERAL_ERROR,
     };
 
-    // Agent returns SSH signature blob (string(algo) + string(raw_sig)).
-    // PKCS#11 expects just the raw signature bytes.
-    let raw_sig = extract_raw_signature(&sig_blob).unwrap_or(sig_blob);
+    // Agent returns SSH signature blob: string(algo) + string(inner).
+    // For ECDSA, inner = mpint(r) + mpint(s).
+    // PKCS#11 expects raw r || s (each zero-padded to 32 bytes for P-256).
+    let raw_sig = match extract_ecdsa_rs(&sig_blob) {
+        Some(rs) => rs,
+        None => {
+            // Fallback: try extracting raw bytes for non-ECDSA
+            extract_raw_signature(&sig_blob).unwrap_or(sig_blob)
+        }
+    };
 
     if signature.is_null() {
         *signature_len = raw_sig.len() as u64;
@@ -954,4 +961,48 @@ fn read_ssh_string(buf: &[u8]) -> Option<(&[u8], &[u8])> {
         return None;
     }
     Some((&buf[..len], &buf[len..]))
+}
+
+/// Extract ECDSA r and s from an SSH signature blob and return raw r || s.
+/// SSH ECDSA sig: string(algo) + string(mpint(r) + mpint(s))
+/// PKCS#11 wants: r || s, each zero-padded to 32 bytes (for P-256).
+fn extract_ecdsa_rs(blob: &[u8]) -> Option<Vec<u8>> {
+    let (algo, rest) = read_ssh_string(blob)?;
+    let algo_str = std::str::from_utf8(algo).ok()?;
+    if !algo_str.contains("ecdsa") {
+        return None;
+    }
+    let (inner, _) = read_ssh_string(rest)?;
+
+    // inner = mpint(r) + mpint(s)
+    let (r_mpint, rest) = read_ssh_string(inner)?;
+    let (s_mpint, _) = read_ssh_string(rest)?;
+
+    // Strip leading zeros from mpints and zero-pad to 32 bytes
+    let r = normalize_integer(r_mpint, 32);
+    let s = normalize_integer(s_mpint, 32);
+
+    let mut result = Vec::with_capacity(64);
+    result.extend_from_slice(&r);
+    result.extend_from_slice(&s);
+    Some(result)
+}
+
+/// Normalize a big-endian integer to exactly `size` bytes:
+/// strip leading zeros, then left-pad with zeros to `size`.
+fn normalize_integer(data: &[u8], size: usize) -> Vec<u8> {
+    // Strip leading zeros
+    let stripped = data
+        .iter()
+        .position(|&b| b != 0)
+        .map(|i| &data[i..])
+        .unwrap_or(&[0]);
+
+    if stripped.len() >= size {
+        stripped[stripped.len() - size..].to_vec()
+    } else {
+        let mut padded = vec![0u8; size - stripped.len()];
+        padded.extend_from_slice(stripped);
+        padded
+    }
 }

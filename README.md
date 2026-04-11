@@ -3,26 +3,11 @@
 macOS Secure Enclave-backed SSH key management.
 
 `sshenc` generates SSH keys inside the macOS Secure Enclave and serves them
-via a standard SSH agent. Private key material never leaves the hardware.
-Your existing `~/.ssh` keys continue to work — SSH tries them as a fallback
-after the Secure Enclave keys.
+via a standard SSH agent. Private key material never leaves the hardware —
+it can't be exported, copied, or stolen from disk.
 
-## How it works
-
-`sshenc install` adds an `IdentityAgent` entry to `~/.ssh/config` that points
-SSH at the sshenc agent. The agent serves Secure Enclave keys for authentication.
-Your existing `~/.ssh` keys are unaffected — SSH handles them natively as
-a fallback if no SE key matches.
-
-Keys are stored in `~/.sshenc/keys/` as CryptoKit data representations — opaque
-handles that reference the Secure Enclave key. The private key material is
-inside the SE hardware and cannot be extracted, backed up, or cloned.
-
-No code signing certificates or Apple Developer accounts are required.
-Homebrew downloads pre-built binaries that are compiled and linker-signed on
-GitHub Actions. When building from source, `cargo build` produces binaries
-with an ad-hoc linker signature that macOS accepts for CryptoKit Secure Enclave
-access — no manual signing step needed.
+Your existing SSH keys in `~/.ssh` continue to work alongside Secure Enclave
+keys. Nothing breaks when you install sshenc.
 
 ## Installation
 
@@ -33,12 +18,13 @@ brew tap jgowdy/sshenc https://github.com/jgowdy/sshenc
 brew install sshenc
 ```
 
-Pre-built binaries for Apple Silicon and Intel. No Rust toolchain needed.
+Pre-built binaries for Apple Silicon and Intel. No Rust toolchain or Apple
+Developer account needed.
 
 ### From source
 
-Requires Rust 1.75+, Xcode command line tools, and macOS on Apple Silicon or
-T2 Mac.
+Requires Rust 1.75+, Xcode command line tools, and macOS (Apple Silicon or
+T2 Mac).
 
 ```sh
 git clone https://github.com/jgowdy/sshenc.git
@@ -46,111 +32,212 @@ cd sshenc
 make install
 ```
 
-Installs to `/usr/local`. Override with `make install PREFIX=/opt/sshenc`.
-
-The build compiles a small Swift static library (CryptoKit bridge) and links
-it into the Rust binaries. The resulting binaries work immediately — macOS
-trusts the linker-signed ad-hoc signature for CryptoKit Secure Enclave access.
+No code signing is required. `cargo build` produces linker-signed binaries
+that macOS trusts for CryptoKit Secure Enclave access out of the box.
 
 ## Quick start
 
-### 1. Set up SSH
+### 1. Set up
 
 ```sh
 sshenc install
 ```
 
-Configures SSH to use the sshenc agent and starts it as a background daemon.
-Your existing SSH keys continue to work as fallback.
+This configures SSH to use the sshenc agent and starts it in the background.
+If the agent ever stops, it restarts automatically the next time you use SSH.
 
-### 2. Generate a Secure Enclave key
+### 2. Create a key
 
 ```sh
 sshenc keygen --label github
 ```
 
-Creates a hardware-bound P-256 key and writes the public key to
-`~/.ssh/github.pub`. The comment defaults to `user@hostname`.
+This creates a hardware-bound P-256 key in the Secure Enclave. The public
+key is written to `~/.ssh/github.pub` automatically.
 
-### 3. Add to GitHub / GitLab
+### 3. Add to GitHub
 
 ```sh
 sshenc export-pub github | pbcopy
 ```
 
-Paste into your account's SSH key settings.
+Paste into GitHub → Settings → SSH keys → New SSH key.
 
-### 4. Test
+### 4. Done
 
 ```sh
 ssh -T git@github.com
+git clone git@github.com:you/repo.git
 ```
+
+Everything works. SSH, git, scp, sftp — anything that reads `~/.ssh/config`
+uses the sshenc agent automatically.
+
+## Common use cases
+
+### Single key (most people)
+
+If you only need one Secure Enclave key, the quick start above is all you
+need. After `sshenc install`, SSH picks up your SE key automatically for
+all connections. Your old `~/.ssh` keys still work as fallback.
+
+```sh
+ssh user@server              # uses SE key, falls back to ~/.ssh keys
+git push                     # same — just works
+scp file.txt user@server:    # same
+```
+
+### Multiple keys (multiple GitHub accounts, work vs personal)
+
+If you have separate GitHub accounts (or different keys for different
+servers), create a key for each:
+
+```sh
+sshenc keygen --label github-personal
+sshenc keygen --label github-work
+sshenc keygen --label servers
+```
+
+Add each public key to the appropriate account (`sshenc export-pub NAME | pbcopy`).
+
+#### Using git
+
+Use `gitenc` to tell git which key to use:
+
+```sh
+# Clone with a specific identity
+gitenc --label github-work clone git@github.com:mycompany/repo.git
+gitenc --label github-personal clone git@github.com:me/my-repo.git
+
+# Day-to-day git — set the identity per-repo once
+cd mycompany-repo
+git config core.sshCommand "sshenc ssh --label github-work --"
+
+cd my-personal-repo
+git config core.sshCommand "sshenc ssh --label github-personal --"
+
+# After that, regular git commands use the right key automatically
+git pull
+git push
+```
+
+Without `--label`, `gitenc` uses whatever key the agent offers first:
+
+```sh
+gitenc pull    # default key, same as regular git
+```
+
+#### Using ssh directly
+
+```sh
+# Specific key
+sshenc ssh --label servers user@myserver.com
+
+# Default (agent picks)
+ssh user@myserver.com
+```
+
+#### Using scp / sftp
+
+These read `~/.ssh/config` automatically, so they just work:
+
+```sh
+scp file.txt user@server:          # uses sshenc agent
+sftp user@server                   # uses sshenc agent
+```
+
+To use a specific key with scp/sftp, use the SSH config approach:
+
+```sh
+sshenc openssh print-config --label servers --host myserver.com
+```
+
+This prints a config block you can add to `~/.ssh/config`:
+
+```
+Host myserver.com
+  IdentityAgent ~/.sshenc/agent.sock
+  IdentityFile ~/.ssh/servers.pub
+  IdentitiesOnly yes
+```
+
+## How it works
+
+sshenc runs a background SSH agent that serves your Secure Enclave keys.
+`sshenc install` adds two lines to `~/.ssh/config`:
+
+```
+Host *
+    IdentityAgent ~/.sshenc/agent.sock
+    PKCS11Provider /opt/homebrew/lib/libsshenc_pkcs11.dylib
+```
+
+`IdentityAgent` tells SSH to talk to the sshenc agent for key operations.
+`PKCS11Provider` is a lightweight launcher — if the agent isn't running,
+SSH loads this library which starts the agent automatically.
+
+Keys are stored in `~/.sshenc/keys/` as CryptoKit data representations.
+These are opaque handles that reference the Secure Enclave key — the actual
+private key material is inside the SE hardware and can't be read.
+
+```
+~/.sshenc/keys/
+  github.key        # SE key handle (opaque, device-bound)
+  github.pub        # cached public key bytes
+  github.ssh.pub    # SSH-formatted public key (for identity selection)
+```
+
+No Apple Developer certificate or code signing is required. The project
+uses CryptoKit (via a Swift static library), which works with the standard
+ad-hoc linker signature that `cargo build` produces.
 
 ## Commands
 
 ### Key management
 
 ```sh
-sshenc keygen --label NAME [-C COMMENT] [--write-pub PATH] [--no-pub-file] [--require-user-presence]
-sshenc list [--json]
-sshenc inspect NAME [--json] [--show-pub]
-sshenc export-pub NAME [-o FILE] [--fingerprint] [--json]
-sshenc delete NAME [--delete-pub] [-y]
+sshenc keygen --label NAME      # create a new SE key (pub key → ~/.ssh/NAME.pub)
+sshenc list                     # list all SE keys
+sshenc list --json              # machine-readable output
+sshenc inspect NAME             # detailed info for one key
+sshenc export-pub NAME          # print public key to stdout
+sshenc export-pub NAME | pbcopy # copy to clipboard
+sshenc delete NAME              # delete a key
+sshenc delete NAME --delete-pub # also remove the .pub files
 ```
 
-`--require-user-presence` makes the key require Touch ID or password for each
-signing operation.
+Options for `keygen`:
+- `-C "comment"` — custom comment (default: user@hostname)
+- `--write-pub PATH` — write public key to a custom path
+- `--no-pub-file` — don't write a .pub file at all
+- `--require-user-presence` — require Touch ID / password for every sign
 
-### SSH integration
+### SSH and git wrappers
 
 ```sh
-sshenc install              # configure SSH + start agent daemon
-sshenc uninstall            # revert SSH config + stop agent
+sshenc ssh --label NAME [ssh args...]    # ssh with a specific SE key
+sshenc ssh [ssh args...]                 # ssh with default agent keys
+gitenc --label NAME [git args...]        # git with a specific SE key
+gitenc [git args...]                     # git with default agent keys
 ```
 
-### Key-specific SSH sessions
-
-Use a specific Secure Enclave key for a single SSH connection:
+### Setup
 
 ```sh
-sshenc ssh --label jgowdy-godaddy -T git@github.com
+sshenc install       # configure SSH + start agent
+sshenc uninstall     # revert SSH config
 ```
 
-Works with `GIT_SSH_COMMAND` for per-repo identity selection:
+### Agent
 
 ```sh
-GIT_SSH_COMMAND="sshenc ssh --label jgowdy-godaddy --" git push
+sshenc agent                  # start as daemon (default)
+sshenc agent --foreground     # stay in terminal
+sshenc agent --debug          # verbose logging
 ```
 
-Or set it permanently on a repo:
-
-```sh
-git config core.sshCommand "sshenc ssh --label jgowdy-godaddy --"
-```
-
-### SSH agent
-
-The agent runs as a background daemon and is started automatically by
-`sshenc install`. You can also run it manually:
-
-```sh
-sshenc agent                            # daemonize (default)
-sshenc agent --foreground               # stay in terminal
-sshenc agent --socket /tmp/my.sock      # custom socket path
-sshenc agent --labels key1,key2         # only expose specific keys
-sshenc agent --debug                    # verbose logging
-```
-
-The agent serves only Secure Enclave keys. Legacy `~/.ssh` keys are handled
-by OpenSSH directly and don't go through the agent.
-
-### Per-host config snippets
-
-```sh
-sshenc openssh print-config --label github --host github.com
-```
-
-Generates an SSH config block for a specific host/key combination.
+The agent starts automatically via `sshenc install`. You rarely need to
+run it manually.
 
 ### Shell completions
 
@@ -170,108 +257,40 @@ sshenc config show    # print current config
 
 Config file: `~/Library/Application Support/sshenc/config.toml`
 
-## Multiple GitHub accounts
-
-If you have multiple GitHub accounts (e.g., personal and work), create a key
-for each:
-
-```sh
-sshenc keygen --label github-personal
-sshenc keygen --label github-work
-```
-
-Add each public key to the corresponding GitHub account. Then use `sshenc ssh`
-to select which identity to use:
-
-```sh
-# Personal repos
-GIT_SSH_COMMAND="sshenc ssh --label github-personal --" git clone git@github.com:you/personal-repo.git
-
-# Work repos
-GIT_SSH_COMMAND="sshenc ssh --label github-work --" git clone git@github.com:org/work-repo.git
-```
-
-Set it per-repo so you don't have to think about it:
-
-```sh
-cd work-repo
-git config core.sshCommand "sshenc ssh --label github-work --"
-```
-
-## How keys are stored
-
-Secure Enclave keys are stored in `~/.sshenc/keys/`:
-
-```
-~/.sshenc/keys/
-  github-personal.key      # CryptoKit data representation (SE key handle)
-  github-personal.pub      # raw EC point bytes (cached)
-  github-personal.ssh.pub  # SSH-formatted public key (for IdentityFile)
-```
-
-The `.key` file is an opaque handle — it references the SE key but contains
-no secret material. Copying it to another device won't work (device-bound).
-The directory is restricted to owner-only permissions (0700), and `.key` files
-are 0600.
-
 ## Security model
 
 - Private keys are generated inside and never leave the Secure Enclave
-- Keys are ECDSA P-256 (the only curve the Secure Enclave supports)
+- Keys are ECDSA P-256 — the only curve the Secure Enclave supports
 - Keys are device-bound and non-exportable — cannot be backed up or cloned
-- Optional per-key user-presence requirement (Touch ID / password) for signing
-- Agent socket at `~/.sshenc/agent.sock` restricted to owner-only (0600)
+- Optional per-key Touch ID / password requirement for each signing operation
+- Agent socket restricted to owner-only permissions (0600)
 - Key files in `~/.sshenc/keys/` restricted to owner-only (0700/0600)
-- No Keychain entitlements required — uses CryptoKit which works with
-  standard linker-signed binaries
+- No Keychain entitlements required — uses CryptoKit, not Security.framework
 
-See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed threat analysis.
+See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 
 ## Limitations
 
-- **macOS only.** Requires Apple Silicon or T2 Mac (Secure Enclave hardware).
-- **P-256 only.** Ed25519 and RSA keys cannot be created in the Secure Enclave.
-  Existing Ed25519/RSA keys from `~/.ssh/` still work — SSH handles them
-  natively as a fallback.
-- **Non-exportable.** Secure Enclave keys cannot be backed up, migrated, or
-  shared between devices. Losing the device means losing those keys.
-- **Agent required.** The sshenc agent must be running for SE key authentication.
-  `sshenc install` starts it automatically and it persists across SSH sessions.
-
-## Architecture
-
-The project uses CryptoKit (via a Swift static library) for Secure Enclave
-operations, avoiding the keychain-access-groups entitlement that
-Security.framework requires. This means no Apple Developer certificate is
-needed — standard `cargo build` output works.
-
-| Crate | Purpose |
-|---|---|
-| `sshenc-core` | Domain models, SSH public key encoding, fingerprints, config |
-| `sshenc-se` | Secure Enclave backend (KeyBackend trait + CryptoKit implementation) |
-| `sshenc-ffi-apple` | Swift/CryptoKit bridge: key generation, signing, persistence |
-| `sshenc-agent-proto` | SSH agent protocol types and wire encoding |
-| `sshenc-agent` | SSH agent daemon serving Secure Enclave keys |
-| `sshenc-cli` | Main `sshenc` binary with all subcommands |
-| `sshenc-keygen-cli` | Standalone `sshenc-keygen` binary |
-| `sshenc-pkcs11` | PKCS#11 provider (key discovery; signing not supported due to CryptoKit hashing) |
-| `sshenc-test-support` | Mock key backend for testing without hardware |
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
+- **macOS only** — requires Apple Silicon or T2 Mac (Secure Enclave)
+- **P-256 only** — Ed25519 and RSA can't be created in the SE, but existing
+  keys in `~/.ssh` still work as SSH handles them natively
+- **Non-exportable** — losing the device means losing the SE keys
+- **Agent required** — the agent must be running for SE key auth; it starts
+  automatically via `sshenc install` and auto-restarts if killed
 
 ## Development
 
 ```sh
-cargo build --workspace            # build everything (includes Swift bridge)
-cargo test --workspace             # run 93 tests
+cargo build --workspace
+cargo test --workspace             # 157 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-make install                       # build release + install
 ```
 
 Requires Xcode command line tools (for `swiftc`).
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT.md](DEVELOPMENT.md),
+and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

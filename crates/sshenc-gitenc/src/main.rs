@@ -45,10 +45,7 @@ fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
 
 fn configure_repo(label: Option<&str>) {
     let effective_label = label.unwrap_or("default");
-    let ssh_command = match label {
-        Some(l) => format!("sshenc ssh --label {} --", l),
-        None => "sshenc ssh --".to_string(),
-    };
+    let ssh_command = format!("sshenc ssh --label {} --", effective_label);
 
     // Determine the signing key path
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
@@ -84,18 +81,9 @@ fn configure_repo(label: Option<&str>) {
         }
     }
 
-    match label {
-        Some(l) => {
-            println!("Configured this repo to use sshenc key: {l}");
-            println!("  SSH auth:       sshenc ssh --label {l}");
-            println!("  Commit signing: {signing_key}");
-        }
-        None => {
-            println!("Configured this repo to use sshenc (default key)");
-            println!("  SSH auth:       sshenc ssh");
-            println!("  Commit signing: {signing_key}");
-        }
-    }
+    println!("Configured this repo to use sshenc key: {effective_label}");
+    println!("  SSH auth:       sshenc ssh --label {effective_label}");
+    println!("  Commit signing: {signing_key}");
 }
 
 enum ParsedArgs {

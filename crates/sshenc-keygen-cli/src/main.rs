@@ -21,8 +21,8 @@ use std::path::PathBuf;
     version
 )]
 struct Cli {
-    /// Label for the key (alphanumeric, hyphens, underscores; max 64 chars).
-    #[arg(long, short = 'l')]
+    /// Label for the key [default: "default"].
+    #[arg(long, short = 'l', default_value = "default")]
     label: String,
 
     /// Comment for the SSH public key line [default: user@hostname].

@@ -28,8 +28,8 @@ struct Cli {
 enum Commands {
     /// Generate a new Secure Enclave-backed SSH key.
     Keygen {
-        /// Label for the key (alphanumeric, hyphens, underscores).
-        #[arg(long, short = 'l')]
+        /// Label for the key [default: "default"].
+        #[arg(long, short = 'l', default_value = "default")]
         label: String,
 
         /// Comment for the SSH public key line [default: user@hostname].
@@ -71,7 +71,8 @@ enum Commands {
 
     /// Show detailed information for a key.
     Inspect {
-        /// Key label to inspect.
+        /// Key label to inspect [default: "default"].
+        #[arg(default_value = "default")]
         label: String,
 
         /// Output in JSON format.
@@ -99,7 +100,8 @@ enum Commands {
 
     /// Export the public key in OpenSSH format.
     ExportPub {
-        /// Key label to export.
+        /// Key label to export [default: "default"].
+        #[arg(default_value = "default")]
         label: String,
 
         /// Write to file instead of stdout.

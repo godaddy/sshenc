@@ -49,14 +49,14 @@ If the agent ever stops, it restarts automatically the next time you use SSH.
 ### 2. Create a key
 
 ```sh
-sshenc keygen --label default
+sshenc keygen
 ```
 
-This creates a hardware-bound P-256 key in the Secure Enclave. The `default`
-label is special — it writes the public key to `~/.ssh/id_ecdsa.pub` (the
-standard OpenSSH name for ECDSA keys) and the agent presents it first. This
-means `ssh`, `ssh-copy-id`, and other tools find it automatically without
-any `-i` flag.
+This creates a hardware-bound P-256 key in the Secure Enclave. When no
+label is specified, it defaults to `default` — which writes the public key
+to `~/.ssh/id_ecdsa.pub` (the standard OpenSSH name for ECDSA keys) and
+the agent presents it first. This means `ssh`, `ssh-copy-id`, and other
+tools find it automatically without any flags.
 
 For additional keys (e.g., separate GitHub accounts), use named labels:
 
@@ -67,7 +67,7 @@ sshenc keygen --label github-work
 ### 3. Add to GitHub
 
 ```sh
-sshenc export-pub default | pbcopy
+sshenc export-pub | pbcopy
 ```
 
 Paste into GitHub → Settings → SSH keys → New SSH key.
@@ -224,13 +224,16 @@ ad-hoc linker signature that `cargo build` produces.
 ### Key management
 
 ```sh
-sshenc keygen --label NAME      # create a new SE key (pub key → ~/.ssh/NAME.pub)
+sshenc keygen                   # create SE key (label defaults to "default")
+sshenc keygen --label NAME      # create SE key with a specific label
 sshenc list                     # list all SE keys
 sshenc list --json              # machine-readable output
-sshenc inspect NAME             # detailed info for one key
-sshenc export-pub NAME          # print public key to stdout
-sshenc export-pub NAME | pbcopy # copy to clipboard
-sshenc delete NAME              # delete a key
+sshenc inspect                  # detailed info for default key
+sshenc inspect NAME             # detailed info for a named key
+sshenc export-pub               # print default public key to stdout
+sshenc export-pub | pbcopy      # copy to clipboard
+sshenc export-pub NAME          # export a named key
+sshenc delete NAME              # delete a key (label required — no accidental deletes)
 sshenc delete NAME --delete-pub # also remove the .pub files
 ```
 

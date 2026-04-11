@@ -70,10 +70,22 @@ pub fn install_block(
         return Ok(InstallResult::AlreadyPresent);
     }
 
-    let socket_display = socket_path.display();
-    let mut lines = format!("{BEGIN_MARKER}\nHost *\n    IdentityAgent {socket_display}\n");
+    // Quote paths in case they contain spaces
+    let socket_str = socket_path.display().to_string();
+    let socket_quoted = if socket_str.contains(' ') {
+        format!("\"{socket_str}\"")
+    } else {
+        socket_str
+    };
+    let mut lines = format!("{BEGIN_MARKER}\nHost *\n    IdentityAgent {socket_quoted}\n");
     if let Some(dylib) = dylib_path {
-        lines.push_str(&format!("    PKCS11Provider {}\n", dylib.display()));
+        let dylib_str = dylib.display().to_string();
+        let dylib_quoted = if dylib_str.contains(' ') {
+            format!("\"{dylib_str}\"")
+        } else {
+            dylib_str
+        };
+        lines.push_str(&format!("    PKCS11Provider {dylib_quoted}\n"));
     }
     lines.push_str(&format!("{END_MARKER}\n"));
     let block = lines;

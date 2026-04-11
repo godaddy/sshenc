@@ -29,6 +29,8 @@ jobs:
           version="${GITHUB_REF#refs/tags/v}"
           echo "Setting version to ${version}"
           sed -i '' "s/^version = \".*\"/version = \"${version}\"/" Cargo.toml
+          # Verify the version was set correctly
+          grep -q "version = \"${version}\"" Cargo.toml || { echo "ERROR: version not set in Cargo.toml"; exit 1; }
 
       - name: Build release
         run: cargo build --workspace --release --target ${{ matrix.target }}

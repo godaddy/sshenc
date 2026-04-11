@@ -34,7 +34,7 @@ pub fn ensure_agent_running() -> Result<(), String> {
         std::fs::create_dir_all(parent).ok();
     }
 
-    std::process::Command::new(&agent_bin)
+    let mut child = std::process::Command::new(&agent_bin)
         .arg("--socket")
         .arg(&socket_path)
         .stdin(std::process::Stdio::null())
@@ -43,15 +43,19 @@ pub fn ensure_agent_running() -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("failed to start agent ({agent_bin:?}): {e}"))?;
 
-    // Wait for it to be ready
+    // Wait for it to be ready, checking for early exit (crash)
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(100));
         if UnixStream::connect(&socket_path).is_ok() {
             return Ok(());
         }
+        // Check if the agent exited immediately (e.g., crashed)
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("agent exited immediately ({})", status));
+        }
     }
 
-    Err("agent failed to start".into())
+    Err("agent failed to start (timeout)".into())
 }
 
 fn find_agent_binary() -> Result<PathBuf, String> {

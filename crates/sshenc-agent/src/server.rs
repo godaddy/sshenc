@@ -11,6 +11,7 @@ use sshenc_agent_proto::message::{self, AgentRequest, AgentResponse, Identity};
 use sshenc_agent_proto::signature;
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_se::KeyBackend;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -54,7 +55,7 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
     #[cfg(not(target_os = "macos"))]
     compile_error!("sshenc-agent requires macOS");
 
-    let allowed = Arc::new(allowed_labels);
+    let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
 
     loop {
         tokio::select! {
@@ -83,7 +84,7 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
 async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     backend: &dyn KeyBackend,
-    allowed_labels: &[String],
+    allowed_labels: &HashSet<String>,
 ) -> Result<()> {
     tracing::debug!("new agent connection");
 
@@ -121,7 +122,7 @@ async fn handle_connection(
 fn handle_request(
     request: AgentRequest,
     backend: &dyn KeyBackend,
-    allowed_labels: &[String],
+    allowed_labels: &HashSet<String>,
 ) -> Result<AgentResponse> {
     match request {
         AgentRequest::RequestIdentities => {
@@ -131,11 +132,7 @@ fn handle_request(
             let mut identities: Vec<(bool, Identity)> = keys
                 .into_iter()
                 .filter(|k| {
-                    // O(n) scan over allowed_labels; acceptable for small key counts
-                    allowed_labels.is_empty()
-                        || allowed_labels
-                            .iter()
-                            .any(|l| l == k.metadata.label.as_str())
+                    allowed_labels.is_empty() || allowed_labels.contains(k.metadata.label.as_str())
                 })
                 .filter_map(|k| {
                     let is_default = k.metadata.label.as_str() == "default";
@@ -190,11 +187,7 @@ fn handle_request(
             };
 
             // Check allowed labels (O(n) scan; acceptable for small key counts)
-            if !allowed_labels.is_empty()
-                && !allowed_labels
-                    .iter()
-                    .any(|l| l == key.metadata.label.as_str())
-            {
+            if !allowed_labels.is_empty() && !allowed_labels.contains(key.metadata.label.as_str()) {
                 tracing::warn!(
                     label = key.metadata.label.as_str(),
                     "key not in allowed list"
@@ -228,6 +221,11 @@ mod tests {
     use super::*;
     use sshenc_core::key::{KeyGenOptions, KeyLabel};
     use sshenc_test_support::MockKeyBackend;
+    use std::collections::HashSet;
+
+    fn empty_labels() -> HashSet<String> {
+        HashSet::new()
+    }
 
     fn setup_backend() -> MockKeyBackend {
         let backend = MockKeyBackend::new();
@@ -251,7 +249,8 @@ mod tests {
     #[test]
     fn test_request_identities_returns_keys() {
         let backend = setup_backend();
-        let resp = handle_request(AgentRequest::RequestIdentities, &backend, &[]).unwrap();
+        let resp =
+            handle_request(AgentRequest::RequestIdentities, &backend, &empty_labels()).unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => {
                 assert_eq!(ids.len(), 1);
@@ -264,7 +263,8 @@ mod tests {
     #[test]
     fn test_request_identities_empty_backend() {
         let backend = MockKeyBackend::new();
-        let resp = handle_request(AgentRequest::RequestIdentities, &backend, &[]).unwrap();
+        let resp =
+            handle_request(AgentRequest::RequestIdentities, &backend, &empty_labels()).unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => assert!(ids.is_empty()),
             _ => panic!("expected IdentitiesAnswer"),
@@ -291,7 +291,7 @@ mod tests {
             })
             .unwrap();
 
-        let allowed = vec!["allowed".to_string()];
+        let allowed: HashSet<String> = ["allowed".to_string()].into_iter().collect();
         let resp = handle_request(AgentRequest::RequestIdentities, &backend, &allowed).unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => assert_eq!(ids.len(), 1),
@@ -311,7 +311,7 @@ mod tests {
                 flags: 0,
             },
             &backend,
-            &[],
+            &empty_labels(),
         )
         .unwrap();
         match resp {
@@ -332,7 +332,7 @@ mod tests {
                 flags: 0,
             },
             &backend,
-            &[],
+            &empty_labels(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -343,7 +343,7 @@ mod tests {
         let backend = setup_backend();
         let key_blob = get_key_blob(&backend);
 
-        let allowed = vec!["other-key".to_string()];
+        let allowed: HashSet<String> = ["other-key".to_string()].into_iter().collect();
         let resp = handle_request(
             AgentRequest::SignRequest {
                 key_blob,
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn test_unknown_message_type() {
         let backend = setup_backend();
-        let resp = handle_request(AgentRequest::Unknown(255), &backend, &[]).unwrap();
+        let resp = handle_request(AgentRequest::Unknown(255), &backend, &empty_labels()).unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
     }
 
@@ -376,7 +376,7 @@ mod tests {
                 flags: 0,
             },
             &backend,
-            &[],
+            &empty_labels(),
         )
         .unwrap();
 

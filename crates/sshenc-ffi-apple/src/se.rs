@@ -62,7 +62,10 @@ pub fn is_available() -> bool {
 /// Directory where SE key data representations are stored.
 pub fn keys_dir() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(|| {
+            eprintln!("warning: HOME not set, using /tmp for key storage");
+            PathBuf::from("/tmp")
+        })
         .join(".sshenc")
         .join("keys")
 }

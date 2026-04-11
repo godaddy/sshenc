@@ -506,7 +506,7 @@ pub unsafe extern "C" fn C_GetAttributeValue(
                     };
                     write_attr_value(attr, params);
                 } else {
-                    attr.value_len = u64::MAX;
+                    attr.value_len = 0;
                 }
             }
             CKA_EC_POINT => {
@@ -515,10 +515,10 @@ pub unsafe extern "C" fn C_GetAttributeValue(
                         let wrapped = der_octet_string(&point);
                         write_attr_value(attr, &wrapped);
                     } else {
-                        attr.value_len = u64::MAX;
+                        attr.value_len = 0;
                     }
                 } else {
-                    attr.value_len = u64::MAX;
+                    attr.value_len = 0;
                 }
             }
             CKA_MODULUS => {
@@ -526,10 +526,10 @@ pub unsafe extern "C" fn C_GetAttributeValue(
                     if let Some((n, _)) = extract_rsa_params(&identity.key_blob) {
                         write_attr_value(attr, &n);
                     } else {
-                        attr.value_len = u64::MAX;
+                        attr.value_len = 0;
                     }
                 } else {
-                    attr.value_len = u64::MAX;
+                    attr.value_len = 0;
                 }
             }
             CKA_PUBLIC_EXPONENT => {
@@ -537,13 +537,13 @@ pub unsafe extern "C" fn C_GetAttributeValue(
                     if let Some((_, e)) = extract_rsa_params(&identity.key_blob) {
                         write_attr_value(attr, &e);
                     } else {
-                        attr.value_len = u64::MAX;
+                        attr.value_len = 0;
                     }
                 } else {
-                    attr.value_len = u64::MAX;
+                    attr.value_len = 0;
                 }
             }
-            _ => attr.value_len = u64::MAX,
+            _ => attr.value_len = 0,
         }
     }
     CKR_OK
@@ -697,6 +697,185 @@ pub unsafe extern "C" fn C_SeedRandom(_session: u64, _seed: *mut u8, _seed_len: 
 #[no_mangle]
 pub unsafe extern "C" fn C_GenerateRandom(_session: u64, _data: *mut u8, _len: u64) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED
+}
+
+// ─── Function list (PKCS#11 dispatch table) ─────────────────────
+
+/// PKCS#11 function list structure. OpenSSH loads the provider by calling
+/// C_GetFunctionList to get this table, then calls functions through it.
+#[repr(C)]
+pub struct CK_FUNCTION_LIST {
+    pub version: types::CK_VERSION,
+    // Function pointers — OpenSSH only uses a subset, but we fill in what we have
+    // and null the rest. The order matches the PKCS#11 v2.40 spec.
+    pub C_Initialize: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> CK_RV>,
+    pub C_Finalize: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> CK_RV>,
+    pub C_GetInfo: Option<unsafe extern "C" fn(*mut types::CK_INFO) -> CK_RV>,
+    pub C_GetFunctionList: Option<unsafe extern "C" fn(*mut *const CK_FUNCTION_LIST) -> CK_RV>,
+    pub C_GetSlotList: Option<unsafe extern "C" fn(u8, *mut u64, *mut u64) -> CK_RV>,
+    pub C_GetSlotInfo: Option<unsafe extern "C" fn(u64, *mut types::CK_SLOT_INFO) -> CK_RV>,
+    pub C_GetTokenInfo: Option<unsafe extern "C" fn(u64, *mut types::CK_TOKEN_INFO) -> CK_RV>,
+    pub C_GetMechanismList: Option<unsafe extern "C" fn(u64, *mut u64, *mut u64) -> CK_RV>,
+    pub C_GetMechanismInfo: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_InitToken: Option<unsafe extern "C" fn() -> CK_RV>,        // stub
+    pub C_InitPIN: Option<unsafe extern "C" fn() -> CK_RV>,          // stub
+    pub C_SetPIN: Option<unsafe extern "C" fn() -> CK_RV>,           // stub
+    pub C_OpenSession: Option<
+        unsafe extern "C" fn(
+            u64,
+            u64,
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *mut u64,
+        ) -> CK_RV,
+    >,
+    pub C_CloseSession: Option<unsafe extern "C" fn(u64) -> CK_RV>,
+    pub C_CloseAllSessions: Option<unsafe extern "C" fn(u64) -> CK_RV>,
+    pub C_GetSessionInfo: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_GetOperationState: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_SetOperationState: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_Login: Option<unsafe extern "C" fn(u64, u64, *mut u8, u64) -> CK_RV>,
+    pub C_Logout: Option<unsafe extern "C" fn(u64) -> CK_RV>,
+    pub C_CreateObject: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_CopyObject: Option<unsafe extern "C" fn() -> CK_RV>,   // stub
+    pub C_DestroyObject: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_GetObjectSize: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_GetAttributeValue:
+        Option<unsafe extern "C" fn(u64, u64, *mut types::CK_ATTRIBUTE, u64) -> CK_RV>,
+    pub C_SetAttributeValue: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_FindObjectsInit:
+        Option<unsafe extern "C" fn(u64, *mut types::CK_ATTRIBUTE, u64) -> CK_RV>,
+    pub C_FindObjects: Option<unsafe extern "C" fn(u64, *mut u64, u64, *mut u64) -> CK_RV>,
+    pub C_FindObjectsFinal: Option<unsafe extern "C" fn(u64) -> CK_RV>,
+    pub C_EncryptInit: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_Encrypt: Option<unsafe extern "C" fn() -> CK_RV>,     // stub
+    pub C_EncryptUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_EncryptFinal: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_DecryptInit: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_Decrypt: Option<unsafe extern "C" fn() -> CK_RV>,     // stub
+    pub C_DecryptUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_DecryptFinal: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_DigestInit: Option<unsafe extern "C" fn() -> CK_RV>,  // stub
+    pub C_Digest: Option<unsafe extern "C" fn() -> CK_RV>,      // stub
+    pub C_DigestUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_DigestKey: Option<unsafe extern "C" fn() -> CK_RV>,   // stub
+    pub C_DigestFinal: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_SignInit: Option<unsafe extern "C" fn(u64, *mut types::CK_MECHANISM, u64) -> CK_RV>,
+    pub C_Sign: Option<unsafe extern "C" fn(u64, *mut u8, u64, *mut u8, *mut u64) -> CK_RV>,
+    pub C_SignUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_SignFinal: Option<unsafe extern "C" fn() -> CK_RV>,  // stub
+    pub C_SignRecoverInit: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_SignRecover: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_VerifyInit: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_Verify: Option<unsafe extern "C" fn() -> CK_RV>,     // stub
+    pub C_VerifyUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_VerifyFinal: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_VerifyRecoverInit: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_VerifyRecover: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_DigestEncryptUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_DecryptDigestUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_SignEncryptUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_DecryptVerifyUpdate: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_GenerateKey: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_GenerateKeyPair: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_WrapKey: Option<unsafe extern "C" fn() -> CK_RV>,    // stub
+    pub C_UnwrapKey: Option<unsafe extern "C" fn() -> CK_RV>,  // stub
+    pub C_DeriveKey: Option<unsafe extern "C" fn() -> CK_RV>,  // stub
+    pub C_SeedRandom: Option<unsafe extern "C" fn(u64, *mut u8, u64) -> CK_RV>,
+    pub C_GenerateRandom: Option<unsafe extern "C" fn(u64, *mut u8, u64) -> CK_RV>,
+    pub C_GetFunctionStatus: Option<unsafe extern "C" fn() -> CK_RV>, // stub
+    pub C_CancelFunction: Option<unsafe extern "C" fn() -> CK_RV>,    // stub
+    pub C_WaitForSlotEvent: Option<unsafe extern "C" fn() -> CK_RV>,  // stub
+}
+
+static FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
+    version: types::CK_VERSION {
+        major: 2,
+        minor: 40,
+    },
+    C_Initialize: Some(C_Initialize),
+    C_Finalize: Some(C_Finalize),
+    C_GetInfo: Some(C_GetInfo),
+    C_GetFunctionList: Some(C_GetFunctionList),
+    C_GetSlotList: Some(C_GetSlotList),
+    C_GetSlotInfo: Some(C_GetSlotInfo),
+    C_GetTokenInfo: Some(C_GetTokenInfo),
+    C_GetMechanismList: Some(C_GetMechanismList),
+    C_GetMechanismInfo: None,
+    C_InitToken: None,
+    C_InitPIN: None,
+    C_SetPIN: None,
+    C_OpenSession: Some(C_OpenSession),
+    C_CloseSession: Some(C_CloseSession),
+    C_CloseAllSessions: Some(C_CloseAllSessions),
+    C_GetSessionInfo: None,
+    C_GetOperationState: None,
+    C_SetOperationState: None,
+    C_Login: Some(C_Login),
+    C_Logout: Some(C_Logout),
+    C_CreateObject: None,
+    C_CopyObject: None,
+    C_DestroyObject: None,
+    C_GetObjectSize: None,
+    C_GetAttributeValue: Some(C_GetAttributeValue),
+    C_SetAttributeValue: None,
+    C_FindObjectsInit: Some(C_FindObjectsInit),
+    C_FindObjects: Some(C_FindObjects),
+    C_FindObjectsFinal: Some(C_FindObjectsFinal),
+    C_EncryptInit: None,
+    C_Encrypt: None,
+    C_EncryptUpdate: None,
+    C_EncryptFinal: None,
+    C_DecryptInit: None,
+    C_Decrypt: None,
+    C_DecryptUpdate: None,
+    C_DecryptFinal: None,
+    C_DigestInit: None,
+    C_Digest: None,
+    C_DigestUpdate: None,
+    C_DigestKey: None,
+    C_DigestFinal: None,
+    C_SignInit: Some(C_SignInit),
+    C_Sign: Some(C_Sign),
+    C_SignUpdate: None,
+    C_SignFinal: None,
+    C_SignRecoverInit: None,
+    C_SignRecover: None,
+    C_VerifyInit: None,
+    C_Verify: None,
+    C_VerifyUpdate: None,
+    C_VerifyFinal: None,
+    C_VerifyRecoverInit: None,
+    C_VerifyRecover: None,
+    C_DigestEncryptUpdate: None,
+    C_DecryptDigestUpdate: None,
+    C_SignEncryptUpdate: None,
+    C_DecryptVerifyUpdate: None,
+    C_GenerateKey: None,
+    C_GenerateKeyPair: None,
+    C_WrapKey: None,
+    C_UnwrapKey: None,
+    C_DeriveKey: None,
+    C_SeedRandom: Some(C_SeedRandom),
+    C_GenerateRandom: Some(C_GenerateRandom),
+    C_GetFunctionStatus: None,
+    C_CancelFunction: None,
+    C_WaitForSlotEvent: None,
+};
+
+/// C_GetFunctionList — the PKCS#11 entry point. OpenSSH calls this first.
+///
+/// # Safety
+/// Called from C code via PKCS#11 interface.
+#[no_mangle]
+pub unsafe extern "C" fn C_GetFunctionList(
+    pp_function_list: *mut *const CK_FUNCTION_LIST,
+) -> CK_RV {
+    if pp_function_list.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *pp_function_list = &FUNCTION_LIST;
+    CKR_OK
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────

@@ -456,37 +456,27 @@ Windows Hello verification.
 ### WSL (Windows Subsystem for Linux)
 
 WSL runs a real Linux kernel and can't directly access Windows named pipes.
-`sshenc install` on Windows automatically detects your WSL distros and
-configures them with two levels of support:
-
-**Level 1 — Git (automatic):** Adds `GIT_SSH_COMMAND` to your `.bashrc`
-and `.zshrc`, pointing at the real Windows SSH. Git operations from WSL
-use your hardware keys immediately:
+`sshenc install` automatically detects your WSL distros and sets up a
+bridge so everything works transparently:
 
 ```bash
-git push    # works — uses Windows SSH → sshenc agent → TPM
+# From any WSL shell — all use Windows TPM keys:
+ssh user@server
+git push
+scp file user@server:
+sftp user@server
 ```
 
-**Level 2 — Full SSH (requires socat + npiperelay):** A `socat` bridge
-connects a Unix socket in WSL to the Windows named pipe. If both tools
-are installed, the bridge starts automatically when you open a shell:
+It installs `socat` and `npiperelay` into each distro and adds a bridge
+to `.bashrc`/`.zshrc` that connects a Unix socket to the Windows named
+pipe. The bridge starts automatically when you open a shell.
 
-```bash
-ssh user@server    # works — bridged to Windows agent
-scp file user@:    # works
-```
+If installation of `socat` or `npiperelay` fails (e.g., no internet or
+non-standard distro), it falls back to a git-only mode using
+`GIT_SSH_COMMAND` so at least `git push` works.
 
-`sshenc install` automatically installs `socat` and `npiperelay` into
-each WSL distro. If automatic installation fails (e.g., non-Debian distro
-or no internet), it tells you what's missing and Level 1 still works.
-
-If you create a new WSL distro after initial setup, run:
-
-```powershell
-sshenc wsl-setup
-```
-
-This detects any unconfigured distros and sets them up with both levels.
+If you create a new WSL distro later, just run `sshenc install` again —
+it's idempotent and will pick up any unconfigured distros.
 
 `sshenc uninstall` removes the configuration from all WSL distros.
 

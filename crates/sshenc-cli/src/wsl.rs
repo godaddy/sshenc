@@ -159,10 +159,8 @@ fn unconfigure_distro(distro: &WslDistro) -> Result<(), String> {
 fn generate_shell_block() -> String {
     format!(
         r#"{BEGIN_MARKER}
-# Level 1: Git uses Windows SSH for hardware key support
-export GIT_SSH_COMMAND="/mnt/c/Windows/System32/OpenSSH/ssh.exe"
-
-# Level 2: Bridge Unix socket to Windows named pipe for full ssh/scp
+# sshenc: Bridge WSL to Windows sshenc-agent via named pipe relay.
+# All SSH operations (ssh, git, scp, sftp) use the Windows TPM keys.
 if command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1; then
     export SSH_AUTH_SOCK="$HOME/.sshenc/agent.sock"
     if [ ! -S "$SSH_AUTH_SOCK" ]; then
@@ -170,6 +168,9 @@ if command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1
         (setsid socat UNIX-LISTEN:"$SSH_AUTH_SOCK",fork,unlink-early \
             EXEC:"npiperelay.exe -ei -s //./pipe/sshenc-agent" &) >/dev/null 2>&1
     fi
+else
+    # Fallback: at least git works via Windows SSH
+    export GIT_SSH_COMMAND="/mnt/c/Windows/System32/OpenSSH/ssh.exe"
 fi
 {END_MARKER}"#
     )

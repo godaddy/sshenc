@@ -103,7 +103,10 @@ impl Config {
             .join("config.toml")
     }
 
-    /// Load config from a file path. Returns default config if the file doesn't exist.
+    /// Load config from a file path.
+    ///
+    /// If the file does not exist, returns `Config::default()` silently.
+    /// This is standard behavior: a missing config file means "use defaults".
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Config::default());

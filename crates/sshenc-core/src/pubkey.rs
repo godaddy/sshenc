@@ -123,6 +123,7 @@ impl SshPublicKey {
 
 /// Write an SSH string (uint32 length prefix + data) to a buffer.
 pub fn write_ssh_string(buf: &mut Vec<u8>, data: &[u8]) {
+    // Writing to Vec cannot fail
     buf.write_u32::<BigEndian>(data.len() as u32).unwrap();
     buf.write_all(data).unwrap();
 }

@@ -162,6 +162,12 @@ pub fn parse_response(payload: &[u8]) -> Result<AgentResponse> {
                 return Err(Error::AgentProtocol("identities answer too short".into()));
             }
             let nkeys = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
+            const MAX_KEYS: usize = 10_000;
+            if nkeys > MAX_KEYS {
+                return Err(Error::AgentProtocol(format!(
+                    "nkeys {nkeys} exceeds maximum {MAX_KEYS}"
+                )));
+            }
             let mut cursor = Cursor::new(&body[4..]);
             let mut identities = Vec::with_capacity(nkeys);
             for _ in 0..nkeys {

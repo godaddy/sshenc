@@ -301,7 +301,7 @@ pub fn config_show() -> Result<()> {
 pub fn install() -> Result<()> {
     let config = Config::load_default()?;
     let ssh_config_path = dirs::home_dir()
-        .expect("could not determine home directory")
+        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
         .join(".ssh")
         .join("config");
 
@@ -410,7 +410,7 @@ fn find_agent_binary() -> Result<PathBuf> {
 
 pub fn uninstall() -> Result<()> {
     let ssh_config_path = dirs::home_dir()
-        .expect("could not determine home directory")
+        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
         .join(".ssh")
         .join("config");
 
@@ -486,6 +486,10 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
             .spawn()
             .ok();
         std::thread::sleep(std::time::Duration::from_millis(500));
+        // Verify the agent is reachable; warn but don't fail — it may just be slow to start
+        if std::os::unix::net::UnixStream::connect(&config.socket_path).is_err() {
+            eprintln!("warning: agent may not be ready yet (socket not connectable)");
+        }
     }
 
     let mut cmd = std::process::Command::new("ssh");

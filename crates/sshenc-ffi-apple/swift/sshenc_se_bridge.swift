@@ -66,12 +66,14 @@ public func sshenc_se_generate(
             case 3: flags.insert(.devicePasscode)    // password only
             default: flags.insert(.userPresence)
             }
-            let accessControl = SecAccessControlCreateWithFlags(
+            guard let accessControl = SecAccessControlCreateWithFlags(
                 nil,
                 kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
                 flags,
                 nil
-            )!
+            ) else {
+                return SE_ERR_GENERATE
+            }
             key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: accessControl)
         } else {
             key = try SecureEnclave.P256.Signing.PrivateKey()

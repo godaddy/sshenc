@@ -173,15 +173,13 @@ impl KeyBackend for SecureEnclaveBackend {
     }
 }
 
-/// Simple ISO 8601 timestamp without pulling in chrono.
+/// Returns the current time as unix epoch seconds (string).
 fn chrono_now() -> String {
-    use std::process::Command;
-    Command::new("date")
-        .arg("-u")
-        .arg("+%Y-%m-%dT%H:%M:%SZ")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    )
 }

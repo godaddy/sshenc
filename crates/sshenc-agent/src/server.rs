@@ -131,8 +131,11 @@ fn handle_request(
             let identities: Vec<Identity> = keys
                 .into_iter()
                 .filter(|k| {
+                    // O(n) scan over allowed_labels; acceptable for small key counts
                     allowed_labels.is_empty()
-                        || allowed_labels.contains(&k.metadata.label.as_str().to_string())
+                        || allowed_labels
+                            .iter()
+                            .any(|l| l == k.metadata.label.as_str())
                 })
                 .filter_map(|k| {
                     let pubkey = SshPublicKey::from_sec1_bytes(
@@ -179,9 +182,11 @@ fn handle_request(
                 return Ok(AgentResponse::Failure);
             };
 
-            // Check allowed labels
+            // Check allowed labels (O(n) scan; acceptable for small key counts)
             if !allowed_labels.is_empty()
-                && !allowed_labels.contains(&key.metadata.label.as_str().to_string())
+                && !allowed_labels
+                    .iter()
+                    .any(|l| l == key.metadata.label.as_str())
             {
                 tracing::warn!(
                     label = key.metadata.label.as_str(),

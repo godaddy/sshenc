@@ -44,7 +44,10 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Called from C code via PKCS#11 interface.
 #[no_mangle]
 pub unsafe extern "C" fn C_Initialize(_init_args: *mut std::ffi::c_void) -> CK_RV {
-    if INITIALIZED.swap(true, Ordering::SeqCst) {
+    if INITIALIZED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return CKR_CRYPTOKI_ALREADY_INITIALIZED;
     }
 

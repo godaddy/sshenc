@@ -61,7 +61,7 @@ pub fn install_block(
     }
 
     let content = if ssh_config_path.exists() {
-        std::fs::read_to_string(ssh_config_path)?
+        std::fs::read_to_string(ssh_config_path)?.replace("\r\n", "\n")
     } else {
         String::new()
     };
@@ -109,7 +109,7 @@ pub fn uninstall_block(ssh_config_path: &Path) -> Result<UninstallResult> {
         return Ok(UninstallResult::NotPresent);
     }
 
-    let content = std::fs::read_to_string(ssh_config_path)?;
+    let content = std::fs::read_to_string(ssh_config_path)?.replace("\r\n", "\n");
     if !content.contains(BEGIN_MARKER) {
         return Ok(UninstallResult::NotPresent);
     }

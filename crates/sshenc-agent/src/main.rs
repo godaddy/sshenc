@@ -59,6 +59,8 @@ fn default_pid_path() -> PathBuf {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Daemonize MUST happen before any threads are spawned (e.g., tokio runtime),
+    // because fork() in a multi-threaded process leads to undefined behavior.
     if !cli.foreground {
         daemonize(&cli.socket)?;
     }
@@ -123,9 +125,15 @@ fn daemonize(socket_path: &Path) -> Result<()> {
     let devnull = std::fs::File::open("/dev/null")?;
     let fd = devnull.as_raw_fd();
     unsafe {
-        libc::dup2(fd, 0); // stdin
-        libc::dup2(fd, 1); // stdout
-        libc::dup2(fd, 2); // stderr
+        if libc::dup2(fd, 0) == -1 {
+            anyhow::bail!("dup2 stdin failed: {}", std::io::Error::last_os_error());
+        }
+        if libc::dup2(fd, 1) == -1 {
+            anyhow::bail!("dup2 stdout failed: {}", std::io::Error::last_os_error());
+        }
+        if libc::dup2(fd, 2) == -1 {
+            anyhow::bail!("dup2 stderr failed: {}", std::io::Error::last_os_error());
+        }
     }
 
     Ok(())

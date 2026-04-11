@@ -685,6 +685,7 @@ dependencies = [
 name = "sshenc-ffi-apple"
 version = "0.2.7"
 dependencies = [
+ "base64",
  "dirs",
  "libc",
  "serde",

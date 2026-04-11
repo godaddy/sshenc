@@ -7,6 +7,8 @@
 //! CryptoKit `dataRepresentation`. A companion `<label>.pub` in the same
 //! directory caches the uncompressed public key bytes for fast enumeration.
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -170,7 +172,16 @@ pub struct KeyMeta {
 /// Uses a file lock to prevent concurrent writes and atomic writes to prevent partial files.
 pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8], meta: &KeyMeta) -> Result<()> {
     let dir = keys_dir();
+
+    // Set umask before mkdir to avoid a race where the directory briefly exists
+    // with overly-permissive mode before set_permissions can tighten it.
+    #[cfg(unix)]
+    let old_umask = unsafe { libc::umask(0o077) };
     std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(old_umask);
+    }
 
     #[cfg(unix)]
     {
@@ -207,6 +218,8 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8], meta: &KeyMeta) ->
 }
 
 /// File-based directory lock using flock. Dropped when the guard goes out of scope.
+/// Note: this relies on flock(2) which is reliable on macOS but has different
+/// semantics on some Linux filesystems (e.g., NFS). macOS-only for now.
 struct DirLock {
     _file: std::fs::File,
 }
@@ -235,7 +248,10 @@ impl DirLock {
 fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -325,7 +341,7 @@ fn format_ssh_pub_key(pub_key: &[u8], comment: &str) -> String {
     write_ssh_string(&mut blob, b"nistp256");
     write_ssh_string(&mut blob, pub_key);
 
-    let encoded = base64_encode(&blob);
+    let encoded = STANDARD.encode(&blob);
     format!("ecdsa-sha2-nistp256 {encoded} {comment}")
 }
 
@@ -335,28 +351,10 @@ fn write_ssh_string(buf: &mut Vec<u8>, data: &[u8]) {
     buf.extend_from_slice(data);
 }
 
+/// Kept as a test helper so existing tests continue to compile.
+#[cfg(test)]
 fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(CHARS[((n >> 18) & 63) as usize] as char);
-        out.push(CHARS[((n >> 12) & 63) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(CHARS[((n >> 6) & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(CHARS[(n & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
+    STANDARD.encode(data)
 }
 
 /// List all key labels in the keys directory.

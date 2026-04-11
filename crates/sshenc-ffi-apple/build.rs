@@ -29,9 +29,9 @@ fn main() {
     let sdk_output = Command::new("xcrun")
         .args(["--show-sdk-path", "--sdk", "macosx"])
         .output()
-        .expect("failed to run xcrun");
+        .unwrap_or_else(|e| panic!("failed to run xcrun: {e}"));
     let sdk_path = String::from_utf8(sdk_output.stdout)
-        .expect("invalid xcrun output")
+        .unwrap_or_else(|e| panic!("invalid xcrun output: {e}"))
         .trim()
         .to_string();
 
@@ -51,7 +51,7 @@ fn main() {
         .arg(&obj_path)
         .arg(swift_src)
         .status()
-        .expect("failed to run swiftc");
+        .unwrap_or_else(|e| panic!("failed to run swiftc: {e}"));
 
     if !status.success() {
         panic!("swiftc compilation failed");
@@ -63,7 +63,7 @@ fn main() {
         .arg(&lib_path)
         .arg(&obj_path)
         .status()
-        .expect("failed to run ar");
+        .unwrap_or_else(|e| panic!("failed to run ar: {e}"));
 
     if !status.success() {
         panic!("ar failed to create static library");
@@ -73,26 +73,32 @@ fn main() {
     let swift_lib_output = Command::new("xcrun")
         .args(["--show-sdk-path", "--sdk", "macosx"])
         .output()
-        .expect("failed to find swift lib path");
+        .unwrap_or_else(|e| panic!("failed to find swift lib path: {e}"));
     let swift_lib_dir = format!(
         "{}/usr/lib/swift",
-        String::from_utf8(swift_lib_output.stdout).unwrap().trim()
+        String::from_utf8(swift_lib_output.stdout)
+            .unwrap_or_else(|e| panic!("invalid xcrun output for swift lib: {e}"))
+            .trim()
     );
 
     // Also need the toolchain's swift lib dir for the runtime
     let toolchain_output = Command::new("xcrun")
         .args(["--find", "swiftc"])
         .output()
-        .expect("failed to find swiftc");
+        .unwrap_or_else(|e| panic!("failed to find swiftc: {e}"));
     let swiftc_path = String::from_utf8(toolchain_output.stdout)
-        .unwrap()
+        .unwrap_or_else(|e| panic!("invalid xcrun output for swiftc path: {e}"))
         .trim()
         .to_string();
-    let toolchain_lib = PathBuf::from(&swiftc_path)
+    let swiftc_pb = PathBuf::from(&swiftc_path);
+    let toolchain_lib = swiftc_pb
         .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| {
+            panic!(
+                "unexpected swiftc path structure (expected .../bin/swiftc): {swiftc_path}"
+            )
+        })
         .join("lib")
         .join("swift")
         .join("macosx");

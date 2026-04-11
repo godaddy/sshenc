@@ -336,26 +336,6 @@ Config file: `~/Library/Application Support/sshenc/config.toml`
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 
-## Windows notes
-
-On Windows, `sshenc install` does two things:
-
-1. Adds `IdentityAgent` to `~/.ssh/config` (for Windows OpenSSH)
-2. Sets `GIT_SSH_COMMAND=C:\Windows\System32\OpenSSH\ssh.exe` as a user
-   environment variable
-
-The second step is needed because Git for Windows bundles its own MINGW SSH
-binary that doesn't support Windows named pipes. By setting `GIT_SSH_COMMAND`,
-all git operations (including from Git Bash) use the real Windows OpenSSH
-which talks to the sshenc agent correctly.
-
-`sshenc uninstall` removes both.
-
-**WSL:** WSL is a separate Linux environment and can't directly access Windows
-named pipes. WSL users should install sshenc natively in WSL (when a Linux
-build is available), or use a pipe relay tool like `npiperelay` to bridge
-the Unix socket in WSL to the named pipe in Windows.
-
 ## Limitations
 
 - **macOS or Windows** — requires Apple Silicon/T2 (Secure Enclave) or
@@ -368,15 +348,124 @@ the Unix socket in WSL to the named pipe in Windows.
 
 ```sh
 cargo build --workspace
-cargo test --workspace             # 157 tests
+cargo test --workspace             # 159 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Requires Xcode command line tools (for `swiftc`).
+macOS requires Xcode command line tools (for `swiftc`).
+Windows requires Visual Studio Build Tools (for MSVC linker).
 
 See [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT.md](DEVELOPMENT.md),
 and [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Windows
+
+### How it works on Windows
+
+On Windows, sshenc uses the TPM 2.0 chip (present in virtually every modern
+PC) via the CNG `Microsoft Platform Crypto Provider`. The security model is
+the same as macOS Secure Enclave — keys are generated inside the TPM hardware
+and never leave it.
+
+The agent communicates via a Windows named pipe (`\\.\pipe\sshenc-agent`)
+instead of a Unix socket. `sshenc install` configures everything automatically.
+
+### What `sshenc install` does on Windows
+
+1. Adds `IdentityAgent \\.\pipe\sshenc-agent` to `~/.ssh/config`
+2. Sets `GIT_SSH_COMMAND=C:\Windows\System32\OpenSSH\ssh.exe` as a
+   persistent user environment variable
+3. Starts the agent as a detached background process
+
+Step 2 is important: Git for Windows bundles its own MINGW SSH binary that
+doesn't understand Windows named pipes. By setting `GIT_SSH_COMMAND`, all
+git operations — including from Git Bash — use the real Windows OpenSSH
+that talks to the sshenc agent.
+
+`sshenc uninstall` reverses all three steps.
+
+### Compatibility by environment
+
+| Environment | Status | Notes |
+|---|---|---|
+| **PowerShell** | Works | `IdentityAgent` in ssh config → named pipe → agent |
+| **CMD** | Works | Same as PowerShell |
+| **Git Bash** | Works | `GIT_SSH_COMMAND` bypasses bundled MINGW SSH |
+| **VS Code terminal** | Works | Uses whichever shell is configured |
+| **Windows Terminal** | Works | Uses whichever shell is configured |
+| **WSL** | Not directly supported | See below |
+| **PuTTY / Pageant** | Not supported | Different protocol; use Windows OpenSSH |
+
+### Key storage on Windows
+
+Unlike macOS where CryptoKit uses opaque `.handle` files, Windows CNG
+persists keys in the TPM's own key hierarchy. Only metadata and cached
+public keys are stored on disk:
+
+```
+%APPDATA%\sshenc\keys\
+  github.pub        # cached public key bytes
+  github.ssh.pub    # SSH-formatted public key
+  github.meta       # metadata (label, comment, auth policy, timestamp)
+```
+
+No key material is on disk. The TPM manages key persistence internally.
+
+### Windows Hello integration
+
+When generating a key with `--require-user-presence` or `--auth-policy`,
+sshenc configures the TPM key to require Windows Hello authentication
+(PIN, fingerprint, or facial recognition) for each signing operation:
+
+```sh
+sshenc keygen --label secure --require-user-presence
+```
+
+Each `git push` or `ssh` connection using that key will prompt for
+Windows Hello verification.
+
+### WSL (Windows Subsystem for Linux)
+
+WSL runs a real Linux kernel in a separate environment. It has its own
+SSH and cannot directly access Windows named pipes.
+
+Options for WSL users:
+
+1. **Use `npiperelay`** to bridge a Unix socket in WSL to the Windows
+   named pipe:
+   ```sh
+   # In WSL:
+   socat UNIX-LISTEN:$HOME/.sshenc/agent.sock,fork \
+     EXEC:"npiperelay.exe -ei -s //./pipe/sshenc-agent"
+   ```
+
+2. **Wait for a Linux build** — sshenc could support Linux TPM 2.0 via
+   `tpm2-tss` in the future, which would work natively in WSL.
+
+3. **Use regular SSH keys in WSL** — WSL has its own `~/.ssh` directory.
+   You can use traditional SSH keys inside WSL independently.
+
+### Git Bash details
+
+Git for Windows includes a complete MSYS2/MINGW environment with its own
+SSH binary at `C:\Program Files\Git\usr\bin\ssh.exe`. This MINGW SSH:
+
+- Reads `~/.ssh/config` (same file as Windows OpenSSH)
+- Does NOT support `IdentityAgent` with Windows named pipes
+- Does NOT support the Windows SSH agent
+
+The `GIT_SSH_COMMAND` environment variable set by `sshenc install` tells
+git to use `C:\Windows\System32\OpenSSH\ssh.exe` instead, which supports
+all Windows-native features.
+
+If you prefer not to set this globally, you can use `gitenc` instead —
+it sets `GIT_SSH_COMMAND` per-invocation:
+
+```sh
+gitenc push                    # uses sshenc automatically
+gitenc --label work push       # specific key
+```
 
 ## License
 

@@ -424,3 +424,43 @@ pub fn openssh_print_config(
 
     Ok(())
 }
+
+pub fn ssh_wrapper(label: &str, ssh_args: &[String]) -> Result<()> {
+    let config = Config::load_default()?;
+
+    // Ensure the .ssh.pub file exists for this label
+    let ssh_pub = sshenc_ffi_apple::se::ssh_pub_path(label);
+    if !ssh_pub.exists() {
+        // Generate it from the raw public key
+        let pub_bytes = sshenc_ffi_apple::se::load_pub_key(label)
+            .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
+        sshenc_ffi_apple::se::save_ssh_pub_key(label, &pub_bytes)?;
+    }
+
+    // Ensure agent is running
+    if !config.socket_path.exists() {
+        let agent_bin = find_agent_binary()?;
+        std::process::Command::new(&agent_bin)
+            .arg("--socket")
+            .arg(&config.socket_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // Exec ssh with the agent socket and identity pinned to this label
+    let status = std::process::Command::new("ssh")
+        .arg("-o")
+        .arg(format!("IdentityAgent {}", config.socket_path.display()))
+        .arg("-o")
+        .arg(format!("IdentityFile {}", ssh_pub.display()))
+        .arg("-o")
+        .arg("IdentitiesOnly yes")
+        .args(ssh_args)
+        .status()?;
+
+    std::process::exit(status.code().unwrap_or(1));
+}

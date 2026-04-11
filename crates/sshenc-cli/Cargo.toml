@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 sshenc-core = { workspace = true }
 sshenc-se = { workspace = true }
+sshenc-ffi-apple = { workspace = true }
 sshenc-agent = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }

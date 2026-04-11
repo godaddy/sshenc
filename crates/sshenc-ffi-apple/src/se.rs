@@ -156,9 +156,14 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8]) -> Result<()> {
 
     let key_path = dir.join(format!("{label}.key"));
     let pub_path = dir.join(format!("{label}.pub"));
+    let ssh_pub_path = dir.join(format!("{label}.ssh.pub"));
 
     std::fs::write(&key_path, data_rep)?;
     std::fs::write(&pub_path, pub_key)?;
+
+    // Write SSH-formatted public key for use with IdentityFile selection
+    let ssh_line = format_ssh_pub_key(pub_key, label);
+    std::fs::write(&ssh_pub_path, format!("{ssh_line}\n"))?;
 
     // Restrictive permissions on the key file
     #[cfg(unix)]
@@ -206,6 +211,63 @@ pub fn delete_key(label: &str) -> Result<()> {
     std::fs::remove_file(&key_path)?;
     let _ = std::fs::remove_file(&pub_path); // pub file may not exist
     Ok(())
+}
+
+/// Get the path to the SSH-formatted public key file for a label.
+pub fn ssh_pub_path(label: &str) -> PathBuf {
+    keys_dir().join(format!("{label}.ssh.pub"))
+}
+
+/// Write an SSH-formatted public key file from raw EC point bytes.
+pub fn save_ssh_pub_key(label: &str, pub_key: &[u8]) -> Result<()> {
+    let dir = keys_dir();
+    std::fs::create_dir_all(&dir)?;
+    let ssh_pub_path = dir.join(format!("{label}.ssh.pub"));
+    let ssh_line = format_ssh_pub_key(pub_key, label);
+    std::fs::write(&ssh_pub_path, format!("{ssh_line}\n"))?;
+    Ok(())
+}
+
+/// Format raw EC point bytes as an SSH public key line.
+fn format_ssh_pub_key(pub_key: &[u8], comment: &str) -> String {
+    // SSH wire format: string("ecdsa-sha2-nistp256") || string("nistp256") || string(ec_point)
+    let mut blob = Vec::new();
+    write_ssh_string(&mut blob, b"ecdsa-sha2-nistp256");
+    write_ssh_string(&mut blob, b"nistp256");
+    write_ssh_string(&mut blob, pub_key);
+
+    let encoded = base64_encode(&blob);
+    format!("ecdsa-sha2-nistp256 {encoded} {comment}")
+}
+
+fn write_ssh_string(buf: &mut Vec<u8>, data: &[u8]) {
+    let len = (data.len() as u32).to_be_bytes();
+    buf.extend_from_slice(&len);
+    buf.extend_from_slice(data);
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARS[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 /// List all key labels in the keys directory.

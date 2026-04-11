@@ -145,11 +145,25 @@ enum Commands {
         action: OpensshAction,
     },
 
-    /// Configure SSH to use sshenc for all hosts (adds PKCS11Provider to ~/.ssh/config).
+    /// Configure SSH to use sshenc for all hosts (adds IdentityAgent to ~/.ssh/config).
     Install,
 
     /// Remove sshenc configuration from ~/.ssh/config.
     Uninstall,
+
+    /// Run ssh using a specific sshenc key.
+    ///
+    /// Example: sshenc ssh --label jgowdy-godaddy git@github.com
+    /// Example: GIT_SSH_COMMAND="sshenc ssh --label jgowdy-godaddy" git push
+    Ssh {
+        /// Key label to use.
+        #[arg(long, short = 'l')]
+        label: String,
+
+        /// Arguments to pass to ssh.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        ssh_args: Vec<String>,
+    },
 
     /// Generate shell completions.
     Completions {
@@ -280,6 +294,7 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
         },
         Commands::Install => commands::install(),
         Commands::Uninstall => commands::uninstall(),
+        Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(&label, &ssh_args),
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "sshenc", &mut std::io::stdout());
             Ok(())

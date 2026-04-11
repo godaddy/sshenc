@@ -316,6 +316,60 @@ pub fn delete_key(label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rename a key by moving all its files to the new label.
+pub fn rename_key(old_label: &str, new_label: &str) -> Result<()> {
+    let dir = keys_dir();
+    let old_handle = dir.join(format!("{old_label}.handle"));
+
+    if !old_handle.exists() {
+        return Err(SeError::LoadFailed(format!("key not found: {old_label}")));
+    }
+
+    let new_handle = dir.join(format!("{new_label}.handle"));
+    if new_handle.exists() {
+        return Err(SeError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("key '{new_label}' already exists"),
+        )));
+    }
+
+    let _lock = DirLock::acquire(&dir)?;
+
+    // Rename all files that exist
+    std::fs::rename(&old_handle, &new_handle)?;
+    for ext in &["pub", "ssh.pub", "meta"] {
+        let old = dir.join(format!("{old_label}.{ext}"));
+        let new = dir.join(format!("{new_label}.{ext}"));
+        if old.exists() {
+            std::fs::rename(&old, &new)?;
+        }
+    }
+
+    // Update the .meta file label if it exists
+    let meta_path = dir.join(format!("{new_label}.meta"));
+    if meta_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&meta_path) {
+            if let Ok(mut meta) = serde_json::from_str::<KeyMeta>(&content) {
+                meta.label = new_label.to_string();
+                if let Ok(json) = serde_json::to_string_pretty(&meta) {
+                    let _ = atomic_write(&meta_path, json.as_bytes());
+                }
+            }
+        }
+    }
+
+    // Regenerate the .ssh.pub file with the new label as comment
+    let pub_path = dir.join(format!("{new_label}.pub"));
+    if pub_path.exists() {
+        let pub_bytes = std::fs::read(&pub_path)?;
+        let ssh_pub_path = dir.join(format!("{new_label}.ssh.pub"));
+        let ssh_line = format_ssh_pub_key(&pub_bytes, new_label);
+        atomic_write(&ssh_pub_path, format!("{ssh_line}\n").as_bytes())?;
+    }
+
+    Ok(())
+}
+
 /// Get the path to the SSH-formatted public key file for a label.
 pub fn ssh_pub_path(label: &str) -> PathBuf {
     keys_dir().join(format!("{label}.ssh.pub"))

@@ -514,3 +514,84 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     let status = cmd.status()?;
     std::process::exit(status.code().unwrap_or(1));
 }
+
+pub fn promote_to_default(label: &str) -> Result<()> {
+    if label == "default" {
+        bail!("key is already named 'default'");
+    }
+
+    // Verify the source key exists
+    sshenc_ffi_apple::se::load_key(label)
+        .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
+
+    let ssh_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
+        .join(".ssh");
+    let id_ecdsa_pub = ssh_dir.join("id_ecdsa.pub");
+    let id_ecdsa_priv = ssh_dir.join("id_ecdsa");
+
+    // Back up existing id_ecdsa key pair if present
+    if id_ecdsa_priv.exists() {
+        let priv_bak = id_ecdsa_priv.with_extension("bak");
+        let pub_bak = PathBuf::from(format!("{}.bak", id_ecdsa_pub.display()));
+        eprintln!("Backing up existing id_ecdsa key pair:");
+        eprintln!("  {} → {}", id_ecdsa_priv.display(), priv_bak.display());
+        if id_ecdsa_pub.exists() {
+            eprintln!("  {} → {}", id_ecdsa_pub.display(), pub_bak.display());
+        }
+        std::fs::rename(&id_ecdsa_priv, &priv_bak)?;
+        if id_ecdsa_pub.exists() {
+            std::fs::rename(&id_ecdsa_pub, &pub_bak)?;
+        }
+    } else if id_ecdsa_pub.exists() {
+        // Just the pub file, no private key — prompt before overwriting
+        eprintln!("{} already exists.", id_ecdsa_pub.display());
+        eprint!("Overwrite (y/n)? ");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // If there's already a "default" key, rename it to a backup label
+    if sshenc_ffi_apple::se::load_key("default").is_ok() {
+        let backup_label = format!("default-backup-{}", std::process::id());
+        eprintln!("Renaming existing default key to '{backup_label}'");
+        sshenc_ffi_apple::se::rename_key("default", &backup_label)?;
+    }
+
+    // Rename the source key to "default"
+    sshenc_ffi_apple::se::rename_key(label, "default")?;
+
+    // Write ~/.ssh/id_ecdsa.pub
+    let pub_bytes = sshenc_ffi_apple::se::load_pub_key("default")?;
+    let ssh_pubkey = sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
+    let line = ssh_pubkey.to_openssh_line();
+    std::fs::create_dir_all(&ssh_dir)?;
+    std::fs::write(&id_ecdsa_pub, format!("{line}\n"))?;
+
+    // Remove the old ~/.ssh/<label>.pub if it exists
+    let old_pub = ssh_dir.join(format!("{label}.pub"));
+    if old_pub.exists() {
+        std::fs::remove_file(&old_pub)?;
+        println!("Removed {}", old_pub.display());
+    }
+
+    println!("Promoted '{label}' to default key.");
+    println!("  Public key: {}", id_ecdsa_pub.display());
+    println!(
+        "  Fingerprint: {}",
+        sshenc_core::fingerprint::fingerprint_sha256(
+            &sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?
+        )
+    );
+    println!();
+    println!("The agent will now present this key first for all connections.");
+    println!("Restart the agent for the change to take effect:");
+    println!("  pkill sshenc-agent && sshenc install");
+
+    Ok(())
+}

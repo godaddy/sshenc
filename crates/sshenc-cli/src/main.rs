@@ -158,6 +158,16 @@ enum Commands {
     /// Remove sshenc configuration from ~/.ssh/config.
     Uninstall,
 
+    /// Promote a named key to be the default key.
+    ///
+    /// Renames the key to "default" and writes ~/.ssh/id_ecdsa.pub so SSH
+    /// and ssh-copy-id find it automatically. The agent will present this
+    /// key first.
+    Default {
+        /// Label of the key to promote.
+        label: String,
+    },
+
     /// Run ssh using a specific sshenc key.
     ///
     /// Example: sshenc ssh --label jgowdy-godaddy git@github.com
@@ -338,6 +348,7 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
         },
         Commands::Install => commands::install(),
         Commands::Uninstall => commands::uninstall(),
+        Commands::Default { label } => commands::promote_to_default(&label),
         Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "sshenc", &mut std::io::stdout());

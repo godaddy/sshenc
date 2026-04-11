@@ -9,9 +9,11 @@
 //!
 //! In ~/.ssh/config, both entries work together:
 //!
-//!     Host *
-//!         PKCS11Provider /path/to/libsshenc_pkcs11.dylib
-//!         IdentityAgent ~/.sshenc/agent.sock
+//! ```text
+//! Host *
+//!     PKCS11Provider /path/to/libsshenc_pkcs11.dylib
+//!     IdentityAgent ~/.sshenc/agent.sock
+//! ```
 //!
 //! SSH loads the dylib first (starting the agent), then talks to the
 //! agent for authentication. The dylib is just a boot hook.

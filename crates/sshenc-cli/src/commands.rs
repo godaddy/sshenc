@@ -609,13 +609,19 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
 }
 
 pub fn promote_to_default(label: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    use sshenc_ffi_apple::se;
+    // On Windows, CNG key names are immutable — create keys with the right name from the start.
+    // The "default" command only works on macOS for now.
+    #[cfg(target_os = "windows")]
+    bail!("'sshenc default' is not yet supported on Windows. Create your default key with: sshenc keygen");
+
     if label == "default" {
         bail!("key is already named 'default'");
     }
 
     // Verify the source key exists
-    sshenc_ffi_apple::se::load_key(label)
-        .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
+    se::load_key(label).map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
 
     let ssh_dir = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
@@ -650,17 +656,17 @@ pub fn promote_to_default(label: &str) -> Result<()> {
     }
 
     // If there's already a "default" key, rename it to a backup label
-    if sshenc_ffi_apple::se::load_key("default").is_ok() {
+    if se::load_key("default").is_ok() {
         let backup_label = format!("default-backup-{}", std::process::id());
         eprintln!("Renaming existing default key to '{backup_label}'");
-        sshenc_ffi_apple::se::rename_key("default", &backup_label)?;
+        se::rename_key("default", &backup_label)?;
     }
 
     // Rename the source key to "default"
-    sshenc_ffi_apple::se::rename_key(label, "default")?;
+    se::rename_key(label, "default")?;
 
     // Write ~/.ssh/id_ecdsa.pub
-    let pub_bytes = sshenc_ffi_apple::se::load_pub_key("default")?;
+    let pub_bytes = se::load_pub_key("default")?;
     let ssh_pubkey = sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
     let line = ssh_pubkey.to_openssh_line();
     std::fs::create_dir_all(&ssh_dir)?;
@@ -755,10 +761,15 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     // Read data to sign
     let data = std::fs::read(&data_file)?;
 
-    // Sign via the SE backend
-    let data_rep = se::load_key(&label)
-        .map_err(|_| anyhow::anyhow!("key '{label}' not found — is the label correct?"))?;
-    let der_sig = se::sign(&data_rep, &data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
+    // Sign via the hardware backend
+    #[cfg(target_os = "macos")]
+    let der_sig = {
+        let data_rep = se::load_key(&label)
+            .map_err(|_| anyhow::anyhow!("key '{label}' not found — is the label correct?"))?;
+        se::sign(&data_rep, &data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?
+    };
+    #[cfg(target_os = "windows")]
+    let der_sig = se::sign(&label, &data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
 
     // Get the public key for the signature header
     let pub_bytes = se::load_pub_key(&label)?;

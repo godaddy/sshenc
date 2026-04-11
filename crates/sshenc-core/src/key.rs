@@ -177,3 +177,154 @@ pub struct KeyGenOptions {
     /// If set, write the public key to this path.
     pub write_pub_path: Option<PathBuf>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- KeyLabel validation ---
+
+    #[test]
+    fn test_key_label_valid_simple() {
+        let label = KeyLabel::new("my-key_01").unwrap();
+        assert_eq!(label.as_str(), "my-key_01");
+    }
+
+    #[test]
+    fn test_key_label_valid_single_char() {
+        let label = KeyLabel::new("a").unwrap();
+        assert_eq!(label.as_str(), "a");
+    }
+
+    #[test]
+    fn test_key_label_valid_max_length() {
+        let s = "a".repeat(64);
+        let label = KeyLabel::new(&s).unwrap();
+        assert_eq!(label.as_str(), s);
+    }
+
+    #[test]
+    fn test_key_label_empty() {
+        let err = KeyLabel::new("").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "expected 'empty' in error: {msg}");
+    }
+
+    #[test]
+    fn test_key_label_too_long() {
+        let s = "a".repeat(65);
+        let err = KeyLabel::new(&s).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("64"), "expected '64' in error: {msg}");
+    }
+
+    #[test]
+    fn test_key_label_invalid_space() {
+        let err = KeyLabel::new("my key").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("alphanumeric"),
+            "expected 'alphanumeric' in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_key_label_invalid_dot() {
+        assert!(KeyLabel::new("my.key").is_err());
+    }
+
+    #[test]
+    fn test_key_label_invalid_slash() {
+        assert!(KeyLabel::new("my/key").is_err());
+    }
+
+    #[test]
+    fn test_key_label_invalid_unicode() {
+        assert!(KeyLabel::new("clé").is_err());
+    }
+
+    // --- KeyLabel conversions ---
+
+    #[test]
+    fn test_key_label_display() {
+        let label = KeyLabel::new("github-personal").unwrap();
+        assert_eq!(format!("{label}"), "github-personal");
+    }
+
+    #[test]
+    fn test_key_label_into_string() {
+        let label = KeyLabel::new("work").unwrap();
+        let s: String = label.into();
+        assert_eq!(s, "work");
+    }
+
+    #[test]
+    fn test_key_label_try_from_string_valid() {
+        let label = KeyLabel::try_from("test-key".to_string()).unwrap();
+        assert_eq!(label.as_str(), "test-key");
+    }
+
+    #[test]
+    fn test_key_label_try_from_string_invalid() {
+        assert!(KeyLabel::try_from("bad label!".to_string()).is_err());
+    }
+
+    // --- app_tag ---
+
+    #[test]
+    fn test_app_tag_format() {
+        let label = KeyLabel::new("github-personal").unwrap();
+        assert_eq!(label.app_tag(), "com.sshenc.key.github-personal");
+    }
+
+    #[test]
+    fn test_app_tag_prefix_constant() {
+        assert_eq!(APP_TAG_PREFIX, "com.sshenc.key.");
+    }
+
+    // --- KeyMetadata ---
+
+    #[test]
+    fn test_key_metadata_construction() {
+        let label = KeyLabel::new("test").unwrap();
+        let meta = KeyMetadata::new(label.clone(), true, Some("comment".into()));
+        assert_eq!(meta.label, label);
+        assert_eq!(meta.app_tag, "com.sshenc.key.test");
+        assert!(matches!(meta.algorithm, KeyAlgorithm::EcdsaP256));
+        assert!(meta.requires_user_presence);
+        assert_eq!(meta.comment.as_deref(), Some("comment"));
+    }
+
+    #[test]
+    fn test_key_metadata_no_comment() {
+        let label = KeyLabel::new("bare").unwrap();
+        let meta = KeyMetadata::new(label, false, None);
+        assert!(!meta.requires_user_presence);
+        assert!(meta.comment.is_none());
+    }
+
+    // --- KeyAlgorithm ---
+
+    #[test]
+    fn test_key_algorithm_display() {
+        assert_eq!(KeyAlgorithm::EcdsaP256.to_string(), "ecdsa-p256");
+    }
+
+    #[test]
+    fn test_key_algorithm_key_bits() {
+        assert_eq!(KeyAlgorithm::EcdsaP256.key_bits(), 256);
+    }
+
+    #[test]
+    fn test_key_algorithm_ssh_key_type() {
+        assert_eq!(
+            KeyAlgorithm::EcdsaP256.ssh_key_type(),
+            "ecdsa-sha2-nistp256"
+        );
+    }
+
+    #[test]
+    fn test_key_algorithm_ssh_curve_id() {
+        assert_eq!(KeyAlgorithm::EcdsaP256.ssh_curve_id(), "nistp256");
+    }
+}

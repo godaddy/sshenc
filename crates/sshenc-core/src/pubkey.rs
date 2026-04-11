@@ -260,4 +260,51 @@ mod tests {
         assert_eq!(ec_point, &point[..]);
         assert!(rest.is_empty());
     }
+
+    #[test]
+    fn test_openssh_line_empty_comment() {
+        // Some("") should produce a trailing space + empty string, but still parse
+        let point = sample_ec_point();
+        let key = SshPublicKey::from_sec1_bytes(&point, Some("".into())).unwrap();
+        let line = key.to_openssh_line();
+        // Format: "ecdsa-sha2-nistp256 <base64> "
+        assert!(line.starts_with("ecdsa-sha2-nistp256 "));
+        // Should roundtrip: the comment comes back as empty string
+        let parsed = SshPublicKey::from_openssh_line(&line).unwrap();
+        assert_eq!(parsed.ec_point(), key.ec_point());
+        // The parsed comment should be Some("") since splitn(3, ' ') returns the 3rd part
+        assert_eq!(parsed.comment(), Some(""));
+    }
+
+    #[test]
+    fn test_parse_invalid_key_type() {
+        let line = "ssh-rsa AAAAB3NzaC1yc2EAAA== user@host";
+        let err = SshPublicKey::from_openssh_line(line).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported key type"),
+            "expected 'unsupported key type' in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_truncated_blob() {
+        // Valid key type, but the base64 decodes to a truncated wire blob
+        // Build a blob that has the key type string but is truncated after that
+        let mut truncated_wire = Vec::new();
+        write_ssh_string(&mut truncated_wire, b"ecdsa-sha2-nistp256");
+        // Don't write curve or EC point — this is truncated
+        let encoded = STANDARD.encode(&truncated_wire);
+        let line = format!("ecdsa-sha2-nistp256 {encoded} user@host");
+        let err = SshPublicKey::from_openssh_line(&line).unwrap_err();
+        // Should fail when trying to read the curve id string
+        assert!(err.to_string().contains("too short") || err.to_string().contains("buffer"));
+    }
+
+    #[test]
+    fn test_parse_single_field_line() {
+        // Only one field, no base64 blob
+        let err = SshPublicKey::from_openssh_line("ecdsa-sha2-nistp256").unwrap_err();
+        assert!(err.to_string().contains("at least"));
+    }
 }

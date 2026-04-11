@@ -261,4 +261,168 @@ mod tests {
         let result = parse_request(&[]);
         assert!(result.is_err());
     }
+
+    // --- Roundtrip tests: serialize_request -> parse_request ---
+
+    #[test]
+    fn test_roundtrip_request_identities() {
+        let original = AgentRequest::RequestIdentities;
+        let payload = serialize_request(&original);
+        let parsed = parse_request(&payload).unwrap();
+        assert!(matches!(parsed, AgentRequest::RequestIdentities));
+    }
+
+    #[test]
+    fn test_roundtrip_sign_request() {
+        let key_blob = b"my-key-blob-data".to_vec();
+        let data = b"data-to-be-signed".to_vec();
+        let flags = 0x02u32;
+
+        let original = AgentRequest::SignRequest {
+            key_blob: key_blob.clone(),
+            data: data.clone(),
+            flags,
+        };
+        let payload = serialize_request(&original);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::SignRequest {
+                key_blob: kb,
+                data: d,
+                flags: f,
+            } => {
+                assert_eq!(kb, key_blob);
+                assert_eq!(d, data);
+                assert_eq!(f, flags);
+            }
+            _ => panic!("expected SignRequest"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_sign_request_empty_data() {
+        let original = AgentRequest::SignRequest {
+            key_blob: vec![],
+            data: vec![],
+            flags: 0,
+        };
+        let payload = serialize_request(&original);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::SignRequest {
+                key_blob,
+                data,
+                flags,
+            } => {
+                assert!(key_blob.is_empty());
+                assert!(data.is_empty());
+                assert_eq!(flags, 0);
+            }
+            _ => panic!("expected SignRequest"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_unknown_request() {
+        let original = AgentRequest::Unknown(200);
+        let payload = serialize_request(&original);
+        let parsed = parse_request(&payload).unwrap();
+        assert!(matches!(parsed, AgentRequest::Unknown(200)));
+    }
+
+    // --- Roundtrip tests: serialize_response -> parse_response ---
+
+    #[test]
+    fn test_roundtrip_identities_answer_empty() {
+        let original = AgentResponse::IdentitiesAnswer(vec![]);
+        let payload = serialize_response(&original);
+        let parsed = parse_response(&payload).unwrap();
+        match parsed {
+            AgentResponse::IdentitiesAnswer(ids) => assert!(ids.is_empty()),
+            _ => panic!("expected IdentitiesAnswer"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_identities_answer_multiple() {
+        let identities = vec![
+            Identity {
+                key_blob: b"blob-aaa".to_vec(),
+                comment: "first key".into(),
+            },
+            Identity {
+                key_blob: b"blob-bbb".to_vec(),
+                comment: "second key".into(),
+            },
+            Identity {
+                key_blob: b"blob-ccc".to_vec(),
+                comment: "".into(),
+            },
+        ];
+        let original = AgentResponse::IdentitiesAnswer(identities);
+        let payload = serialize_response(&original);
+        let parsed = parse_response(&payload).unwrap();
+        match parsed {
+            AgentResponse::IdentitiesAnswer(ids) => {
+                assert_eq!(ids.len(), 3);
+                assert_eq!(ids[0].key_blob, b"blob-aaa");
+                assert_eq!(ids[0].comment, "first key");
+                assert_eq!(ids[1].key_blob, b"blob-bbb");
+                assert_eq!(ids[1].comment, "second key");
+                assert_eq!(ids[2].key_blob, b"blob-ccc");
+                assert_eq!(ids[2].comment, "");
+            }
+            _ => panic!("expected IdentitiesAnswer"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_sign_response() {
+        let sig = b"some-signature-bytes".to_vec();
+        let original = AgentResponse::SignResponse {
+            signature_blob: sig.clone(),
+        };
+        let payload = serialize_response(&original);
+        let parsed = parse_response(&payload).unwrap();
+        match parsed {
+            AgentResponse::SignResponse { signature_blob } => {
+                assert_eq!(signature_blob, sig);
+            }
+            _ => panic!("expected SignResponse"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_failure() {
+        let payload = serialize_response(&AgentResponse::Failure);
+        let parsed = parse_response(&payload).unwrap();
+        assert!(matches!(parsed, AgentResponse::Failure));
+    }
+
+    #[test]
+    fn test_roundtrip_success() {
+        let payload = serialize_response(&AgentResponse::Success);
+        let parsed = parse_response(&payload).unwrap();
+        assert!(matches!(parsed, AgentResponse::Success));
+    }
+
+    #[test]
+    fn test_parse_response_empty_payload() {
+        let result = parse_response(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_response_unknown_type() {
+        let result = parse_response(&[0xFF]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_response_identities_answer_truncated() {
+        // Just the type byte, no body for count
+        let payload = vec![SSH_AGENT_IDENTITIES_ANSWER];
+        let result = parse_response(&payload);
+        assert!(result.is_err());
+    }
 }

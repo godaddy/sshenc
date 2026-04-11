@@ -45,6 +45,11 @@ impl LogLevel {
 }
 
 /// Host-specific identity preference.
+///
+/// Note: The SSH agent protocol does not include the target hostname in
+/// sign requests, so the agent cannot perform host-based key selection.
+/// This field is used by `sshenc openssh print-config` to generate
+/// per-host SSH config snippets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostIdentity {
     /// Hostname or pattern.

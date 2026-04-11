@@ -4,7 +4,7 @@
 //! sshenc: Main CLI for Secure Enclave SSH key management.
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 mod commands;
@@ -116,8 +116,8 @@ enum Commands {
         #[arg(long, short = 's')]
         socket: Option<PathBuf>,
 
-        /// Run in foreground.
-        #[arg(long, short = 'f', default_value_t = true)]
+        /// Run in foreground (don't daemonize).
+        #[arg(long, short = 'f')]
         foreground: bool,
 
         /// Enable debug logging.
@@ -146,6 +146,12 @@ enum Commands {
 
     /// Remove sshenc configuration from ~/.ssh/config.
     Uninstall,
+
+    /// Generate shell completions.
+    Completions {
+        /// Shell to generate completions for (bash, zsh, fish).
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -256,5 +262,9 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
         },
         Commands::Install => commands::install(),
         Commands::Uninstall => commands::uninstall(),
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "sshenc", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }

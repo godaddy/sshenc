@@ -34,6 +34,7 @@ serde_json = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # Encoding
 base64 = "0.22"
@@ -71,6 +72,9 @@ toml = "0.8"
 # SSH key parsing and signing
 ssh-key = { version = "0.6", features = ["crypto", "encryption"] }
 signature = "2"
+
+# System
+libc = "0.2"
 
 # Misc
 rand = "0.8"

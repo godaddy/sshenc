@@ -191,4 +191,73 @@ mod tests {
         // Empty
         assert!(der_to_ssh_signature(&[]).is_err());
     }
+
+    #[test]
+    fn test_real_sized_32_byte_values() {
+        // Realistic 32-byte r and s values (low high bits, no leading zero needed)
+        let r: Vec<u8> = (1..=32).collect();
+        let s: Vec<u8> = (33..=64).collect();
+        let der = make_der_signature(&r, &s);
+        let ssh_sig = der_to_ssh_signature(&der).unwrap();
+
+        // Verify outer structure
+        let (algo, rest) = sshenc_core::pubkey::read_ssh_string(&ssh_sig).unwrap();
+        assert_eq!(algo, b"ecdsa-sha2-nistp256");
+
+        let (inner, tail) = sshenc_core::pubkey::read_ssh_string(rest).unwrap();
+        assert!(tail.is_empty());
+
+        // Parse inner: mpint(r) || mpint(s)
+        let (parsed_r, remaining) = sshenc_core::pubkey::read_ssh_string(inner).unwrap();
+        let (parsed_s, remaining2) = sshenc_core::pubkey::read_ssh_string(remaining).unwrap();
+        assert!(remaining2.is_empty());
+
+        assert_eq!(parsed_r, &r[..]);
+        assert_eq!(parsed_s, &s[..]);
+    }
+
+    #[test]
+    fn test_r_with_high_bit_set_leading_zero() {
+        // r starts with 0x80 — DER will have a leading zero byte, SSH mpint should preserve it
+        let mut r = vec![0x00]; // DER leading zero for positive representation
+        r.push(0x80);
+        r.extend_from_slice(&[0x01; 31]);
+        // s is normal
+        let s: Vec<u8> = vec![0x42; 32];
+
+        let der = make_der_signature(&r, &s);
+        let ssh_sig = der_to_ssh_signature(&der).unwrap();
+
+        let (algo, rest) = sshenc_core::pubkey::read_ssh_string(&ssh_sig).unwrap();
+        assert_eq!(algo, b"ecdsa-sha2-nistp256");
+
+        let (inner, _) = sshenc_core::pubkey::read_ssh_string(rest).unwrap();
+        let (parsed_r, remaining) = sshenc_core::pubkey::read_ssh_string(inner).unwrap();
+        let (parsed_s, _) = sshenc_core::pubkey::read_ssh_string(remaining).unwrap();
+
+        // The leading zero should be preserved because the next byte has high bit set
+        assert_eq!(parsed_r[0], 0x00);
+        assert_eq!(parsed_r[1], 0x80);
+        assert_eq!(parsed_s, &s[..]);
+    }
+
+    #[test]
+    fn test_both_r_and_s_high_bit() {
+        // Both r and s have high bit set in their first real byte
+        let r = vec![0x00, 0xFF, 0x01, 0x02, 0x03];
+        let s = vec![0x00, 0x80, 0x04, 0x05, 0x06];
+        let der = make_der_signature(&r, &s);
+        let ssh_sig = der_to_ssh_signature(&der).unwrap();
+
+        let (_, rest) = sshenc_core::pubkey::read_ssh_string(&ssh_sig).unwrap();
+        let (inner, _) = sshenc_core::pubkey::read_ssh_string(rest).unwrap();
+        let (parsed_r, remaining) = sshenc_core::pubkey::read_ssh_string(inner).unwrap();
+        let (parsed_s, _) = sshenc_core::pubkey::read_ssh_string(remaining).unwrap();
+
+        // Leading zeros preserved for both
+        assert_eq!(parsed_r[0], 0x00);
+        assert_eq!(parsed_r[1], 0xFF);
+        assert_eq!(parsed_s[0], 0x00);
+        assert_eq!(parsed_s[1], 0x80);
+    }
 }

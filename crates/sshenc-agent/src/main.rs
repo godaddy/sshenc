@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sshenc_agent::server;
 
@@ -15,7 +15,9 @@ use sshenc_agent::server;
     about = "SSH agent daemon exposing Secure Enclave-backed identities to OpenSSH",
     long_about = "sshenc-agent is an ssh-agent-compatible daemon that serves Secure Enclave-backed\n\
                    SSH identities. It creates a Unix socket and handles identity enumeration\n\
-                   and signing requests using keys stored in the macOS Secure Enclave.",
+                   and signing requests using keys stored in the macOS Secure Enclave.\n\n\
+                   By default the agent daemonizes (backgrounds itself). Use --foreground to\n\
+                   keep it in the terminal.",
     version
 )]
 struct Cli {
@@ -24,7 +26,7 @@ struct Cli {
     socket: PathBuf,
 
     /// Run in foreground (don't daemonize).
-    #[arg(long, short = 'f', default_value_t = true)]
+    #[arg(long, short = 'f')]
     foreground: bool,
 
     /// Enable debug logging.
@@ -47,9 +49,19 @@ fn default_socket_path() -> PathBuf {
         .join("agent.sock")
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn default_pid_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".sshenc")
+        .join("agent.pid")
+}
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if !cli.foreground {
+        daemonize(&cli.socket)?;
+    }
 
     let level = if cli.debug { "debug" } else { "info" };
     tracing_subscriber::fmt()
@@ -76,5 +88,45 @@ async fn main() -> Result<()> {
         "starting sshenc-agent"
     );
 
-    server::run_agent(cli.socket, allowed_labels).await
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(server::run_agent(cli.socket, allowed_labels))
+}
+
+/// Fork to background, detach from terminal, write pidfile.
+fn daemonize(socket_path: &Path) -> Result<()> {
+    // Print connection info before forking (parent process)
+    println!("SSH_AUTH_SOCK={}", socket_path.display());
+    println!("export SSH_AUTH_SOCK={}", socket_path.display());
+
+    // Fork
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        anyhow::bail!("fork failed");
+    }
+    if pid > 0 {
+        // Parent — write pidfile and exit
+        let pid_path = default_pid_path();
+        if let Some(parent) = pid_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&pid_path, format!("{pid}\n")).ok();
+        std::process::exit(0);
+    }
+
+    // Child — new session, close stdio
+    unsafe {
+        libc::setsid();
+    }
+
+    // Redirect stdin/stdout/stderr to /dev/null
+    use std::os::unix::io::AsRawFd;
+    let devnull = std::fs::File::open("/dev/null")?;
+    let fd = devnull.as_raw_fd();
+    unsafe {
+        libc::dup2(fd, 0); // stdin
+        libc::dup2(fd, 1); // stdout
+        libc::dup2(fd, 2); // stderr
+    }
+
+    Ok(())
 }

@@ -108,15 +108,21 @@ Use `gitenc` to tell git which key to use:
 # Clone with a specific identity
 gitenc --label github-work clone git@github.com:mycompany/repo.git
 gitenc --label github-personal clone git@github.com:me/my-repo.git
+```
 
-# Day-to-day git — set the identity per-repo once
+Set a repo to always use a specific key:
+
+```sh
 cd mycompany-repo
-git config core.sshCommand "sshenc ssh --label github-work --"
+gitenc --config github-work
 
 cd my-personal-repo
-git config core.sshCommand "sshenc ssh --label github-personal --"
+gitenc --config github-personal
+```
 
-# After that, regular git commands use the right key automatically
+After that, regular git commands use the right key automatically:
+
+```sh
 git pull
 git push
 ```
@@ -219,6 +225,8 @@ sshenc ssh --label NAME [ssh args...]    # ssh with a specific SE key
 sshenc ssh [ssh args...]                 # ssh with default agent keys
 gitenc --label NAME [git args...]        # git with a specific SE key
 gitenc [git args...]                     # git with default agent keys
+gitenc --config NAME                     # set current repo to always use NAME
+gitenc --config                          # set current repo to use default
 ```
 
 ### Setup

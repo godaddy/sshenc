@@ -4,43 +4,98 @@
 //! gitenc: Git wrapper that selects sshenc Secure Enclave identities.
 //!
 //! Usage:
-//!   gitenc --label NAME [git args...]    # use a specific SE key
-//!   gitenc [git args...]                 # use default (agent picks)
+//!   gitenc --label NAME [git args...]         # use a specific SE key
+//!   gitenc [git args...]                      # use default (agent picks)
+//!   gitenc --config NAME                      # set this repo to always use NAME
+//!   gitenc --config                           # set this repo to use default agent
 //!
 //! Examples:
 //!   gitenc --label github-work clone git@github.com:org/repo.git
 //!   gitenc --label github-personal push origin main
-//!   gitenc pull                          # no label, default key selection
+//!   gitenc --config github-work               # configure current repo
+//!   gitenc pull                               # uses configured key
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let parsed = parse_args(&args);
 
-    let (label, git_args) = parse_args(&args);
+    match parsed {
+        ParsedArgs::Config(label) => configure_repo(label.as_deref()),
+        ParsedArgs::Run { label, git_args } => run_git(label.as_deref(), &git_args),
+    }
+}
 
-    let ssh_command = match &label {
+fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
+    let ssh_command = match label {
         Some(l) => format!("sshenc ssh --label {} --", l),
         None => "sshenc ssh --".to_string(),
     };
 
     let err = Command::new("git")
-        .args(&git_args)
+        .args(git_args)
         .env("GIT_SSH_COMMAND", &ssh_command)
         .exec();
 
-    // exec() only returns on error
     eprintln!("gitenc: failed to exec git: {err}");
     std::process::exit(1);
 }
 
-/// Parse --label NAME from the front of the args, return (label, remaining git args).
-fn parse_args(args: &[String]) -> (Option<String>, Vec<String>) {
+fn configure_repo(label: Option<&str>) {
+    let ssh_command = match label {
+        Some(l) => format!("sshenc ssh --label {} --", l),
+        None => "sshenc ssh --".to_string(),
+    };
+
+    let status = Command::new("git")
+        .args(["config", "core.sshCommand", &ssh_command])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => match label {
+            Some(l) => println!("Configured this repo to use sshenc key: {l}"),
+            None => println!("Configured this repo to use sshenc (default key)"),
+        },
+        Ok(s) => {
+            eprintln!(
+                "git config failed (exit {}). Are you in a git repo?",
+                s.code().unwrap_or(-1)
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("gitenc: failed to run git: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+enum ParsedArgs {
+    Config(Option<String>),
+    Run {
+        label: Option<String>,
+        git_args: Vec<String>,
+    },
+}
+
+fn parse_args(args: &[String]) -> ParsedArgs {
+    if !args.is_empty() && args[0] == "--config" {
+        let label = args.get(1).cloned();
+        return ParsedArgs::Config(label);
+    }
+
     if args.len() >= 2 && (args[0] == "--label" || args[0] == "-l") {
-        (Some(args[1].clone()), args[2..].to_vec())
+        ParsedArgs::Run {
+            label: Some(args[1].clone()),
+            git_args: args[2..].to_vec(),
+        }
     } else {
-        (None, args.to_vec())
+        ParsedArgs::Run {
+            label: None,
+            git_args: args.to_vec(),
+        }
     }
 }
 
@@ -60,41 +115,82 @@ mod tests {
             "clone",
             "git@github.com:org/repo.git",
         ]);
-        let (label, git_args) = parse_args(&args);
-        assert_eq!(label, Some("github-work".to_string()));
-        assert_eq!(git_args, s(&["clone", "git@github.com:org/repo.git"]));
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, Some("github-work".to_string()));
+                assert_eq!(git_args, s(&["clone", "git@github.com:org/repo.git"]));
+            }
+            _ => panic!("expected Run"),
+        }
     }
 
     #[test]
     fn test_parse_args_short_label() {
         let args = s(&["-l", "mykey", "push", "origin", "main"]);
-        let (label, git_args) = parse_args(&args);
-        assert_eq!(label, Some("mykey".to_string()));
-        assert_eq!(git_args, s(&["push", "origin", "main"]));
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, Some("mykey".to_string()));
+                assert_eq!(git_args, s(&["push", "origin", "main"]));
+            }
+            _ => panic!("expected Run"),
+        }
     }
 
     #[test]
     fn test_parse_args_no_label() {
         let args = s(&["pull", "--rebase"]);
-        let (label, git_args) = parse_args(&args);
-        assert_eq!(label, None);
-        assert_eq!(git_args, s(&["pull", "--rebase"]));
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, None);
+                assert_eq!(git_args, s(&["pull", "--rebase"]));
+            }
+            _ => panic!("expected Run"),
+        }
     }
 
     #[test]
     fn test_parse_args_empty() {
         let args: Vec<String> = Vec::new();
-        let (label, git_args) = parse_args(&args);
-        assert_eq!(label, None);
-        assert!(git_args.is_empty());
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, None);
+                assert!(git_args.is_empty());
+            }
+            _ => panic!("expected Run"),
+        }
     }
 
     #[test]
     fn test_parse_args_label_no_value() {
-        // --label with no following value: only 1 arg, so len < 2, falls through to None
         let args = s(&["--label"]);
-        let (label, git_args) = parse_args(&args);
-        assert_eq!(label, None);
-        assert_eq!(git_args, s(&["--label"]));
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, None);
+                assert_eq!(git_args, s(&["--label"]));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_config_with_label() {
+        let args = s(&["--config", "github-work"]);
+        match parse_args(&args) {
+            ParsedArgs::Config(label) => {
+                assert_eq!(label, Some("github-work".to_string()));
+            }
+            _ => panic!("expected Config"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_config_without_label() {
+        let args = s(&["--config"]);
+        match parse_args(&args) {
+            ParsedArgs::Config(label) => {
+                assert_eq!(label, None);
+            }
+            _ => panic!("expected Config"),
+        }
     }
 }

@@ -341,6 +341,29 @@ pub fn install() -> Result<()> {
         println!("Agent already running.");
     }
 
+    // On Windows, set GIT_SSH_COMMAND as a user environment variable so that
+    // Git Bash (which bundles MINGW SSH that doesn't support named pipes) uses
+    // the real Windows OpenSSH instead.
+    #[cfg(target_os = "windows")]
+    {
+        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        if std::path::Path::new(win_ssh).exists() {
+            let status = std::process::Command::new("setx")
+                .args(["GIT_SSH_COMMAND", win_ssh])
+                .stdout(std::process::Stdio::null())
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("Set GIT_SSH_COMMAND={win_ssh} (for Git Bash compatibility).");
+                }
+                _ => {
+                    eprintln!("warning: could not set GIT_SSH_COMMAND. Git Bash users should run:");
+                    eprintln!("  setx GIT_SSH_COMMAND \"{}\"", win_ssh);
+                }
+            }
+        }
+    }
+
     println!();
     println!("SSH will now use sshenc for all connections.");
     println!("Your existing ~/.ssh keys continue to work as fallback.");
@@ -472,6 +495,19 @@ pub fn uninstall() -> Result<()> {
             );
         }
     }
+
+    // On Windows, remove the GIT_SSH_COMMAND user environment variable
+    #[cfg(target_os = "windows")]
+    {
+        // setx with empty value doesn't work; use reg delete instead
+        let _ = std::process::Command::new("reg")
+            .args(["delete", "HKCU\\Environment", "/v", "GIT_SSH_COMMAND", "/f"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        println!("Removed GIT_SSH_COMMAND environment variable.");
+    }
+
     Ok(())
 }
 

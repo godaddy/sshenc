@@ -336,12 +336,33 @@ Config file: `~/Library/Application Support/sshenc/config.toml`
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 
+## Windows notes
+
+On Windows, `sshenc install` does two things:
+
+1. Adds `IdentityAgent` to `~/.ssh/config` (for Windows OpenSSH)
+2. Sets `GIT_SSH_COMMAND=C:\Windows\System32\OpenSSH\ssh.exe` as a user
+   environment variable
+
+The second step is needed because Git for Windows bundles its own MINGW SSH
+binary that doesn't support Windows named pipes. By setting `GIT_SSH_COMMAND`,
+all git operations (including from Git Bash) use the real Windows OpenSSH
+which talks to the sshenc agent correctly.
+
+`sshenc uninstall` removes both.
+
+**WSL:** WSL is a separate Linux environment and can't directly access Windows
+named pipes. WSL users should install sshenc natively in WSL (when a Linux
+build is available), or use a pipe relay tool like `npiperelay` to bridge
+the Unix socket in WSL to the named pipe in Windows.
+
 ## Limitations
 
-- **macOS only** — requires Apple Silicon or T2 Mac (Secure Enclave)
-- **P-256 only** — Ed25519 and RSA can't be created in the SE, but existing
+- **macOS or Windows** — requires Apple Silicon/T2 (Secure Enclave) or
+  Windows with TPM 2.0
+- **P-256 only** — Ed25519 and RSA can't be created in hardware, but existing
   keys in `~/.ssh` still work as SSH handles them natively
-- **Non-exportable** — losing the device means losing the SE keys
+- **Non-exportable** — losing the device means losing the hardware keys
 
 ## Development
 

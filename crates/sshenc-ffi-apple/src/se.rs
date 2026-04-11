@@ -167,7 +167,7 @@ pub struct KeyMeta {
 }
 
 /// Save a key's data representation, public key, and metadata to the keys directory.
-/// Uses atomic writes (write to temp, rename) to prevent partial files.
+/// Uses a file lock to prevent concurrent writes and atomic writes to prevent partial files.
 pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8], meta: &KeyMeta) -> Result<()> {
     let dir = keys_dir();
     std::fs::create_dir_all(&dir)?;
@@ -177,6 +177,9 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8], meta: &KeyMeta) ->
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
+
+    // Lock the keys directory to prevent concurrent writes
+    let _lock = DirLock::acquire(&dir)?;
 
     let handle_path = dir.join(format!("{label}.handle"));
     let pub_path = dir.join(format!("{label}.pub"));
@@ -188,8 +191,8 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8], meta: &KeyMeta) ->
     atomic_write(&pub_path, pub_key)?;
     let ssh_line = format_ssh_pub_key(pub_key, label);
     atomic_write(&ssh_pub_path, format!("{ssh_line}\n").as_bytes())?;
-    let meta_json = serde_json::to_string_pretty(meta)
-        .map_err(|e| SeError::Io(std::io::Error::other(e)))?;
+    let meta_json =
+        serde_json::to_string_pretty(meta).map_err(|e| SeError::Io(std::io::Error::other(e)))?;
     atomic_write(&meta_path, meta_json.as_bytes())?;
 
     // Restrictive permissions
@@ -201,6 +204,31 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8], meta: &KeyMeta) ->
     }
 
     Ok(())
+}
+
+/// File-based directory lock using flock. Dropped when the guard goes out of scope.
+struct DirLock {
+    _file: std::fs::File,
+}
+
+impl DirLock {
+    fn acquire(dir: &std::path::Path) -> Result<Self> {
+        let lock_path = dir.join(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc != 0 {
+                return Err(SeError::Io(std::io::Error::last_os_error()));
+            }
+        }
+        Ok(DirLock { _file: file })
+    }
 }
 
 /// Write data atomically: write to a temp file, then rename.
@@ -259,6 +287,8 @@ pub fn delete_key(label: &str) -> Result<()> {
     if !handle_path.exists() {
         return Err(SeError::LoadFailed(format!("key not found: {label}")));
     }
+
+    let _lock = DirLock::acquire(&dir)?;
 
     std::fs::remove_file(&handle_path)?;
     let _ = std::fs::remove_file(dir.join(format!("{label}.pub")));

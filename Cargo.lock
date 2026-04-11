@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-agent"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-agent-proto"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "byteorder",
  "bytes",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-cli"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "byteorder",
@@ -683,9 +683,10 @@ dependencies = [
 
 [[package]]
 name = "sshenc-ffi-apple"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "dirs",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",
@@ -693,11 +694,11 @@ dependencies = [
 
 [[package]]
 name = "sshenc-gitenc"
-version = "0.2.6"
+version = "0.2.7"
 
 [[package]]
 name = "sshenc-keygen-cli"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -710,14 +711,14 @@ dependencies = [
 
 [[package]]
 name = "sshenc-pkcs11"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "sshenc-se"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "sshenc-core",
  "sshenc-ffi-apple",
@@ -727,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-test-support"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "rand",
  "sshenc-core",

@@ -305,4 +305,65 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn test_install_with_dylib_path() {
+        let dir = temp_dir("with-dylib");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+        let dylib = PathBuf::from("/usr/local/lib/sshenc-launcher.dylib");
+
+        let result = install_block(&config_path, &socket, Some(&dylib)).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("IdentityAgent /tmp/.sshenc/agent.sock"));
+        assert!(content.contains("PKCS11Provider /usr/local/lib/sshenc-launcher.dylib"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_without_dylib_path() {
+        let dir = temp_dir("without-dylib");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+
+        let result = install_block(&config_path, &socket, None).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("IdentityAgent /tmp/.sshenc/agent.sock"));
+        assert!(!content.contains("PKCS11Provider"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_removes_block_with_dylib() {
+        let dir = temp_dir("uninstall-dylib");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+        let dylib = PathBuf::from("/usr/local/lib/sshenc-launcher.dylib");
+
+        std::fs::write(&config_path, "Host foo\n    User bar\n").unwrap();
+        install_block(&config_path, &socket, Some(&dylib)).unwrap();
+
+        // Verify PKCS11Provider was written
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("PKCS11Provider"));
+
+        // Uninstall should remove the entire block including PKCS11Provider
+        let result = uninstall_block(&config_path).unwrap();
+        assert_eq!(result, UninstallResult::Removed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!content.contains(BEGIN_MARKER));
+        assert!(!content.contains(END_MARKER));
+        assert!(!content.contains("IdentityAgent"));
+        assert!(!content.contains("PKCS11Provider"));
+        assert!(content.contains("Host foo"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

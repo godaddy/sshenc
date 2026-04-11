@@ -114,4 +114,99 @@ mod tests {
         let result = read_message_frame(&mut cursor);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_read_string_exact_buffer() {
+        // Buffer contains exactly the string, no remainder
+        let mut buf = Vec::new();
+        write_string(&mut buf, b"exact");
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_string(&mut cursor).unwrap();
+        assert_eq!(result, b"exact");
+        // Cursor should be at the end
+        assert_eq!(cursor.position() as usize, buf.len());
+    }
+
+    #[test]
+    fn test_read_string_with_remainder() {
+        // Write two strings, read the first, verify cursor position
+        let mut buf = Vec::new();
+        write_string(&mut buf, b"first");
+        write_string(&mut buf, b"second");
+        let mut cursor = Cursor::new(buf.as_slice());
+        let first = read_string(&mut cursor).unwrap();
+        assert_eq!(first, b"first");
+        // Read the second to confirm remainder is intact
+        let second = read_string(&mut cursor).unwrap();
+        assert_eq!(second, b"second");
+    }
+
+    #[test]
+    fn test_write_then_read_string_empty_data() {
+        let mut buf = Vec::new();
+        write_string(&mut buf, b"");
+        // Should have written 4 bytes for length (0) and 0 data bytes
+        assert_eq!(buf.len(), 4);
+
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_string(&mut cursor).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_write_then_read_string_large_data() {
+        let large = vec![0xAB_u8; 1000];
+        let mut buf = Vec::new();
+        write_string(&mut buf, &large);
+        assert_eq!(buf.len(), 4 + 1000);
+
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_string(&mut cursor).unwrap();
+        assert_eq!(result, large);
+    }
+
+    #[test]
+    fn test_read_u32_zero() {
+        let data: [u8; 4] = [0, 0, 0, 0];
+        let mut cursor = Cursor::new(data.as_slice());
+        assert_eq!(read_u32(&mut cursor).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_read_u32_one() {
+        let data: [u8; 4] = [0, 0, 0, 1];
+        let mut cursor = Cursor::new(data.as_slice());
+        assert_eq!(read_u32(&mut cursor).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_read_u32_max() {
+        let data: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
+        let mut cursor = Cursor::new(data.as_slice());
+        assert_eq!(read_u32(&mut cursor).unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn test_read_message_frame_exactly_max_size() {
+        let max_len: u32 = 256 * 1024;
+        let payload = vec![0x42_u8; max_len as usize];
+        let mut buf = Vec::new();
+        buf.write_u32::<BigEndian>(max_len).unwrap();
+        buf.extend_from_slice(&payload);
+
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_message_frame(&mut cursor).unwrap();
+        assert_eq!(result.len(), max_len as usize);
+        assert_eq!(result, payload);
+    }
+
+    #[test]
+    fn test_read_message_frame_one_over_max_rejected() {
+        let over_max: u32 = 256 * 1024 + 1;
+        let mut buf = Vec::new();
+        buf.write_u32::<BigEndian>(over_max).unwrap();
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_message_frame(&mut cursor);
+        assert!(result.is_err(), "one byte over max should be rejected");
+    }
 }

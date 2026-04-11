@@ -61,3 +61,124 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_display_key_not_found() {
+        let e = Error::KeyNotFound {
+            label: "mykey".into(),
+        };
+        let msg = e.to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("mykey"));
+    }
+
+    #[test]
+    fn test_display_duplicate_label() {
+        let e = Error::DuplicateLabel {
+            label: "dup".into(),
+        };
+        let msg = e.to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("dup"));
+    }
+
+    #[test]
+    fn test_display_ambiguous_selector() {
+        let e = Error::AmbiguousSelector {
+            selector: "gh".into(),
+            count: 3,
+        };
+        let msg = e.to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("gh"));
+        assert!(msg.contains("3"));
+    }
+
+    #[test]
+    fn test_display_invalid_label() {
+        let e = Error::InvalidLabel {
+            reason: "empty".into(),
+        };
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_display_secure_enclave() {
+        let e = Error::SecureEnclave {
+            operation: "sign".into(),
+            detail: "timeout".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("sign"));
+        assert!(msg.contains("timeout"));
+    }
+
+    #[test]
+    fn test_display_ssh_encoding() {
+        let e = Error::SshEncoding("bad format".into());
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_display_invalid_public_key() {
+        let e = Error::InvalidPublicKey("wrong length".into());
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_display_config() {
+        let e = Error::Config("missing field".into());
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_display_agent_protocol() {
+        let e = Error::AgentProtocol("unexpected message".into());
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_display_pkcs11() {
+        let e = Error::Pkcs11("init failed".into());
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_display_cancelled() {
+        let e = Error::Cancelled;
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_display_other() {
+        let e = Error::Other("something".into());
+        assert_eq!(e.to_string(), "something");
+    }
+
+    #[test]
+    fn test_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let e: Error = io_err.into();
+        match &e {
+            Error::Io(_) => {}
+            other => panic!("expected Error::Io, got: {other}"),
+        }
+        assert!(e.to_string().contains("file missing"));
+    }
+
+    #[test]
+    fn test_from_serde_json_error() {
+        // Create a serde_json error by parsing invalid JSON
+        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let e: Error = json_err.into();
+        match &e {
+            Error::Json(_) => {}
+            other => panic!("expected Error::Json, got: {other}"),
+        }
+        assert!(!e.to_string().is_empty());
+    }
+}

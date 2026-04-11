@@ -1,17 +1,17 @@
 class Sshenc < Formula
   desc "macOS Secure Enclave-backed SSH key management"
   homepage "https://github.com/jgowdy/sshenc"
-  version "0.2.4"
+  version "0.2.5"
   license "MIT"
 
   on_arm do
-    url "https://github.com/jgowdy/sshenc/releases/download/v0.2.4/sshenc-aarch64-apple-darwin.tar.gz"
-    sha256 "d030006555293e72e9863cd205c5f679f47b82a883805568a7cd2c4b7a994ef7"
+    url "https://github.com/jgowdy/sshenc/releases/download/v0.2.5/sshenc-aarch64-apple-darwin.tar.gz"
+    sha256 "1a541f354b90ba4adeeb09f9ca2dd6c0f11c138ad609baaeb7c042e47d1ce860"
   end
 
   on_intel do
-    url "https://github.com/jgowdy/sshenc/releases/download/v0.2.4/sshenc-x86_64-apple-darwin.tar.gz"
-    sha256 "999776fc8270d21e26e75e28bdb1c064bba3aad7142c5697b6505b23d474f282"
+    url "https://github.com/jgowdy/sshenc/releases/download/v0.2.5/sshenc-x86_64-apple-darwin.tar.gz"
+    sha256 "9f479df6fc41ebe55d36cd9e409b23653e3571532185b53b12109df264b771a0"
   end
 
   depends_on :macos
@@ -20,6 +20,7 @@ class Sshenc < Formula
     bin.install "sshenc"
     bin.install "sshenc-keygen"
     bin.install "sshenc-agent"
+    bin.install "gitenc"
     lib.install "libsshenc_pkcs11.dylib"
   end
 

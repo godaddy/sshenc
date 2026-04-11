@@ -217,4 +217,106 @@ mod tests {
         let result = backend.sign("missing", b"data");
         assert!(matches!(result, Err(Error::KeyNotFound { .. })));
     }
+
+    #[test]
+    fn test_mock_generate_empty_comment() {
+        let backend = MockKeyBackend::new();
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("no-comment").unwrap(),
+            comment: None,
+            requires_user_presence: false,
+            write_pub_path: None,
+        };
+        let info = backend.generate(&opts).unwrap();
+        assert!(info.metadata.comment.is_none());
+        assert_eq!(info.metadata.label.as_str(), "no-comment");
+    }
+
+    #[test]
+    fn test_mock_generate_with_write_pub_path() {
+        let dir = std::env::temp_dir().join("sshenc-test-mock-pubkey");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pub_path = dir.join("test-key.pub");
+
+        let backend = MockKeyBackend::new();
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("pub-write-key").unwrap(),
+            comment: Some("test@host".into()),
+            requires_user_presence: false,
+            write_pub_path: Some(pub_path.clone()),
+        };
+        let info = backend.generate(&opts).unwrap();
+        assert_eq!(info.pub_file_path, Some(pub_path.clone()));
+
+        let contents = std::fs::read_to_string(&pub_path).unwrap();
+        assert!(
+            contents.contains("ecdsa-sha2-nistp256"),
+            "pub file should contain ecdsa-sha2-nistp256, got: {contents}"
+        );
+        assert!(
+            contents.contains("test@host"),
+            "pub file should contain the comment"
+        );
+
+        // Cleanup
+        std::fs::remove_file(&pub_path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn test_mock_list_returns_all_keys() {
+        let backend = MockKeyBackend::new();
+        backend.generate(&make_opts("alpha")).unwrap();
+        backend.generate(&make_opts("beta")).unwrap();
+        backend.generate(&make_opts("gamma")).unwrap();
+
+        let list = backend.list().unwrap();
+        assert_eq!(list.len(), 3);
+
+        let labels: Vec<&str> = list.iter().map(|k| k.metadata.label.as_str()).collect();
+        assert!(labels.contains(&"alpha"));
+        assert!(labels.contains(&"beta"));
+        assert!(labels.contains(&"gamma"));
+    }
+
+    #[test]
+    fn test_mock_sign_different_data_produces_different_signatures() {
+        let backend = MockKeyBackend::new();
+        backend.generate(&make_opts("sig-key")).unwrap();
+        let sig1 = backend.sign("sig-key", b"message-one").unwrap();
+        let sig2 = backend.sign("sig-key", b"message-two").unwrap();
+        assert_ne!(
+            sig1, sig2,
+            "different data should produce different signatures"
+        );
+    }
+
+    #[test]
+    fn test_mock_sign_different_keys_produce_different_signatures() {
+        let backend = MockKeyBackend::new();
+        backend.generate(&make_opts("key-x")).unwrap();
+        backend.generate(&make_opts("key-y")).unwrap();
+        let sig1 = backend.sign("key-x", b"same-data").unwrap();
+        let sig2 = backend.sign("key-y", b"same-data").unwrap();
+        assert_ne!(
+            sig1, sig2,
+            "different keys (different seeds) should produce different signatures for same data"
+        );
+    }
+
+    #[test]
+    fn test_mock_get_after_delete_returns_key_not_found() {
+        let backend = MockKeyBackend::new();
+        backend.generate(&make_opts("ephemeral")).unwrap();
+        // Verify it exists
+        backend.get("ephemeral").unwrap();
+        // Delete it
+        backend.delete("ephemeral").unwrap();
+        // Now get should fail
+        let result = backend.get("ephemeral");
+        assert!(
+            matches!(result, Err(Error::KeyNotFound { .. })),
+            "get after delete should return KeyNotFound"
+        );
+    }
 }

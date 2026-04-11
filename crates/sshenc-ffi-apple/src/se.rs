@@ -292,3 +292,91 @@ pub fn list_key_labels() -> Result<Vec<String>> {
     labels.sort();
     Ok(labels)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_base64_encode_rfc4648_vectors() {
+        // RFC 4648 §10 test vectors
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn test_write_ssh_string() {
+        let mut buf = Vec::new();
+        write_ssh_string(&mut buf, b"hello");
+        // 4-byte big-endian length (5) followed by "hello"
+        assert_eq!(buf.len(), 4 + 5);
+        assert_eq!(&buf[..4], &[0, 0, 0, 5]);
+        assert_eq!(&buf[4..], b"hello");
+    }
+
+    #[test]
+    fn test_write_ssh_string_empty() {
+        let mut buf = Vec::new();
+        write_ssh_string(&mut buf, b"");
+        assert_eq!(buf, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_format_ssh_pub_key() {
+        // Create a fake 65-byte uncompressed EC point (0x04 prefix + 64 bytes)
+        let mut ec_point = vec![0x04u8];
+        ec_point.extend_from_slice(&[0xAB; 32]); // fake X
+        ec_point.extend_from_slice(&[0xCD; 32]); // fake Y
+        assert_eq!(ec_point.len(), 65);
+
+        let line = format_ssh_pub_key(&ec_point, "testkey");
+
+        // Must start with the key type
+        assert!(line.starts_with("ecdsa-sha2-nistp256 "));
+        // Must end with the comment
+        assert!(line.ends_with(" testkey"));
+
+        // Extract the base64 portion and verify it decodes
+        let parts: Vec<&str> = line.split(' ').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "ecdsa-sha2-nistp256");
+        assert_eq!(parts[2], "testkey");
+
+        // The base64 portion should only contain valid base64 characters
+        let b64 = parts[1];
+        assert!(b64
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(!b64.is_empty());
+    }
+
+    #[test]
+    fn test_ssh_pub_path() {
+        let path = ssh_pub_path("mykey");
+        let path_str = path.to_string_lossy();
+        // Should end with the label's ssh.pub file
+        assert!(path_str.ends_with("mykey.ssh.pub"));
+        // Should be inside the keys directory
+        assert!(path_str.contains(".sshenc/keys"));
+    }
+
+    #[test]
+    fn test_keys_dir() {
+        let dir = keys_dir();
+        let dir_str = dir.to_string_lossy();
+        assert!(
+            dir_str.contains(".sshenc/keys"),
+            "keys_dir should contain .sshenc/keys, got: {dir_str}"
+        );
+        // Should be an absolute path
+        assert!(
+            dir.is_absolute() || dir_str.starts_with("/tmp"),
+            "keys_dir should be absolute, got: {dir_str}"
+        );
+    }
+}

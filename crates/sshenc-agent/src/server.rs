@@ -210,3 +210,170 @@ fn handle_request(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sshenc_core::key::{KeyGenOptions, KeyLabel};
+    use sshenc_test_support::MockKeyBackend;
+
+    fn setup_backend() -> MockKeyBackend {
+        let backend = MockKeyBackend::new();
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("test-key").unwrap(),
+            comment: Some("test".into()),
+            requires_user_presence: false,
+            write_pub_path: None,
+        };
+        backend.generate(&opts).unwrap();
+        backend
+    }
+
+    fn get_key_blob(backend: &MockKeyBackend) -> Vec<u8> {
+        let keys = backend.list().unwrap();
+        let key = &keys[0];
+        let pubkey = SshPublicKey::from_sec1_bytes(&key.public_key_bytes, None).unwrap();
+        pubkey.to_wire_format()
+    }
+
+    #[test]
+    fn test_request_identities_returns_keys() {
+        let backend = setup_backend();
+        let resp = handle_request(AgentRequest::RequestIdentities, &backend, &[]).unwrap();
+        match resp {
+            AgentResponse::IdentitiesAnswer(ids) => {
+                assert_eq!(ids.len(), 1);
+                assert!(!ids[0].key_blob.is_empty());
+            }
+            _ => panic!("expected IdentitiesAnswer"),
+        }
+    }
+
+    #[test]
+    fn test_request_identities_empty_backend() {
+        let backend = MockKeyBackend::new();
+        let resp = handle_request(AgentRequest::RequestIdentities, &backend, &[]).unwrap();
+        match resp {
+            AgentResponse::IdentitiesAnswer(ids) => assert!(ids.is_empty()),
+            _ => panic!("expected IdentitiesAnswer"),
+        }
+    }
+
+    #[test]
+    fn test_request_identities_filtered_by_labels() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate(&KeyGenOptions {
+                label: KeyLabel::new("allowed").unwrap(),
+                comment: None,
+                requires_user_presence: false,
+                write_pub_path: None,
+            })
+            .unwrap();
+        backend
+            .generate(&KeyGenOptions {
+                label: KeyLabel::new("blocked").unwrap(),
+                comment: None,
+                requires_user_presence: false,
+                write_pub_path: None,
+            })
+            .unwrap();
+
+        let allowed = vec!["allowed".to_string()];
+        let resp = handle_request(AgentRequest::RequestIdentities, &backend, &allowed).unwrap();
+        match resp {
+            AgentResponse::IdentitiesAnswer(ids) => assert_eq!(ids.len(), 1),
+            _ => panic!("expected IdentitiesAnswer"),
+        }
+    }
+
+    #[test]
+    fn test_sign_request_valid_key() {
+        let backend = setup_backend();
+        let key_blob = get_key_blob(&backend);
+
+        let resp = handle_request(
+            AgentRequest::SignRequest {
+                key_blob,
+                data: b"test data".to_vec(),
+                flags: 0,
+            },
+            &backend,
+            &[],
+        )
+        .unwrap();
+        match resp {
+            AgentResponse::SignResponse { signature_blob } => {
+                assert!(!signature_blob.is_empty());
+            }
+            _ => panic!("expected SignResponse"),
+        }
+    }
+
+    #[test]
+    fn test_sign_request_unknown_key() {
+        let backend = setup_backend();
+        let resp = handle_request(
+            AgentRequest::SignRequest {
+                key_blob: b"nonexistent-key-blob".to_vec(),
+                data: b"test data".to_vec(),
+                flags: 0,
+            },
+            &backend,
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+    }
+
+    #[test]
+    fn test_sign_request_blocked_by_label_filter() {
+        let backend = setup_backend();
+        let key_blob = get_key_blob(&backend);
+
+        let allowed = vec!["other-key".to_string()];
+        let resp = handle_request(
+            AgentRequest::SignRequest {
+                key_blob,
+                data: b"test data".to_vec(),
+                flags: 0,
+            },
+            &backend,
+            &allowed,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+    }
+
+    #[test]
+    fn test_unknown_message_type() {
+        let backend = setup_backend();
+        let resp = handle_request(AgentRequest::Unknown(255), &backend, &[]).unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+    }
+
+    #[test]
+    fn test_sign_produces_valid_ssh_signature() {
+        let backend = setup_backend();
+        let key_blob = get_key_blob(&backend);
+
+        let resp = handle_request(
+            AgentRequest::SignRequest {
+                key_blob,
+                data: b"challenge data".to_vec(),
+                flags: 0,
+            },
+            &backend,
+            &[],
+        )
+        .unwrap();
+
+        if let AgentResponse::SignResponse { signature_blob } = resp {
+            // SSH signature format: string(algo) + string(sig_data)
+            let (algo, _) = sshenc_core::pubkey::read_ssh_string(&signature_blob).unwrap();
+            assert_eq!(algo, b"ecdsa-sha2-nistp256");
+        } else {
+            panic!("expected SignResponse");
+        }
+    }
+}

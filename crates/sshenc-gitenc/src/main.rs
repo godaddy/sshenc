@@ -43,3 +43,58 @@ fn parse_args(args: &[String]) -> (Option<String>, Vec<String>) {
         (None, args.to_vec())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_parse_args_long_label() {
+        let args = s(&[
+            "--label",
+            "github-work",
+            "clone",
+            "git@github.com:org/repo.git",
+        ]);
+        let (label, git_args) = parse_args(&args);
+        assert_eq!(label, Some("github-work".to_string()));
+        assert_eq!(git_args, s(&["clone", "git@github.com:org/repo.git"]));
+    }
+
+    #[test]
+    fn test_parse_args_short_label() {
+        let args = s(&["-l", "mykey", "push", "origin", "main"]);
+        let (label, git_args) = parse_args(&args);
+        assert_eq!(label, Some("mykey".to_string()));
+        assert_eq!(git_args, s(&["push", "origin", "main"]));
+    }
+
+    #[test]
+    fn test_parse_args_no_label() {
+        let args = s(&["pull", "--rebase"]);
+        let (label, git_args) = parse_args(&args);
+        assert_eq!(label, None);
+        assert_eq!(git_args, s(&["pull", "--rebase"]));
+    }
+
+    #[test]
+    fn test_parse_args_empty() {
+        let args: Vec<String> = Vec::new();
+        let (label, git_args) = parse_args(&args);
+        assert_eq!(label, None);
+        assert!(git_args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_args_label_no_value() {
+        // --label with no following value: only 1 arg, so len < 2, falls through to None
+        let args = s(&["--label"]);
+        let (label, git_args) = parse_args(&args);
+        assert_eq!(label, None);
+        assert_eq!(git_args, s(&["--label"]));
+    }
+}

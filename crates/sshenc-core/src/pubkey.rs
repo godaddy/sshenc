@@ -307,4 +307,97 @@ mod tests {
         let err = SshPublicKey::from_openssh_line("ecdsa-sha2-nistp256").unwrap_err();
         assert!(err.to_string().contains("at least"));
     }
+
+    #[test]
+    fn test_comment_with_spaces_and_special_chars() {
+        let point = sample_ec_point();
+        let comment = "user@host (work laptop) #2 <admin>";
+        let key = SshPublicKey::from_sec1_bytes(&point, Some(comment.into())).unwrap();
+        assert_eq!(key.comment(), Some(comment));
+
+        // Roundtrip through openssh line format
+        let line = key.to_openssh_line();
+        assert!(line.ends_with(comment));
+        let parsed = SshPublicKey::from_openssh_line(&line).unwrap();
+        assert_eq!(parsed.comment(), Some(comment));
+        assert_eq!(parsed.ec_point(), key.ec_point());
+    }
+
+    #[test]
+    fn test_parse_openssh_line_with_extra_whitespace() {
+        // from_openssh_line uses splitn(3, ' '), so leading spaces in key type
+        // would cause a mismatch. But trailing spaces in the comment field are
+        // preserved. Test that a well-formed line with a space-containing comment
+        // parses correctly.
+        let point = sample_ec_point();
+        let key = SshPublicKey::from_sec1_bytes(&point, Some("my comment".into())).unwrap();
+        let line = key.to_openssh_line();
+        // The comment part is everything after the second space, via splitn(3, ' ')
+        let parsed = SshPublicKey::from_openssh_line(&line).unwrap();
+        assert_eq!(parsed.comment(), Some("my comment"));
+    }
+
+    #[test]
+    fn test_wire_blob_is_deterministic() {
+        let point = sample_ec_point();
+        let key = SshPublicKey::from_sec1_bytes(&point, Some("det-test".into())).unwrap();
+        let blob1 = key.wire_blob();
+        let blob2 = key.wire_blob();
+        assert_eq!(blob1, blob2, "wire_blob must be deterministic");
+        // Also verify it matches to_wire_format
+        assert_eq!(blob1, key.to_wire_format());
+    }
+
+    #[test]
+    fn test_read_ssh_string_at_exact_boundary() {
+        // Build a buffer with exactly one string, no extra bytes
+        let mut buf = Vec::new();
+        write_ssh_string(&mut buf, b"boundary-test");
+        let (data, rest) = read_ssh_string(&buf).unwrap();
+        assert_eq!(data, b"boundary-test");
+        assert!(
+            rest.is_empty(),
+            "remainder should be empty at exact boundary"
+        );
+    }
+
+    #[test]
+    fn test_read_ssh_string_with_remainder() {
+        let mut buf = Vec::new();
+        write_ssh_string(&mut buf, b"first");
+        write_ssh_string(&mut buf, b"second");
+        let (data, rest) = read_ssh_string(&buf).unwrap();
+        assert_eq!(data, b"first");
+        // The remainder should contain the second string
+        let (data2, rest2) = read_ssh_string(rest).unwrap();
+        assert_eq!(data2, b"second");
+        assert!(rest2.is_empty());
+    }
+
+    #[test]
+    fn test_read_ssh_string_empty_string() {
+        let mut buf = Vec::new();
+        write_ssh_string(&mut buf, b"");
+        let (data, rest) = read_ssh_string(&buf).unwrap();
+        assert!(data.is_empty());
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn test_read_ssh_string_buffer_too_short() {
+        // Only 3 bytes, need at least 4 for the length prefix
+        let buf = [0u8; 3];
+        let result = read_ssh_string(&buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_ssh_string_truncated_data() {
+        // Length says 10 bytes, but only 5 available
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&10u32.to_be_bytes());
+        buf.extend_from_slice(&[0u8; 5]);
+        let result = read_ssh_string(&buf);
+        assert!(result.is_err());
+    }
 }

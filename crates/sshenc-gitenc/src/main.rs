@@ -15,6 +15,7 @@
 //!   gitenc --config github-work               # configure current repo
 //!   gitenc pull                               # uses configured key
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -34,13 +35,32 @@ fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
         None => "sshenc ssh --".to_string(),
     };
 
-    let err = Command::new("git")
-        .args(git_args)
-        .env("GIT_SSH_COMMAND", &ssh_command)
-        .exec();
+    #[cfg(unix)]
+    {
+        let err = Command::new("git")
+            .args(git_args)
+            .env("GIT_SSH_COMMAND", &ssh_command)
+            .exec();
 
-    eprintln!("gitenc: failed to exec git: {err}");
-    std::process::exit(1);
+        eprintln!("gitenc: failed to exec git: {err}");
+        std::process::exit(1);
+    }
+
+    #[cfg(windows)]
+    {
+        let status = Command::new("git")
+            .args(git_args)
+            .env("GIT_SSH_COMMAND", &ssh_command)
+            .status();
+
+        match status {
+            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+            Err(e) => {
+                eprintln!("gitenc: failed to run git: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 }
 
 fn configure_repo(label: Option<&str>) {
@@ -48,7 +68,9 @@ fn configure_repo(label: Option<&str>) {
     let ssh_command = format!("sshenc ssh --label {} --", effective_label);
 
     // Determine the signing key path
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| "/tmp".into());
     let signing_key = if effective_label == "default" {
         format!("{home}/.ssh/id_ecdsa.pub")
     } else {

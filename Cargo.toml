@@ -8,13 +8,14 @@ members = [
     "crates/sshenc-keygen-cli",
     "crates/sshenc-pkcs11",
     "crates/sshenc-ffi-apple",
+    "crates/sshenc-ffi-windows",
     "crates/sshenc-test-support",
     "crates/sshenc-gitenc",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
@@ -27,6 +28,7 @@ sshenc-se = { path = "crates/sshenc-se" }
 sshenc-agent-proto = { path = "crates/sshenc-agent-proto" }
 sshenc-agent = { path = "crates/sshenc-agent" }
 sshenc-ffi-apple = { path = "crates/sshenc-ffi-apple" }
+sshenc-ffi-windows = { path = "crates/sshenc-ffi-windows" }
 sshenc-test-support = { path = "crates/sshenc-test-support" }
 
 # Serialization
@@ -56,11 +58,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Apple frameworks (macOS only)
-core-foundation = "0.10"
-core-foundation-sys = "0.8"
-security-framework = "3"
-security-framework-sys = "2"
+# Windows CNG (Windows only)
+windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 # Byte manipulation
 byteorder = "1"

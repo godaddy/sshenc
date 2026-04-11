@@ -12,10 +12,10 @@ mod commands;
 #[derive(Parser)]
 #[command(
     name = "sshenc",
-    about = "Manage macOS Secure Enclave-backed SSH keys",
-    long_about = "sshenc creates, manages, and uses macOS Secure Enclave-backed SSH keys for\n\
+    about = "Manage hardware-backed SSH keys",
+    long_about = "sshenc creates, manages, and uses hardware-backed SSH keys for\n\
                    OpenSSH and git+ssh workflows. Keys are non-exportable, device-bound ECDSA P-256\n\
-                   keys stored in the Secure Enclave.",
+                   keys stored in the Secure Enclave (macOS) or TPM 2.0 (Windows).",
     version,
     propagate_version = true
 )]
@@ -217,21 +217,21 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    #[cfg(not(target_os = "macos"))]
-    bail!("sshenc requires macOS with Secure Enclave");
+    let pub_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".ssh");
 
     #[cfg(target_os = "macos")]
-    {
-        let pub_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(".ssh");
-        let backend = sshenc_se::SecureEnclaveBackend::new(pub_dir);
-        run_command(cli.command, &backend)
-    }
+    let backend = sshenc_se::SecureEnclaveBackend::new(pub_dir);
+    #[cfg(target_os = "windows")]
+    let backend = sshenc_se::TpmBackend::new(pub_dir);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    anyhow::bail!("sshenc requires macOS Secure Enclave or Windows TPM 2.0");
+
+    run_command(cli.command, &backend)
 }
 
-#[cfg(target_os = "macos")]
-fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> Result<()> {
+fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result<()> {
     match command {
         Commands::Keygen {
             label,

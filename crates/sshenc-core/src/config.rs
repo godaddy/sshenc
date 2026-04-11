@@ -79,8 +79,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        #[cfg(unix)]
+        let socket_path = home.join(".sshenc").join("agent.sock");
+        #[cfg(windows)]
+        let socket_path = PathBuf::from(r"\\.\pipe\sshenc-agent");
         Config {
-            socket_path: home.join(".sshenc").join("agent.sock"),
+            socket_path,
             allowed_labels: Vec::new(),
             prompt_policy: PromptPolicy::default(),
             pub_dir: home.join(".ssh"),

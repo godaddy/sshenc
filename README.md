@@ -403,13 +403,14 @@ instead of a Unix socket. `sshenc install` configures everything automatically.
 2. Sets `GIT_SSH_COMMAND=C:\Windows\System32\OpenSSH\ssh.exe` as a
    persistent user environment variable
 3. Starts the agent as a detached background process
+4. Detects WSL distros and configures them (see below)
 
 Step 2 is important: Git for Windows bundles its own MINGW SSH binary that
 doesn't understand Windows named pipes. By setting `GIT_SSH_COMMAND`, all
 git operations — including from Git Bash — use the real Windows OpenSSH
 that talks to the sshenc agent.
 
-`sshenc uninstall` reverses all three steps.
+`sshenc uninstall` reverses all steps including WSL configuration.
 
 ### Compatibility by environment
 
@@ -420,7 +421,8 @@ that talks to the sshenc agent.
 | **Git Bash** | Works | `GIT_SSH_COMMAND` bypasses bundled MINGW SSH |
 | **VS Code terminal** | Works | Uses whichever shell is configured |
 | **Windows Terminal** | Works | Uses whichever shell is configured |
-| **WSL** | Not directly supported | See below |
+| **WSL (git)** | Works | `GIT_SSH_COMMAND` in .bashrc/.zshrc |
+| **WSL (ssh/scp)** | Works with setup | Requires `socat` + `npiperelay` (see below) |
 | **PuTTY / Pageant** | Not supported | Different protocol; use Windows OpenSSH |
 
 ### Key storage on Windows
@@ -453,24 +455,38 @@ Windows Hello verification.
 
 ### WSL (Windows Subsystem for Linux)
 
-WSL runs a real Linux kernel in a separate environment. It has its own
-SSH and cannot directly access Windows named pipes.
+WSL runs a real Linux kernel and can't directly access Windows named pipes.
+`sshenc install` on Windows automatically detects your WSL distros and
+configures them with two levels of support:
 
-Options for WSL users:
+**Level 1 — Git (automatic):** Adds `GIT_SSH_COMMAND` to your `.bashrc`
+and `.zshrc`, pointing at the real Windows SSH. Git operations from WSL
+use your hardware keys immediately:
 
-1. **Use `npiperelay`** to bridge a Unix socket in WSL to the Windows
-   named pipe:
-   ```sh
-   # In WSL:
-   socat UNIX-LISTEN:$HOME/.sshenc/agent.sock,fork \
-     EXEC:"npiperelay.exe -ei -s //./pipe/sshenc-agent"
-   ```
+```bash
+git push    # works — uses Windows SSH → sshenc agent → TPM
+```
 
-2. **Wait for a Linux build** — sshenc could support Linux TPM 2.0 via
-   `tpm2-tss` in the future, which would work natively in WSL.
+**Level 2 — Full SSH (requires socat + npiperelay):** A `socat` bridge
+connects a Unix socket in WSL to the Windows named pipe. If both tools
+are installed, the bridge starts automatically when you open a shell:
 
-3. **Use regular SSH keys in WSL** — WSL has its own `~/.ssh` directory.
-   You can use traditional SSH keys inside WSL independently.
+```bash
+ssh user@server    # works — bridged to Windows agent
+scp file user@:    # works
+```
+
+To get Level 2, install the dependencies in your WSL distro:
+
+```bash
+sudo apt install socat
+go install github.com/jstarks/npiperelay@latest
+```
+
+If `socat` or `npiperelay` aren't installed, Level 1 still works for git.
+`sshenc install` will tell you what's missing.
+
+`sshenc uninstall` removes the configuration from all WSL distros.
 
 ### Git Bash details
 

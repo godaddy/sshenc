@@ -52,6 +52,7 @@ const SSHENC_MAX_SESSIONS: usize = 16;
 /// Global provider state.
 static PROVIDER: Mutex<Option<ProviderState>> = Mutex::new(None);
 
+#[allow(dead_code)]
 struct ProviderState {
     sessions: SessionManager,
     agent: AgentConnection,
@@ -730,6 +731,7 @@ pub unsafe extern "C" fn C_GenerateRandom(_session: u64, _data: *mut u8, _len: u
 /// PKCS#11 function list structure. OpenSSH loads the provider by calling
 /// C_GetFunctionList to get this table, then calls functions through it.
 #[repr(C)]
+#[allow(non_snake_case, dead_code)]
 pub struct CK_FUNCTION_LIST {
     pub version: types::CK_VERSION,
     // Function pointers — OpenSSH only uses a subset, but we fill in what we have

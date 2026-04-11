@@ -16,7 +16,8 @@ use std::path::PathBuf;
     about = "Generate macOS Secure Enclave-backed SSH keys",
     long_about = "sshenc-keygen generates a new SSH key backed by the macOS Secure Enclave.\n\
                    The private key is non-exportable and device-bound. The generated key uses\n\
-                   ECDSA with the NIST P-256 curve (ecdsa-sha2-nistp256).",
+                   ECDSA with the NIST P-256 curve (ecdsa-sha2-nistp256).\n\n\
+                   The public key is written to ~/.ssh/<label>.pub by default.",
     version
 )]
 struct Cli {
@@ -28,13 +29,13 @@ struct Cli {
     #[arg(long, short = 'C')]
     comment: Option<String>,
 
-    /// Write the public key to this file.
+    /// Write the public key to this path instead of ~/.ssh/<label>.pub.
     #[arg(long)]
     write_pub: Option<PathBuf>,
 
-    /// Automatically write the public key to ~/.ssh/<label>.pub.
+    /// Don't write the .pub file.
     #[arg(long)]
-    auto_pub: bool,
+    no_pub_file: bool,
 
     /// Require user presence (Touch ID / password) for each signing operation.
     #[arg(long)]
@@ -58,12 +59,12 @@ fn main() -> Result<()> {
             .join(".ssh");
         let backend = sshenc_se::SecureEnclaveBackend::new(pub_dir.clone());
 
-        let write_pub = if let Some(path) = cli.write_pub {
-            Some(path)
-        } else if cli.auto_pub {
-            Some(pub_dir.join(format!("{}.pub", cli.label)))
-        } else {
+        let write_pub = if cli.no_pub_file {
             None
+        } else if let Some(path) = cli.write_pub {
+            Some(path)
+        } else {
+            Some(pub_dir.join(format!("{}.pub", cli.label)))
         };
 
         let key_label = KeyLabel::new(&cli.label)?;

@@ -36,9 +36,13 @@ enum Commands {
         #[arg(long, short = 'C')]
         comment: Option<String>,
 
-        /// Write the public key to this file path.
+        /// Write the public key to this path instead of ~/.ssh/<label>.pub.
         #[arg(long)]
         write_pub: Option<PathBuf>,
+
+        /// Don't write the .pub file.
+        #[arg(long)]
+        no_pub_file: bool,
 
         /// Print the public key to stdout.
         #[arg(long, default_value_t = true)]
@@ -212,18 +216,31 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
             label,
             comment,
             write_pub,
+            no_pub_file,
             print_pub,
             require_user_presence,
             json,
-        } => commands::keygen(
-            backend,
-            &label,
-            comment,
-            write_pub,
-            print_pub,
-            require_user_presence,
-            json,
-        ),
+        } => {
+            let pub_path = if no_pub_file {
+                None
+            } else if let Some(path) = write_pub {
+                Some(path)
+            } else {
+                let ssh_dir = dirs::home_dir()
+                    .expect("could not determine home directory")
+                    .join(".ssh");
+                Some(ssh_dir.join(format!("{label}.pub")))
+            };
+            commands::keygen(
+                backend,
+                &label,
+                comment,
+                pub_path,
+                print_pub,
+                require_user_presence,
+                json,
+            )
+        }
         Commands::List { json } => commands::list(backend, json),
         Commands::Inspect {
             label,

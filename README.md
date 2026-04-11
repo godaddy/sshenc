@@ -83,11 +83,11 @@ automatically on first use and prompts for any encrypted key passphrases.
 ### 3. Generate a Secure Enclave key
 
 ```sh
-sshenc keygen --label github -C "you@host" --write-pub ~/.ssh/github.pub
+sshenc keygen --label github -C "you@host"
 ```
 
 This creates a hardware-bound P-256 key in the Secure Enclave and writes the
-public key to `~/.ssh/github.pub`.
+public key to `~/.ssh/github.pub` automatically.
 
 ### 4. Add the public key to GitHub/GitLab
 
@@ -109,7 +109,7 @@ git clone git@github.com:you/repo.git
 ### Key management
 
 ```sh
-sshenc keygen --label NAME [-C COMMENT] [--write-pub PATH] [--require-user-presence]
+sshenc keygen --label NAME [-C COMMENT] [--write-pub PATH] [--no-pub-file] [--require-user-presence]
 sshenc list [--json]
 sshenc inspect NAME [--json] [--show-pub]
 sshenc export-pub NAME [-o FILE] [--fingerprint] [--json]
@@ -166,7 +166,7 @@ sshenc completions fish > ~/.config/fish/completions/sshenc.fish
 ### Convenience keygen
 
 ```sh
-sshenc-keygen --label NAME [-C COMMENT] [--auto-pub] [--require-user-presence]
+sshenc-keygen --label NAME [-C COMMENT] [--write-pub PATH] [--no-pub-file] [--require-user-presence]
 ```
 
 Same as `sshenc keygen` but as a standalone binary.

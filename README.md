@@ -476,15 +476,17 @@ ssh user@server    # works — bridged to Windows agent
 scp file user@:    # works
 ```
 
-To get Level 2, install the dependencies in your WSL distro:
+`sshenc install` automatically installs `socat` and `npiperelay` into
+each WSL distro. If automatic installation fails (e.g., non-Debian distro
+or no internet), it tells you what's missing and Level 1 still works.
 
-```bash
-sudo apt install socat
-go install github.com/jstarks/npiperelay@latest
+If you create a new WSL distro after initial setup, run:
+
+```powershell
+sshenc wsl-setup
 ```
 
-If `socat` or `npiperelay` aren't installed, Level 1 still works for git.
-`sshenc install` will tell you what's missing.
+This detects any unconfigured distros and sets them up with both levels.
 
 `sshenc uninstall` removes the configuration from all WSL distros.
 

@@ -138,8 +138,8 @@ fn configure_distro(distro: &WslDistro) -> Result<(), String> {
         println!("    Updated .zshrc");
     }
 
-    // Install npiperelay for Level 2 (full SSH support)
-    install_npiperelay(distro)?;
+    // Install Level 2 dependencies (socat + npiperelay) for full SSH/SCP
+    install_level2_deps(distro)?;
 
     Ok(())
 }
@@ -232,57 +232,92 @@ fn remove_block(path: &PathBuf) -> Result<(), String> {
     std::fs::write(path, &result).map_err(|e| e.to_string())
 }
 
-/// Install npiperelay.exe into the WSL distro for Level 2 support.
-fn install_npiperelay(distro: &WslDistro) -> Result<(), String> {
-    // Check if npiperelay.exe is already accessible from WSL
-    let check = std::process::Command::new("wsl")
-        .args(["-d", &distro.name, "--", "command", "-v", "npiperelay.exe"])
-        .output();
-
-    if let Ok(o) = &check {
-        if o.status.success() {
-            println!("    npiperelay.exe already available");
-            return Ok(());
-        }
-    }
-
-    // Install via Go if available
-    let go_install = std::process::Command::new("wsl")
-        .args([
-            "-d",
-            &distro.name,
-            "--",
-            "bash",
-            "-c",
-            "command -v go >/dev/null 2>&1 && GOBIN=/usr/local/bin go install github.com/jstarks/npiperelay@latest 2>/dev/null && echo OK || echo NOGO",
-        ])
-        .output();
-
-    if let Ok(o) = &go_install {
-        let out = String::from_utf8_lossy(&o.stdout);
-        if out.contains("OK") {
-            println!("    Installed npiperelay.exe via Go");
-            return Ok(());
-        }
-    }
-
-    // Check if socat is available
-    let socat_check = std::process::Command::new("wsl")
-        .args(["-d", &distro.name, "--", "command", "-v", "socat"])
-        .output();
-
-    let has_socat = socat_check
-        .as_ref()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
+/// Install Level 2 dependencies (socat + npiperelay) into a WSL distro.
+fn install_level2_deps(distro: &WslDistro) -> Result<(), String> {
+    // Check socat
+    let has_socat = wsl_has_command(distro, "socat");
     if !has_socat {
-        println!("    note: install socat for full SSH support (apt install socat)");
+        println!("    Installing socat...");
+        let status = std::process::Command::new("wsl")
+            .args([
+                "-d",
+                &distro.name,
+                "--",
+                "bash",
+                "-c",
+                // Try apt, then apk, then dnf — covers most distros
+                "sudo apt-get install -y socat 2>/dev/null || sudo apk add socat 2>/dev/null || sudo dnf install -y socat 2>/dev/null",
+            ])
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("    Installed socat"),
+            _ => println!("    warning: could not install socat automatically"),
+        }
+    } else {
+        println!("    socat already installed");
     }
 
-    println!("    note: install npiperelay for full SSH support:");
-    println!("      go install github.com/jstarks/npiperelay@latest");
-    println!("    or download from https://github.com/jstarks/npiperelay/releases");
+    // Check npiperelay
+    let has_npiperelay = wsl_has_command(distro, "npiperelay.exe");
+    if !has_npiperelay {
+        println!("    Installing npiperelay...");
+        // Download pre-built binary from GitHub releases
+        let install_script = r#"
+            set -e
+            ARCH=$(uname -m)
+            case "$ARCH" in
+                x86_64) GOARCH=amd64 ;;
+                aarch64) GOARCH=arm64 ;;
+                *) echo "unsupported arch: $ARCH"; exit 1 ;;
+            esac
+            URL="https://github.com/jstarks/npiperelay/releases/latest/download/npiperelay_linux_${GOARCH}.tar.gz"
+            TMP=$(mktemp -d)
+            if command -v curl >/dev/null 2>&1; then
+                curl -sL "$URL" | tar xz -C "$TMP" 2>/dev/null
+            elif command -v wget >/dev/null 2>&1; then
+                wget -qO- "$URL" | tar xz -C "$TMP" 2>/dev/null
+            else
+                echo "no curl or wget"; exit 1
+            fi
+            if [ -f "$TMP/npiperelay.exe" ]; then
+                sudo mv "$TMP/npiperelay.exe" /usr/local/bin/npiperelay.exe
+                sudo chmod +x /usr/local/bin/npiperelay.exe
+                echo "OK"
+            else
+                # Try go install as fallback
+                if command -v go >/dev/null 2>&1; then
+                    GOBIN=/usr/local/bin go install github.com/jstarks/npiperelay@latest 2>/dev/null && echo "OK" || echo "FAIL"
+                else
+                    echo "FAIL"
+                fi
+            fi
+            rm -rf "$TMP"
+        "#;
+        let output = std::process::Command::new("wsl")
+            .args(["-d", &distro.name, "--", "bash", "-c", install_script])
+            .output();
+        match output {
+            Ok(o) if String::from_utf8_lossy(&o.stdout).contains("OK") => {
+                println!("    Installed npiperelay");
+            }
+            _ => {
+                println!("    warning: could not install npiperelay automatically");
+                println!("    For full SSH support, install it manually:");
+                println!("      https://github.com/jstarks/npiperelay/releases");
+            }
+        }
+    } else {
+        println!("    npiperelay already installed");
+    }
 
     Ok(())
+}
+
+/// Check if a command exists in a WSL distro.
+fn wsl_has_command(distro: &WslDistro, cmd: &str) -> bool {
+    std::process::Command::new("wsl")
+        .args(["-d", &distro.name, "--", "command", "-v", cmd])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }

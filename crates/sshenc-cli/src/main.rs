@@ -160,6 +160,12 @@ enum Commands {
     /// Remove sshenc configuration from ~/.ssh/config.
     Uninstall,
 
+    /// Configure WSL distros for sshenc (Windows only).
+    ///
+    /// Run this after creating a new WSL distro to set it up for sshenc.
+    /// Installs socat + npiperelay and configures .bashrc/.zshrc.
+    WslSetup,
+
     /// Run ssh using a specific sshenc key.
     ///
     /// Example: sshenc ssh --label jgowdy-godaddy git@github.com
@@ -340,6 +346,18 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
         },
         Commands::Install => commands::install(),
         Commands::Uninstall => commands::uninstall(),
+        Commands::WslSetup => {
+            #[cfg(target_os = "windows")]
+            {
+                crate::wsl::configure_wsl_distros();
+                Ok(())
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                println!("wsl-setup is only available on Windows.");
+                Ok(())
+            }
+        }
         Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "sshenc", &mut std::io::stdout());

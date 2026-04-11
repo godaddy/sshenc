@@ -154,7 +154,7 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8]) -> Result<()> {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    let key_path = dir.join(format!("{label}.key"));
+    let key_path = dir.join(format!("{label}.handle"));
     let pub_path = dir.join(format!("{label}.pub"));
     let ssh_pub_path = dir.join(format!("{label}.ssh.pub"));
 
@@ -177,7 +177,7 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8]) -> Result<()> {
 
 /// Load a key's data representation from the keys directory.
 pub fn load_key(label: &str) -> Result<Vec<u8>> {
-    let path = keys_dir().join(format!("{label}.key"));
+    let path = keys_dir().join(format!("{label}.handle"));
     if !path.exists() {
         return Err(SeError::LoadFailed(format!(
             "key not found: {}",
@@ -201,7 +201,7 @@ pub fn load_pub_key(label: &str) -> Result<Vec<u8>> {
 /// Delete a key from the keys directory.
 pub fn delete_key(label: &str) -> Result<()> {
     let dir = keys_dir();
-    let key_path = dir.join(format!("{label}.key"));
+    let key_path = dir.join(format!("{label}.handle"));
     let pub_path = dir.join(format!("{label}.pub"));
 
     if !key_path.exists() {
@@ -282,7 +282,7 @@ pub fn list_key_labels() -> Result<Vec<String>> {
         let entry = entry?;
         let path = entry.path();
         if let Some(ext) = path.extension() {
-            if ext == "key" {
+            if ext == "handle" {
                 if let Some(stem) = path.file_stem() {
                     labels.push(stem.to_string_lossy().to_string());
                 }

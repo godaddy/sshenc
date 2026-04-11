@@ -188,12 +188,12 @@ public key caches:
 
 ```
 ~/.sshenc/keys/
-  github.key        # reference to the SE hardware key (not the key itself)
+  github.handle     # reference to the SE hardware key (not the key itself)
   github.pub        # cached public key bytes
   github.ssh.pub    # SSH-formatted public key (for identity selection)
 ```
 
-The `.key` files are opaque handles — they tell CryptoKit which hardware
+The `.handle` files are opaque references — they tell CryptoKit which hardware
 key to use, but contain no secret material. Copying them to another machine
 won't work because the actual key is bound to this device's Secure Enclave.
 

@@ -32,7 +32,7 @@ enum Commands {
         #[arg(long, short = 'l')]
         label: String,
 
-        /// Comment for the SSH public key line.
+        /// Comment for the SSH public key line [default: user@hostname].
         #[arg(long, short = 'C')]
         comment: Option<String>,
 
@@ -231,6 +231,7 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
                     .join(".ssh");
                 Some(ssh_dir.join(format!("{label}.pub")))
             };
+            let comment = comment.or_else(default_comment);
             commands::keygen(
                 backend,
                 &label,
@@ -284,4 +285,18 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
             Ok(())
         }
     }
+}
+
+/// Generate a default SSH key comment: user@hostname (same as ssh-keygen).
+fn default_comment() -> Option<String> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "user".into());
+    let host = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().to_string())
+        .unwrap_or_else(|| "localhost".into());
+    Some(format!("{user}@{host}"))
 }

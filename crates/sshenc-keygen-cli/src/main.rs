@@ -25,7 +25,7 @@ struct Cli {
     #[arg(long, short = 'l')]
     label: String,
 
-    /// Comment for the SSH public key line (e.g., user@host).
+    /// Comment for the SSH public key line [default: user@hostname].
     #[arg(long, short = 'C')]
     comment: Option<String>,
 
@@ -67,10 +67,12 @@ fn main() -> Result<()> {
             Some(pub_dir.join(format!("{}.pub", cli.label)))
         };
 
+        let comment = cli.comment.or_else(default_comment);
+
         let key_label = KeyLabel::new(&cli.label)?;
         let opts = KeyGenOptions {
             label: key_label,
-            comment: cli.comment,
+            comment,
             requires_user_presence: cli.require_user_presence,
             write_pub_path: write_pub,
         };
@@ -93,4 +95,17 @@ fn main() -> Result<()> {
 
         Ok(())
     }
+}
+
+fn default_comment() -> Option<String> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "user".into());
+    let host = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().to_string())
+        .unwrap_or_else(|| "localhost".into());
+    Some(format!("{user}@{host}"))
 }

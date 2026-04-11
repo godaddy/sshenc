@@ -83,11 +83,12 @@ automatically on first use and prompts for any encrypted key passphrases.
 ### 3. Generate a Secure Enclave key
 
 ```sh
-sshenc keygen --label github -C "you@host"
+sshenc keygen --label github
 ```
 
 This creates a hardware-bound P-256 key in the Secure Enclave and writes the
-public key to `~/.ssh/github.pub` automatically.
+public key to `~/.ssh/github.pub`. The comment defaults to `user@hostname`
+(like `ssh-keygen`). Use `-C` to override it.
 
 ### 4. Add the public key to GitHub/GitLab
 

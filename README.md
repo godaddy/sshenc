@@ -182,16 +182,20 @@ Host *
 `PKCS11Provider` is a lightweight launcher — if the agent isn't running,
 SSH loads this library which starts the agent automatically.
 
-Keys are stored in `~/.sshenc/keys/` as CryptoKit data representations.
-These are opaque handles that reference the Secure Enclave key — the actual
-private key material is inside the SE hardware and can't be read.
+Private keys live inside the Secure Enclave hardware and never touch the
+filesystem. The `~/.sshenc/keys/` directory stores only references and
+public key caches:
 
 ```
 ~/.sshenc/keys/
-  github.key        # SE key handle (opaque, device-bound)
+  github.key        # reference to the SE hardware key (not the key itself)
   github.pub        # cached public key bytes
   github.ssh.pub    # SSH-formatted public key (for identity selection)
 ```
+
+The `.key` files are opaque handles — they tell CryptoKit which hardware
+key to use, but contain no secret material. Copying them to another machine
+won't work because the actual key is bound to this device's Secure Enclave.
 
 No Apple Developer certificate or code signing is required. The project
 uses CryptoKit (via a Swift static library), which works with the standard

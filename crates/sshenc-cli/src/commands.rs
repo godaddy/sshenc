@@ -274,7 +274,11 @@ pub fn agent(
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         // Import here to avoid the module path issue
+        #[cfg(unix)]
         let server = sshenc_agent::server::run_agent(socket_path, allowed_labels);
+        #[cfg(windows)]
+        let server =
+            sshenc_agent::server::run_agent(socket_path.display().to_string(), allowed_labels);
         server.await
     })?;
 

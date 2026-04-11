@@ -1,19 +1,26 @@
 class Sshenc < Formula
   desc "macOS Secure Enclave-backed SSH key management"
   homepage "https://github.com/jgowdy/sshenc"
-  url "https://github.com/jgowdy/sshenc/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "PLACEHOLDER"
+  version "0.1.0"
   license "MIT"
 
+  on_arm do
+    url "https://github.com/jgowdy/sshenc/releases/download/v0.1.0/sshenc-aarch64-apple-darwin.tar.gz"
+    sha256 "PLACEHOLDER"
+  end
+
+  on_intel do
+    url "https://github.com/jgowdy/sshenc/releases/download/v0.1.0/sshenc-x86_64-apple-darwin.tar.gz"
+    sha256 "PLACEHOLDER"
+  end
+
   depends_on :macos
-  depends_on "rust" => :build
 
   def install
-    system "cargo", "build", "--workspace", "--release"
-    bin.install "target/release/sshenc"
-    bin.install "target/release/sshenc-keygen"
-    bin.install "target/release/sshenc-agent"
-    lib.install "target/release/libsshenc_pkcs11.dylib"
+    bin.install "sshenc"
+    bin.install "sshenc-keygen"
+    bin.install "sshenc-agent"
+    lib.install "libsshenc_pkcs11.dylib"
   end
 
   def caveats
@@ -22,12 +29,11 @@ class Sshenc < Formula
 
         sshenc install
 
-      This adds a PKCS11Provider entry to ~/.ssh/config. No daemon needed —
-      SSH loads the sshenc library on demand.
+      The agent starts automatically when SSH needs it.
 
       To generate a new Secure Enclave key:
 
-        sshenc keygen --label my-key -C "you@host"
+        sshenc keygen --label my-key
 
       To remove the SSH configuration:
 

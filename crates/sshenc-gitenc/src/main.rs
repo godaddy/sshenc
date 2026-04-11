@@ -44,30 +44,56 @@ fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
 }
 
 fn configure_repo(label: Option<&str>) {
+    let effective_label = label.unwrap_or("default");
     let ssh_command = match label {
         Some(l) => format!("sshenc ssh --label {} --", l),
         None => "sshenc ssh --".to_string(),
     };
 
-    let status = Command::new("git")
-        .args(["config", "core.sshCommand", &ssh_command])
-        .status();
+    // Determine the signing key path
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let signing_key = if effective_label == "default" {
+        format!("{home}/.ssh/id_ecdsa.pub")
+    } else {
+        format!("{home}/.ssh/{effective_label}.pub")
+    };
 
-    match status {
-        Ok(s) if s.success() => match label {
-            Some(l) => println!("Configured this repo to use sshenc key: {l}"),
-            None => println!("Configured this repo to use sshenc (default key)"),
-        },
-        Ok(s) => {
-            eprintln!(
-                "git config failed (exit {}). Are you in a git repo?",
-                s.code().unwrap_or(-1)
-            );
-            std::process::exit(1);
+    // Set SSH command for push/pull
+    let configs: &[(&str, &str)] = &[
+        ("core.sshCommand", &ssh_command),
+        ("gpg.format", "ssh"),
+        ("user.signingkey", &signing_key),
+        ("commit.gpgsign", "true"),
+    ];
+
+    for (key, value) in configs {
+        let status = Command::new("git").args(["config", key, value]).status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!(
+                    "git config {key} failed (exit {}). Are you in a git repo?",
+                    s.code().unwrap_or(-1)
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("gitenc: failed to run git: {e}");
+                std::process::exit(1);
+            }
         }
-        Err(e) => {
-            eprintln!("gitenc: failed to run git: {e}");
-            std::process::exit(1);
+    }
+
+    match label {
+        Some(l) => {
+            println!("Configured this repo to use sshenc key: {l}");
+            println!("  SSH auth:       sshenc ssh --label {l}");
+            println!("  Commit signing: {signing_key}");
+        }
+        None => {
+            println!("Configured this repo to use sshenc (default key)");
+            println!("  SSH auth:       sshenc ssh");
+            println!("  Commit signing: {signing_key}");
         }
     }
 }

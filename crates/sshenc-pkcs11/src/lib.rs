@@ -3,34 +3,29 @@
 
 //! PKCS#11 provider for sshenc.
 //!
-//! Exposes Secure Enclave keys and legacy SSH keys from `~/.ssh/` to
-//! applications via the PKCS#11 interface. OpenSSH loads this as a
-//! dynamic library via `PKCS11Provider` in `~/.ssh/config`.
+//! This dynamic library is loaded by OpenSSH via `PKCS11Provider` in
+//! `~/.ssh/config`. On first use it starts the sshenc-agent if needed,
+//! then proxies all key enumeration and signing through the agent.
 //!
-//! ## How OpenSSH uses PKCS#11
+//! The agent persists in the background, so passphrases for encrypted
+//! legacy keys are only entered once per agent lifetime.
 //!
-//! 1. `C_Initialize` → init the library
-//! 2. `C_GetSlotList` → get slot IDs
-//! 3. `C_GetTokenInfo` → check the token
-//! 4. `C_OpenSession` → open a session
-//! 5. `C_FindObjectsInit` / `C_FindObjects` / `C_FindObjectsFinal` → enumerate keys
-//! 6. `C_GetAttributeValue` → read public key attributes (key type, EC params, EC point, modulus, exponent)
-//! 7. `C_SignInit` + `C_Sign` → sign authentication challenges
-//! 8. `C_CloseSession` → cleanup
+//! ## How it works
 //!
-//! ## Object model
-//!
-//! Each key produces two PKCS#11 objects: a private key (odd handle) and
-//! a public key (even handle). Handles are: key_index * 2 + 1 (private),
-//! key_index * 2 + 2 (public).
+//! 1. SSH loads this dylib and calls `C_Initialize`
+//! 2. We connect to the sshenc-agent (starting it if needed)
+//! 3. `C_FindObjects` asks the agent for identities
+//! 4. `C_Sign` asks the agent to sign
+//! 5. Agent stays running after SSH exits
 
-mod keystore;
+mod agent_client;
 #[allow(dead_code)]
 mod session;
 pub mod types;
 
-use keystore::KeyStore;
+use agent_client::AgentConnection;
 use session::SessionManager;
+use sshenc_agent_proto::message::Identity;
 use std::sync::Mutex;
 use types::*;
 
@@ -59,24 +54,16 @@ static PROVIDER: Mutex<Option<ProviderState>> = Mutex::new(None);
 
 struct ProviderState {
     sessions: SessionManager,
-    keys: KeyStore,
-    /// Per-session find operation state: list of matching handles to return.
+    agent: AgentConnection,
+    /// Cached identities from the agent.
+    identities: Vec<Identity>,
+    /// Per-session find operation state.
     find_state: Vec<Option<Vec<u64>>>,
-    /// Per-session sign operation state: (key_handle, mechanism).
+    /// Per-session sign operation state: key object handle.
     sign_state: Vec<Option<u64>>,
 }
 
 impl ProviderState {
-    fn new() -> Self {
-        let keys = keystore::load_keys();
-        ProviderState {
-            sessions: SessionManager::new(SSHENC_MAX_SESSIONS),
-            keys,
-            find_state: vec![None; SSHENC_MAX_SESSIONS],
-            sign_state: vec![None; SSHENC_MAX_SESSIONS],
-        }
-    }
-
     fn session_idx(&self, handle: u64) -> Option<usize> {
         let idx = handle as usize;
         if idx == 0 || idx > SSHENC_MAX_SESSIONS {
@@ -87,6 +74,26 @@ impl ProviderState {
         } else {
             None
         }
+    }
+
+    fn identity_for_handle(&self, handle: u64) -> Option<&Identity> {
+        if handle == 0 {
+            return None;
+        }
+        let idx = ((handle - 1) / 2) as usize;
+        self.identities.get(idx)
+    }
+
+    fn is_private_key(handle: u64) -> bool {
+        handle >= 1 && (handle % 2) == 1
+    }
+
+    fn object_count(&self) -> usize {
+        self.identities.len() * 2
+    }
+
+    fn is_valid_handle(&self, handle: u64) -> bool {
+        handle >= 1 && handle <= self.object_count() as u64
     }
 }
 
@@ -103,7 +110,21 @@ pub unsafe extern "C" fn C_Initialize(_init_args: *mut std::ffi::c_void) -> CK_R
     if provider.is_some() {
         return CKR_CRYPTOKI_ALREADY_INITIALIZED;
     }
-    *provider = Some(ProviderState::new());
+
+    let mut agent = match AgentConnection::connect() {
+        Ok(a) => a,
+        Err(_) => return CKR_GENERAL_ERROR,
+    };
+
+    let identities = agent.request_identities().unwrap_or_default();
+
+    *provider = Some(ProviderState {
+        sessions: SessionManager::new(SSHENC_MAX_SESSIONS),
+        agent,
+        identities,
+        find_state: vec![None; SSHENC_MAX_SESSIONS],
+        sign_state: vec![None; SSHENC_MAX_SESSIONS],
+    });
     CKR_OK
 }
 
@@ -182,7 +203,7 @@ pub unsafe extern "C" fn C_GetSlotInfo(slot_id: u64, info: *mut CK_SLOT_INFO) ->
     let info = &mut *info;
     copy_padded(&mut info.slot_description, b"macOS Secure Enclave");
     copy_padded(&mut info.manufacturer_id, b"Apple");
-    info.flags = 0x01 | 0x04; // CKF_TOKEN_PRESENT | CKF_HW_SLOT
+    info.flags = 0x01 | 0x04;
     info.hardware_version.major = 1;
     info.hardware_version.minor = 0;
     info.firmware_version.major = 1;
@@ -205,7 +226,7 @@ pub unsafe extern "C" fn C_GetTokenInfo(slot_id: u64, info: *mut CK_TOKEN_INFO) 
     copy_padded(&mut info.manufacturer_id, b"Apple");
     copy_padded(&mut info.model, b"Secure Enclave");
     copy_padded(&mut info.serial_number, b"0001");
-    info.flags = 0x0400 | 0x0002; // CKF_TOKEN_INITIALIZED | CKF_WRITE_PROTECTED
+    info.flags = 0x0400 | 0x0002;
     info.max_session_count = SSHENC_MAX_SESSIONS as u64;
     info.session_count = 0;
     info.max_rw_session_count = 0;
@@ -326,7 +347,6 @@ pub unsafe extern "C" fn C_FindObjectsInit(
         None => return CKR_SESSION_HANDLE_INVALID,
     };
 
-    // Parse template to find class filter
     let mut class_filter: Option<u64> = None;
     if !template.is_null() && count > 0 {
         let attrs = std::slice::from_raw_parts(template, count as usize);
@@ -337,7 +357,21 @@ pub unsafe extern "C" fn C_FindObjectsInit(
         }
     }
 
-    let handles = state.keys.find_objects(class_filter);
+    let mut handles = Vec::new();
+    for i in 0..state.identities.len() {
+        let priv_handle = (i as u64) * 2 + 1;
+        let pub_handle = (i as u64) * 2 + 2;
+        match class_filter {
+            Some(CKO_PRIVATE_KEY) => handles.push(priv_handle),
+            Some(CKO_PUBLIC_KEY) => handles.push(pub_handle),
+            None => {
+                handles.push(priv_handle);
+                handles.push(pub_handle);
+            }
+            _ => {}
+        }
+    }
+
     state.find_state[idx] = Some(handles);
     CKR_OK
 }
@@ -374,12 +408,10 @@ pub unsafe extern "C" fn C_FindObjects(
 
     let to_return = std::cmp::min(max_count as usize, handles.len());
     let returned: Vec<u64> = handles.drain(..to_return).collect();
-
     for (i, &h) in returned.iter().enumerate() {
         *objects.add(i) = h;
     }
     *count = returned.len() as u64;
-
     CKR_OK
 }
 
@@ -428,13 +460,20 @@ pub unsafe extern "C" fn C_GetAttributeValue(
     if state.session_idx(session_handle).is_none() {
         return CKR_SESSION_HANDLE_INVALID;
     }
+    if !state.is_valid_handle(object) {
+        return CKR_OBJECT_HANDLE_INVALID;
+    }
 
-    let key = match state.keys.key_for_handle(object) {
-        Some(k) => k,
+    let identity = match state.identity_for_handle(object) {
+        Some(id) => id,
         None => return CKR_OBJECT_HANDLE_INVALID,
     };
+    let is_private = ProviderState::is_private_key(object);
 
-    let is_private = state.keys.is_private_key(object);
+    let key_type_str = extract_key_type(&identity.key_blob);
+    let is_ec = key_type_str.as_deref().is_some_and(|s| s.contains("ecdsa"));
+    let is_rsa = key_type_str.as_deref().is_some_and(|s| s.contains("rsa"));
+
     let attrs = std::slice::from_raw_parts_mut(template, count as usize);
 
     for attr in attrs.iter_mut() {
@@ -448,69 +487,66 @@ pub unsafe extern "C" fn C_GetAttributeValue(
                 write_attr_value(attr, &val.to_ne_bytes());
             }
             CKA_KEY_TYPE => {
-                let val = key.key_type();
+                let val = if is_rsa { CKK_RSA } else { CKK_EC };
                 write_attr_value(attr, &val.to_ne_bytes());
             }
-            CKA_TOKEN => {
-                write_attr_value(attr, &[CK_TRUE]);
-            }
+            CKA_TOKEN => write_attr_value(attr, &[CK_TRUE]),
             CKA_SIGN => {
                 let val = if is_private { CK_TRUE } else { CK_FALSE };
                 write_attr_value(attr, &[val]);
             }
-            CKA_ID => {
-                let id = key.key_id();
-                write_attr_value(attr, &id);
-            }
-            CKA_LABEL => {
-                let label = key.label().as_bytes();
-                write_attr_value(attr, label);
-            }
+            CKA_ID => write_attr_value(attr, identity.comment.as_bytes()),
+            CKA_LABEL => write_attr_value(attr, identity.comment.as_bytes()),
             CKA_EC_PARAMS => {
-                if let Some(params) = key.ec_params_der() {
-                    write_attr_value(attr, &params);
+                if is_ec {
+                    let params = if key_type_str.as_deref() == Some("ecdsa-sha2-nistp384") {
+                        P384_OID_DER
+                    } else {
+                        P256_OID_DER
+                    };
+                    write_attr_value(attr, params);
                 } else {
-                    attr.value_len = u64::MAX; // attribute not available
+                    attr.value_len = u64::MAX;
                 }
             }
             CKA_EC_POINT => {
-                if let Some(point) = key.ec_point_der() {
-                    write_attr_value(attr, &point);
+                if is_ec {
+                    if let Some(point) = extract_ec_point(&identity.key_blob) {
+                        let wrapped = der_octet_string(&point);
+                        write_attr_value(attr, &wrapped);
+                    } else {
+                        attr.value_len = u64::MAX;
+                    }
                 } else {
                     attr.value_len = u64::MAX;
                 }
             }
             CKA_MODULUS => {
-                if let Some((modulus, _)) = key.rsa_params() {
-                    write_attr_value(attr, &modulus);
+                if is_rsa {
+                    if let Some((n, _)) = extract_rsa_params(&identity.key_blob) {
+                        write_attr_value(attr, &n);
+                    } else {
+                        attr.value_len = u64::MAX;
+                    }
                 } else {
                     attr.value_len = u64::MAX;
                 }
             }
             CKA_PUBLIC_EXPONENT => {
-                if let Some((_, exponent)) = key.rsa_params() {
-                    write_attr_value(attr, &exponent);
+                if is_rsa {
+                    if let Some((_, e)) = extract_rsa_params(&identity.key_blob) {
+                        write_attr_value(attr, &e);
+                    } else {
+                        attr.value_len = u64::MAX;
+                    }
                 } else {
                     attr.value_len = u64::MAX;
                 }
             }
-            _ => {
-                attr.value_len = u64::MAX; // attribute not available
-            }
+            _ => attr.value_len = u64::MAX,
         }
     }
-
     CKR_OK
-}
-
-/// Write data into a CK_ATTRIBUTE value buffer.
-/// If value is null, just set value_len (size query).
-/// If buffer is too small, set value_len and return.
-unsafe fn write_attr_value(attr: &mut CK_ATTRIBUTE, data: &[u8]) {
-    attr.value_len = data.len() as u64;
-    if !attr.value.is_null() {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), attr.value, data.len());
-    }
 }
 
 // ─── Signing ─────────────────────────────────────────────────────
@@ -535,15 +571,9 @@ pub unsafe extern "C" fn C_SignInit(
         Some(i) => i,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
-
-    // Must be a private key handle
-    if !state.keys.is_private_key(key) {
+    if !ProviderState::is_private_key(key) || !state.is_valid_handle(key) {
         return CKR_OBJECT_HANDLE_INVALID;
     }
-    if state.keys.key_for_handle(key).is_none() {
-        return CKR_OBJECT_HANDLE_INVALID;
-    }
-
     state.sign_state[idx] = Some(key);
     CKR_OK
 }
@@ -580,42 +610,40 @@ pub unsafe extern "C" fn C_Sign(
         None => return CKR_OPERATION_NOT_INITIALIZED,
     };
 
-    let key = match state.keys.key_for_handle(key_handle) {
-        Some(k) => k,
+    let identity = match state.identity_for_handle(key_handle) {
+        Some(id) => id.clone(),
         None => return CKR_OBJECT_HANDLE_INVALID,
     };
 
     let input = std::slice::from_raw_parts(data, data_len as usize);
 
-    let sig_bytes = match key.sign(input) {
+    let sig_blob = match state.agent.sign(&identity.key_blob, input, 0) {
         Ok(s) => s,
         Err(_) => return CKR_GENERAL_ERROR,
     };
 
-    // Size query: if signature is null, return required length
+    // Agent returns SSH signature blob (string(algo) + string(raw_sig)).
+    // PKCS#11 expects just the raw signature bytes.
+    let raw_sig = extract_raw_signature(&sig_blob).unwrap_or(sig_blob);
+
     if signature.is_null() {
-        *signature_len = sig_bytes.len() as u64;
+        *signature_len = raw_sig.len() as u64;
         return CKR_OK;
     }
-
-    if (*signature_len as usize) < sig_bytes.len() {
-        *signature_len = sig_bytes.len() as u64;
+    if (*signature_len as usize) < raw_sig.len() {
+        *signature_len = raw_sig.len() as u64;
         return CKR_BUFFER_TOO_SMALL;
     }
 
-    std::ptr::copy_nonoverlapping(sig_bytes.as_ptr(), signature, sig_bytes.len());
-    *signature_len = sig_bytes.len() as u64;
-
-    // Clear sign state (single-shot operation)
+    std::ptr::copy_nonoverlapping(raw_sig.as_ptr(), signature, raw_sig.len());
+    *signature_len = raw_sig.len() as u64;
     state.sign_state[idx] = None;
-
     CKR_OK
 }
 
-// ─── Login stubs (no PIN needed) ─────────────────────────────────
+// ─── Login stubs ─────────────────────────────────────────────────
 
 /// # Safety
-/// Called from C code via PKCS#11 interface.
 #[no_mangle]
 pub unsafe extern "C" fn C_Login(
     _session: u64,
@@ -623,21 +651,16 @@ pub unsafe extern "C" fn C_Login(
     _pin: *mut u8,
     _pin_len: u64,
 ) -> CK_RV {
-    // No authentication needed — SE uses biometric, legacy keys are unencrypted
     CKR_OK
 }
 
 /// # Safety
-/// Called from C code via PKCS#11 interface.
 #[no_mangle]
 pub unsafe extern "C" fn C_Logout(_session: u64) -> CK_RV {
     CKR_OK
 }
 
-// ─── Unsupported stubs ───────────────────────────────────────────
-
 /// # Safety
-/// Called from C code via PKCS#11 interface.
 #[no_mangle]
 pub unsafe extern "C" fn C_GetMechanismList(
     slot_id: u64,
@@ -665,14 +688,12 @@ pub unsafe extern "C" fn C_GetMechanismList(
 }
 
 /// # Safety
-/// Called from C code via PKCS#11 interface.
 #[no_mangle]
 pub unsafe extern "C" fn C_SeedRandom(_session: u64, _seed: *mut u8, _seed_len: u64) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED
 }
 
 /// # Safety
-/// Called from C code via PKCS#11 interface.
 #[no_mangle]
 pub unsafe extern "C" fn C_GenerateRandom(_session: u64, _data: *mut u8, _len: u64) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED
@@ -680,9 +701,78 @@ pub unsafe extern "C" fn C_GenerateRandom(_session: u64, _data: *mut u8, _len: u
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-/// Copy bytes into a fixed-size padded buffer (space-padded, no null terminator).
 fn copy_padded(dest: &mut [u8], src: &[u8]) {
     dest.fill(b' ');
     let len = src.len().min(dest.len());
     dest[..len].copy_from_slice(&src[..len]);
+}
+
+unsafe fn write_attr_value(attr: &mut CK_ATTRIBUTE, data: &[u8]) {
+    attr.value_len = data.len() as u64;
+    if !attr.value.is_null() {
+        std::ptr::copy_nonoverlapping(data.as_ptr(), attr.value, data.len());
+    }
+}
+
+const P256_OID_DER: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+const P384_OID_DER: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
+
+fn der_octet_string(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + data.len());
+    out.push(0x04);
+    if data.len() < 128 {
+        out.push(data.len() as u8);
+    } else if data.len() < 256 {
+        out.push(0x81);
+        out.push(data.len() as u8);
+    } else {
+        out.push(0x82);
+        out.push((data.len() >> 8) as u8);
+        out.push(data.len() as u8);
+    }
+    out.extend_from_slice(data);
+    out
+}
+
+fn extract_key_type(blob: &[u8]) -> Option<String> {
+    if blob.len() < 4 {
+        return None;
+    }
+    let len = u32::from_be_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+    if blob.len() < 4 + len {
+        return None;
+    }
+    String::from_utf8(blob[4..4 + len].to_vec()).ok()
+}
+
+fn extract_ec_point(blob: &[u8]) -> Option<Vec<u8>> {
+    let (_, rest) = read_ssh_string(blob)?;
+    let (_, rest) = read_ssh_string(rest)?;
+    let (point, _) = read_ssh_string(rest)?;
+    Some(point.to_vec())
+}
+
+fn extract_rsa_params(blob: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let (_, rest) = read_ssh_string(blob)?;
+    let (e, rest) = read_ssh_string(rest)?;
+    let (n, _) = read_ssh_string(rest)?;
+    Some((n.to_vec(), e.to_vec()))
+}
+
+fn extract_raw_signature(blob: &[u8]) -> Option<Vec<u8>> {
+    let (_, rest) = read_ssh_string(blob)?;
+    let (sig, _) = read_ssh_string(rest)?;
+    Some(sig.to_vec())
+}
+
+fn read_ssh_string(buf: &[u8]) -> Option<(&[u8], &[u8])> {
+    if buf.len() < 4 {
+        return None;
+    }
+    let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    let buf = &buf[4..];
+    if buf.len() < len {
+        return None;
+    }
+    Some((&buf[..len], &buf[len..]))
 }

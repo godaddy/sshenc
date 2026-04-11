@@ -1335,14 +1335,7 @@ name = "sshenc-pkcs11"
 version = "0.1.0"
 dependencies = [
  "dirs",
- "signature",
- "ssh-key",
- "sshenc-core",
- "sshenc-ffi-apple",
- "sshenc-se",
- "thiserror",
- "tracing",
- "tracing-subscriber",
+ "sshenc-agent-proto",
 ]
 
 [[package]]

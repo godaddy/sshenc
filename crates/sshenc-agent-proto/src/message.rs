@@ -126,6 +126,63 @@ pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
     }
 }
 
+/// Serialize an AgentRequest into a message payload (client-side).
+pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
+    match request {
+        AgentRequest::RequestIdentities => vec![SSH_AGENTC_REQUEST_IDENTITIES],
+        AgentRequest::SignRequest {
+            key_blob,
+            data,
+            flags,
+        } => {
+            let mut buf = vec![SSH_AGENTC_SIGN_REQUEST];
+            wire::write_string(&mut buf, key_blob);
+            wire::write_string(&mut buf, data);
+            buf.extend_from_slice(&flags.to_be_bytes());
+            buf
+        }
+        AgentRequest::Unknown(t) => vec![*t],
+    }
+}
+
+/// Parse a raw message payload into an AgentResponse (client-side).
+pub fn parse_response(payload: &[u8]) -> Result<AgentResponse> {
+    if payload.is_empty() {
+        return Err(Error::AgentProtocol("empty payload".into()));
+    }
+
+    let msg_type = payload[0];
+    let body = &payload[1..];
+
+    match msg_type {
+        SSH_AGENT_FAILURE => Ok(AgentResponse::Failure),
+        SSH_AGENT_SUCCESS => Ok(AgentResponse::Success),
+        SSH_AGENT_IDENTITIES_ANSWER => {
+            if body.len() < 4 {
+                return Err(Error::AgentProtocol("identities answer too short".into()));
+            }
+            let nkeys = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
+            let mut cursor = Cursor::new(&body[4..]);
+            let mut identities = Vec::with_capacity(nkeys);
+            for _ in 0..nkeys {
+                let key_blob = wire::read_string(&mut cursor)?;
+                let comment_bytes = wire::read_string(&mut cursor)?;
+                let comment = String::from_utf8_lossy(&comment_bytes).to_string();
+                identities.push(Identity { key_blob, comment });
+            }
+            Ok(AgentResponse::IdentitiesAnswer(identities))
+        }
+        SSH_AGENT_SIGN_RESPONSE => {
+            let mut cursor = Cursor::new(body);
+            let signature_blob = wire::read_string(&mut cursor)?;
+            Ok(AgentResponse::SignResponse { signature_blob })
+        }
+        other => Err(Error::AgentProtocol(format!(
+            "unexpected response type: {other}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

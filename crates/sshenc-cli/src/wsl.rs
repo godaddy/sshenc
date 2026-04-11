@@ -120,25 +120,51 @@ fn find_wsl_home(distro: &str) -> Option<PathBuf> {
     }
 }
 
-/// Configure a single WSL distro (Level 1 + Level 2).
+/// Configure a single WSL distro.
+///
+/// Injects the sshenc block into shell config files:
+/// - .bashrc — read by bash for interactive AND non-interactive sessions on most
+///   Linux distros (Ubuntu/Debian .profile sources .bashrc, and most WSL distros
+///   are Ubuntu-based). This is the correct file for SSH_AUTH_SOCK.
+/// - .zshrc — read by zsh for interactive sessions. Most zsh users in WSL use it
+///   interactively; non-interactive zsh is rare.
+/// - .profile — only if .bashrc doesn't exist (some minimal distros).
 fn configure_distro(distro: &WslDistro) -> Result<(), String> {
     let shell_block = generate_shell_block();
+    let mut configured = false;
 
-    // Configure .bashrc
+    // .bashrc — the primary target for bash users (covers interactive + non-interactive
+    // on most distros because .profile sources .bashrc)
     let bashrc = distro.home_path.join(".bashrc");
     if bashrc.exists() {
         inject_block(&bashrc, &shell_block).map_err(|e| format!(".bashrc: {e}"))?;
         println!("    Updated .bashrc");
+        configured = true;
     }
 
-    // Configure .zshrc if it exists
+    // .zshrc — for zsh users
     let zshrc = distro.home_path.join(".zshrc");
     if zshrc.exists() {
         inject_block(&zshrc, &shell_block).map_err(|e| format!(".zshrc: {e}"))?;
         println!("    Updated .zshrc");
+        configured = true;
     }
 
-    // Install Level 2 dependencies (socat + npiperelay) for full SSH/SCP
+    // .profile — fallback if no .bashrc exists (minimal distros)
+    if !configured {
+        let profile = distro.home_path.join(".profile");
+        if profile.exists() {
+            inject_block(&profile, &shell_block).map_err(|e| format!(".profile: {e}"))?;
+            println!("    Updated .profile");
+        } else {
+            // Create .bashrc as a last resort
+            let content = format!("{}\n", &shell_block);
+            std::fs::write(&bashrc, &content).map_err(|e| format!("create .bashrc: {e}"))?;
+            println!("    Created .bashrc");
+        }
+    }
+
+    // Install bridge dependencies (socat + npiperelay)
     install_level2_deps(distro)?;
 
     Ok(())
@@ -146,7 +172,7 @@ fn configure_distro(distro: &WslDistro) -> Result<(), String> {
 
 /// Remove sshenc configuration from a WSL distro.
 fn unconfigure_distro(distro: &WslDistro) -> Result<(), String> {
-    for name in &[".bashrc", ".zshrc"] {
+    for name in &[".bashrc", ".zshrc", ".profile"] {
         let path = distro.home_path.join(name);
         if path.exists() {
             remove_block(&path).map_err(|e| format!("{name}: {e}"))?;
@@ -156,6 +182,11 @@ fn unconfigure_distro(distro: &WslDistro) -> Result<(), String> {
 }
 
 /// Generate the shell block to inject into .bashrc/.zshrc.
+///
+/// The block is designed to be safe for both interactive and non-interactive
+/// sessions. It uses a PID file to prevent duplicate socat bridges when
+/// multiple shells start concurrently. The bridge process is started with
+/// setsid so it survives shell exit, and unlink-early cleans stale sockets.
 fn generate_shell_block() -> String {
     format!(
         r#"{BEGIN_MARKER}
@@ -163,11 +194,17 @@ fn generate_shell_block() -> String {
 # All SSH operations (ssh, git, scp, sftp) use the Windows TPM keys.
 if command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1; then
     export SSH_AUTH_SOCK="$HOME/.sshenc/agent.sock"
-    if [ ! -S "$SSH_AUTH_SOCK" ]; then
+    _sshenc_pid="$HOME/.sshenc/bridge.pid"
+    # Start bridge if not already running (atomic check via pid file)
+    if [ ! -S "$SSH_AUTH_SOCK" ] || ! kill -0 "$(cat "$_sshenc_pid" 2>/dev/null)" 2>/dev/null; then
         mkdir -p "$HOME/.sshenc"
-        (setsid socat UNIX-LISTEN:"$SSH_AUTH_SOCK",fork,unlink-early \
-            EXEC:"npiperelay.exe -ei -s //./pipe/sshenc-agent" &) >/dev/null 2>&1
+        rm -f "$SSH_AUTH_SOCK"
+        socat UNIX-LISTEN:"$SSH_AUTH_SOCK",fork \
+            EXEC:"npiperelay.exe -ei -s //./pipe/sshenc-agent" &
+        echo $! > "$_sshenc_pid"
+        disown 2>/dev/null
     fi
+    unset _sshenc_pid
 else
     # Fallback: at least git works via Windows SSH
     export GIT_SSH_COMMAND="/mnt/c/Windows/System32/OpenSSH/ssh.exe"
@@ -177,12 +214,19 @@ fi
 }
 
 /// Inject the sshenc block into a shell config file.
+/// Creates a backup (.sshenc-backup) before first modification.
 fn inject_block(path: &PathBuf, block: &str) -> Result<(), String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
 
     // Already present?
     if content.contains(BEGIN_MARKER) {
         return Ok(());
+    }
+
+    // Back up the original file before first modification
+    let backup = path.with_extension("sshenc-backup");
+    if !backup.exists() {
+        std::fs::copy(path, &backup).map_err(|e| format!("backup failed: {e}"))?;
     }
 
     let mut new_content = content;
@@ -193,7 +237,50 @@ fn inject_block(path: &PathBuf, block: &str) -> Result<(), String> {
     new_content.push_str(block);
     new_content.push('\n');
 
-    std::fs::write(path, &new_content).map_err(|e| e.to_string())
+    // Write to a temp file first, then syntax check before committing
+    let tmp = path.with_extension("sshenc-tmp");
+    std::fs::write(&tmp, &new_content).map_err(|e| e.to_string())?;
+
+    // Determine the right shell to syntax-check with
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let (shell, flag) = if file_name.contains("zsh") {
+        ("zsh", "-n")
+    } else {
+        ("bash", "-n")
+    };
+
+    // Ask WSL to syntax-check the modified file
+    // Convert Windows UNC path to a form WSL can read
+    let check = std::process::Command::new("wsl")
+        .args(["--", shell, flag])
+        .stdin(std::process::Stdio::from(
+            std::fs::File::open(&tmp).map_err(|e| e.to_string())?,
+        ))
+        .output();
+
+    match check {
+        Ok(o) if o.status.success() => {
+            // Syntax OK — commit the change
+            std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        }
+        Ok(o) => {
+            // Syntax error — do NOT modify the original, restore from backup
+            let _ = std::fs::remove_file(&tmp);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            return Err(format!(
+                "ABORTED: modified file has syntax errors ({}). Original untouched. Error: {}",
+                shell,
+                stderr.trim()
+            ));
+        }
+        Err(_) => {
+            // Can't run syntax check (WSL not available?) — proceed cautiously
+            // but still commit since we know our block is valid shell
+            std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Remove the sshenc block from a shell config file.

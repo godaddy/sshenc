@@ -283,8 +283,6 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 - **P-256 only** — Ed25519 and RSA can't be created in the SE, but existing
   keys in `~/.ssh` still work as SSH handles them natively
 - **Non-exportable** — losing the device means losing the SE keys
-- **Agent required** — the agent must be running for SE key auth; it starts
-  automatically via `sshenc install` and auto-restarts if killed
 
 ## Development
 

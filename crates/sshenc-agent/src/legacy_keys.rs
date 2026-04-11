@@ -113,22 +113,11 @@ pub fn load_legacy_keys(ssh_dir: &Path) -> Vec<LegacyKey> {
                 keys.push(key);
             }
             Err(e) => {
-                let err_str = format!("{e}");
-                if err_str.contains("encrypted")
-                    || err_str.contains("passphrase")
-                    || err_str.contains("Encrypted")
-                {
-                    tracing::info!(
-                        path = %path.display(),
-                        "skipping encrypted key"
-                    );
-                } else {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "failed to load key"
-                    );
-                }
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to load key"
+                );
             }
         }
     }
@@ -139,15 +128,21 @@ pub fn load_legacy_keys(ssh_dir: &Path) -> Vec<LegacyKey> {
 }
 
 /// Load a single SSH private key from a file.
+/// If the key is encrypted, prompts for a passphrase via a macOS GUI dialog.
 fn load_key(path: &Path) -> anyhow::Result<LegacyKey> {
     let content = std::fs::read_to_string(path)?;
-    let private_key = PrivateKey::from_openssh(&content)?;
+    let raw_key = ssh_key::private::PrivateKey::from_openssh(&content)?;
 
-    // Get the public key wire blob
+    let private_key = if raw_key.is_encrypted() {
+        let passphrase = prompt_passphrase(path)?;
+        raw_key.decrypt(passphrase.as_bytes())?
+    } else {
+        raw_key
+    };
+
     let public_key = private_key.public_key();
     let key_blob = public_key.to_bytes()?;
 
-    // Try to read comment from corresponding .pub file
     let comment = read_pub_comment(path).unwrap_or_else(|| {
         path.file_name()
             .unwrap_or_default()
@@ -160,6 +155,29 @@ fn load_key(path: &Path) -> anyhow::Result<LegacyKey> {
         comment,
         private_key,
     })
+}
+
+/// Prompt for a passphrase on the terminal with echo disabled.
+fn prompt_passphrase(key_path: &Path) -> anyhow::Result<String> {
+    let filename = key_path.file_name().unwrap_or_default().to_string_lossy();
+
+    // Use stty to disable echo, read password, re-enable echo.
+    // This works even when stdout is redirected since we open /dev/tty directly.
+    eprint!("Enter passphrase for {filename}: ");
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("stty -echo 2>/dev/null; read -r pw < /dev/tty; stty echo 2>/dev/null; echo \"$pw\"")
+        .output()?;
+    eprintln!(); // newline after hidden input
+
+    if !output.status.success() {
+        anyhow::bail!("passphrase prompt failed");
+    }
+
+    let passphrase = String::from_utf8(output.stdout)?
+        .trim_end_matches('\n')
+        .to_string();
+    Ok(passphrase)
 }
 
 /// Try to read the comment from a .pub file (third field in the OpenSSH line).

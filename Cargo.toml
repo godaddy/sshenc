@@ -69,7 +69,7 @@ dirs = "6"
 toml = "0.8"
 
 # SSH key parsing and signing
-ssh-key = { version = "0.6", features = ["crypto"] }
+ssh-key = { version = "0.6", features = ["crypto", "encryption"] }
 signature = "2"
 
 # Misc

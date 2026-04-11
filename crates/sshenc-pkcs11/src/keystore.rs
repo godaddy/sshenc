@@ -279,7 +279,18 @@ pub fn load_keys() -> KeyStore {
 
         for path in &candidates {
             if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(pk) = PrivateKey::from_openssh(&content) {
+                if let Ok(raw_key) = PrivateKey::from_openssh(&content) {
+                    let pk = if raw_key.is_encrypted() {
+                        match prompt_passphrase(path) {
+                            Ok(pass) => match raw_key.decrypt(pass.as_bytes()) {
+                                Ok(decrypted) => decrypted,
+                                Err(_) => continue,
+                            },
+                            Err(_) => continue,
+                        }
+                    } else {
+                        raw_key
+                    };
                     let label = read_pub_comment(path).unwrap_or_else(|| {
                         path.file_name()
                             .unwrap_or_default()
@@ -296,6 +307,27 @@ pub fn load_keys() -> KeyStore {
     }
 
     KeyStore { keys }
+}
+
+/// Prompt for a passphrase on the terminal with echo disabled.
+fn prompt_passphrase(key_path: &Path) -> Result<String, String> {
+    let filename = key_path.file_name().unwrap_or_default().to_string_lossy();
+
+    eprint!("Enter passphrase for {filename}: ");
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("stty -echo 2>/dev/null; read -r pw < /dev/tty; stty echo 2>/dev/null; echo \"$pw\"")
+        .output()
+        .map_err(|e| e.to_string())?;
+    eprintln!();
+
+    if !output.status.success() {
+        return Err("passphrase prompt failed".into());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_string())
 }
 
 /// Try to read the comment from a .pub file.

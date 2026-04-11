@@ -49,16 +49,25 @@ If the agent ever stops, it restarts automatically the next time you use SSH.
 ### 2. Create a key
 
 ```sh
-sshenc keygen --label github
+sshenc keygen --label default
 ```
 
-This creates a hardware-bound P-256 key in the Secure Enclave. The public
-key is written to `~/.ssh/github.pub` automatically.
+This creates a hardware-bound P-256 key in the Secure Enclave. The `default`
+label is special — it writes the public key to `~/.ssh/id_ecdsa.pub` (the
+standard OpenSSH name for ECDSA keys) and the agent presents it first. This
+means `ssh`, `ssh-copy-id`, and other tools find it automatically without
+any `-i` flag.
+
+For additional keys (e.g., separate GitHub accounts), use named labels:
+
+```sh
+sshenc keygen --label github-work
+```
 
 ### 3. Add to GitHub
 
 ```sh
-sshenc export-pub github | pbcopy
+sshenc export-pub default | pbcopy
 ```
 
 Paste into GitHub → Settings → SSH keys → New SSH key.
@@ -78,13 +87,14 @@ uses the sshenc agent automatically.
 ### Single key (most people)
 
 If you only need one Secure Enclave key, the quick start above is all you
-need. After `sshenc install`, SSH picks up your SE key automatically for
-all connections. Your old `~/.ssh` keys still work as fallback.
+need. The `default` label makes the SE key behave like a standard SSH key —
+`ssh`, `scp`, `sftp`, `git`, and `ssh-copy-id` all find it automatically.
 
 ```sh
 ssh user@server              # uses SE key, falls back to ~/.ssh keys
 git push                     # same — just works
 scp file.txt user@server:    # same
+ssh-copy-id user@server      # copies SE public key to server
 ```
 
 ### Multiple keys (multiple GitHub accounts, work vs personal)
@@ -143,13 +153,21 @@ sshenc ssh --label servers user@myserver.com
 ssh user@myserver.com
 ```
 
-#### Using scp / sftp
+#### Using scp / sftp / ssh-copy-id
 
-These read `~/.ssh/config` automatically, so they just work:
+These all read `~/.ssh/config` automatically, so they just work:
 
 ```sh
 scp file.txt user@server:          # uses sshenc agent
 sftp user@server                   # uses sshenc agent
+ssh-copy-id user@server            # copies your SE public key to the server
+```
+
+If you used `--label default`, `ssh-copy-id` finds `~/.ssh/id_ecdsa.pub`
+automatically. For named keys, specify the key explicitly:
+
+```sh
+ssh-copy-id -i ~/.ssh/github-work.pub user@server
 ```
 
 To use a specific key with scp/sftp, use the SSH config approach:

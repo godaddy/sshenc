@@ -64,7 +64,11 @@ fn main() -> Result<()> {
         } else if let Some(path) = cli.write_pub {
             Some(path)
         } else {
-            Some(pub_dir.join(format!("{}.pub", cli.label)))
+            if cli.label == "default" {
+                Some(pub_dir.join("id_ecdsa.pub"))
+            } else {
+                Some(pub_dir.join(format!("{}.pub", cli.label)))
+            }
         };
 
         let comment = cli.comment.or_else(default_comment);

@@ -249,7 +249,12 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
                 let ssh_dir = dirs::home_dir()
                     .expect("could not determine home directory")
                     .join(".ssh");
-                Some(ssh_dir.join(format!("{label}.pub")))
+                // "default" label uses standard OpenSSH naming (id_ecdsa.pub)
+                if label == "default" {
+                    Some(ssh_dir.join("id_ecdsa.pub"))
+                } else {
+                    Some(ssh_dir.join(format!("{label}.pub")))
+                }
             };
             let comment = comment.or_else(default_comment);
             // auth_policy overrides require_user_presence

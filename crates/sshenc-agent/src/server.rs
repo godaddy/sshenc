@@ -128,7 +128,7 @@ fn handle_request(
             tracing::debug!("handling identity request");
 
             let keys = backend.list()?;
-            let identities: Vec<Identity> = keys
+            let mut identities: Vec<(bool, Identity)> = keys
                 .into_iter()
                 .filter(|k| {
                     // O(n) scan over allowed_labels; acceptable for small key counts
@@ -138,20 +138,27 @@ fn handle_request(
                             .any(|l| l == k.metadata.label.as_str())
                 })
                 .filter_map(|k| {
+                    let is_default = k.metadata.label.as_str() == "default";
                     let pubkey = SshPublicKey::from_sec1_bytes(
                         &k.public_key_bytes,
                         k.metadata.comment.clone(),
                     )
                     .ok()?;
-                    Some(Identity {
-                        key_blob: pubkey.to_wire_format(),
-                        comment: k
-                            .metadata
-                            .comment
-                            .unwrap_or_else(|| k.metadata.label.as_str().to_string()),
-                    })
+                    Some((
+                        is_default,
+                        Identity {
+                            key_blob: pubkey.to_wire_format(),
+                            comment: k
+                                .metadata
+                                .comment
+                                .unwrap_or_else(|| k.metadata.label.as_str().to_string()),
+                        },
+                    ))
                 })
                 .collect();
+            // Present "default" key first so SSH tries it before others
+            identities.sort_by_key(|(is_default, _)| !*is_default);
+            let identities: Vec<Identity> = identities.into_iter().map(|(_, id)| id).collect();
 
             tracing::debug!(count = identities.len(), "returning identities");
             Ok(AgentResponse::IdentitiesAnswer(identities))

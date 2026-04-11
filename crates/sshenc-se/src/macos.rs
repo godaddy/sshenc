@@ -25,7 +25,12 @@ impl SecureEnclaveBackend {
     }
 
     fn find_pub_file(&self, label: &str) -> Option<PathBuf> {
-        let path = self.pub_dir.join(format!("{label}.pub"));
+        // "default" label uses standard OpenSSH naming (id_ecdsa.pub)
+        let path = if label == "default" {
+            self.pub_dir.join("id_ecdsa.pub")
+        } else {
+            self.pub_dir.join(format!("{label}.pub"))
+        };
         if path.exists() {
             Some(path)
         } else {

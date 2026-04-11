@@ -156,9 +156,9 @@ enum Commands {
     /// Example: sshenc ssh --label jgowdy-godaddy git@github.com
     /// Example: GIT_SSH_COMMAND="sshenc ssh --label jgowdy-godaddy" git push
     Ssh {
-        /// Key label to use.
+        /// Key label to use. If omitted, the agent offers all SE keys.
         #[arg(long, short = 'l')]
-        label: String,
+        label: Option<String>,
 
         /// Arguments to pass to ssh.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -294,7 +294,7 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
         },
         Commands::Install => commands::install(),
         Commands::Uninstall => commands::uninstall(),
-        Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(&label, &ssh_args),
+        Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "sshenc", &mut std::io::stdout());
             Ok(())

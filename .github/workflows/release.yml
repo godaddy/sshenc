@@ -39,6 +39,7 @@ jobs:
           cp target/${{ matrix.target }}/release/sshenc dist/
           cp target/${{ matrix.target }}/release/sshenc-keygen dist/
           cp target/${{ matrix.target }}/release/sshenc-agent dist/
+          cp target/${{ matrix.target }}/release/gitenc dist/
           cp target/${{ matrix.target }}/release/libsshenc_pkcs11.dylib dist/
           tar czf sshenc-${{ matrix.target }}.tar.gz -C dist .
 
@@ -125,6 +126,7 @@ jobs:
               bin.install "sshenc"
               bin.install "sshenc-keygen"
               bin.install "sshenc-agent"
+              bin.install "gitenc"
               lib.install "libsshenc_pkcs11.dylib"
             end
 

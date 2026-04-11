@@ -9,11 +9,12 @@ members = [
     "crates/sshenc-pkcs11",
     "crates/sshenc-ffi-apple",
     "crates/sshenc-test-support",
+    "crates/sshenc-gitenc",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"

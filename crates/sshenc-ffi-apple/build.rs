@@ -95,9 +95,7 @@ fn main() {
         .parent()
         .and_then(|p| p.parent())
         .unwrap_or_else(|| {
-            panic!(
-                "unexpected swiftc path structure (expected .../bin/swiftc): {swiftc_path}"
-            )
+            panic!("unexpected swiftc path structure (expected .../bin/swiftc): {swiftc_path}")
         })
         .join("lib")
         .join("swift")

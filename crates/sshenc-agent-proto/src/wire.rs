@@ -59,6 +59,7 @@ pub fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>> {
 
 /// Write an SSH string (uint32 length + data) to a buffer.
 pub fn write_string(buf: &mut Vec<u8>, data: &[u8]) {
+    // Writing to Vec cannot fail
     buf.write_u32::<BigEndian>(data.len() as u32).unwrap();
     buf.write_all(data).unwrap();
 }

@@ -4,16 +4,28 @@ macOS Secure Enclave-backed SSH key management.
 
 `sshenc` lets you generate SSH keys inside the macOS Secure Enclave and use them
 with standard OpenSSH. Private key material never leaves the hardware. It also
-serves your existing `~/.ssh` keys, so you can switch without breaking anything.
+serves your existing `~/.ssh` keys — including encrypted ones — so you can
+switch without breaking anything.
 
 ## How it works
 
-sshenc provides a PKCS#11 dynamic library (`libsshenc_pkcs11.dylib`) that
-OpenSSH loads on demand. When SSH needs to authenticate, it calls into the
-library, which signs using the Secure Enclave or your existing private keys.
-No running daemon or agent is required.
+sshenc provides a PKCS#11 dynamic library that OpenSSH loads on demand via
+`~/.ssh/config`. The first time SSH needs a key, the library starts the
+sshenc-agent in the background. The agent loads your Secure Enclave keys and
+legacy SSH keys (prompting for passphrases as needed), then stays running so
+you only enter each passphrase once.
 
-After installing, run `sshenc install` and SSH works exactly as before -- your
+```
+SSH  →  loads libsshenc_pkcs11.dylib  →  connects to sshenc-agent (starts it if needed)
+                                                ↓
+                                         agent holds all keys:
+                                         • Secure Enclave keys (hardware-bound)
+                                         • Legacy ~/.ssh keys (decrypted once)
+                                                ↓
+                                         persists across SSH sessions
+```
+
+After installing, run `sshenc install` and SSH works exactly as before — your
 existing keys keep working, and any new Secure Enclave keys you create are
 available immediately.
 
@@ -42,7 +54,7 @@ This installs to `/usr/local/bin` and `/usr/local/lib`. To change the prefix:
 make install PREFIX=/opt/sshenc
 ```
 
-To uninstall:
+To uninstall the binaries:
 
 ```sh
 make uninstall
@@ -56,8 +68,8 @@ make uninstall
 sshenc install
 ```
 
-This adds a single line to `~/.ssh/config` that tells SSH to use the sshenc
-PKCS#11 provider for all hosts. Your existing SSH keys continue to work.
+This adds a `PKCS11Provider` line to `~/.ssh/config` for all hosts. Your
+existing SSH keys continue to work — the agent loads them automatically.
 
 ### 2. Verify it works
 
@@ -65,8 +77,8 @@ PKCS#11 provider for all hosts. Your existing SSH keys continue to work.
 ssh -T git@github.com
 ```
 
-If you had working SSH keys before, they still work. Nothing changes for
-existing connections.
+If you had working SSH keys before, they still work. The agent starts
+automatically on first use and prompts for any encrypted key passphrases.
 
 ### 3. Generate a Secure Enclave key
 
@@ -126,16 +138,30 @@ sshenc openssh print-config --label github --host github.com
 Generates a host-specific SSH config block you can paste into `~/.ssh/config`
 if you want fine-grained control.
 
-### SSH agent (alternative to PKCS#11)
+### SSH agent
 
-The PKCS#11 provider is the recommended integration, but sshenc also includes
-a standalone SSH agent:
+The agent runs as a background daemon by default. It's started automatically
+by the PKCS#11 provider, but you can also run it manually:
 
 ```sh
-sshenc agent [--socket PATH] [--labels key1,key2] [--debug]
+sshenc agent                            # daemonize (default)
+sshenc agent --foreground               # stay in terminal
+sshenc agent --socket /tmp/my.sock      # custom socket path
+sshenc agent --labels key1,key2         # only expose specific SE keys
+sshenc agent --debug                    # verbose logging
 ```
 
 The agent serves both Secure Enclave keys and legacy keys from `~/.ssh/`.
+Encrypted keys are decrypted on startup with a terminal passphrase prompt.
+Passphrases are only asked once per agent lifetime.
+
+### Shell completions
+
+```sh
+sshenc completions bash > /usr/local/etc/bash_completion.d/sshenc
+sshenc completions zsh > /usr/local/share/zsh/site-functions/_sshenc
+sshenc completions fish > ~/.config/fish/completions/sshenc.fish
+```
 
 ### Convenience keygen
 
@@ -161,9 +187,11 @@ sshenc automatically discovers and serves existing SSH keys from `~/.ssh/`:
 
 - Well-known key files: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`
 - Any file that has a corresponding `.pub` file (custom-named keys)
+- Encrypted keys prompt for their passphrase on the terminal at agent startup
 
-Encrypted keys are skipped. This applies to both the PKCS#11 provider and the
-SSH agent.
+Passphrases are entered once when the agent starts and held in memory for the
+agent's lifetime. Subsequent SSH sessions reuse the already-running agent
+without re-prompting.
 
 After `sshenc install`, your existing SSH setup keeps working exactly as before.
 You can then gradually create Secure Enclave keys for hosts you want to protect.
@@ -172,10 +200,12 @@ You can then gradually create Secure Enclave keys for hosts you want to protect.
 
 - Private keys are generated inside and never leave the Secure Enclave
 - Keys are ECDSA P-256 (the only curve the Secure Enclave supports)
-- Keys are device-bound and non-exportable -- they cannot be backed up or cloned
+- Keys are device-bound and non-exportable — they cannot be backed up or cloned
 - Optional per-key user-presence requirement (Touch ID / password) for signing
-- The PKCS#11 provider runs in-process with SSH -- no daemon, no socket to abuse
+- Agent socket is restricted to owner-only permissions (0600)
 - Keys are namespaced in the Keychain (`com.sshenc.key.*`) to avoid collisions
+- Agent protocol between the PKCS#11 dylib and agent uses the same Unix socket
+  security model as `ssh-agent` (file permissions, not encryption)
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed threat analysis.
 
@@ -186,9 +216,6 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed threat analysis.
   Existing Ed25519/RSA keys from `~/.ssh/` still work through legacy key support.
 - **Non-exportable.** Secure Enclave keys cannot be backed up, migrated, or
   shared between devices. Losing the device means losing those keys.
-- **Encrypted legacy keys are skipped.** Keys protected with a passphrase in
-  `~/.ssh/` are not loaded. Use `ssh-add` with the system agent for those, or
-  remove the passphrase.
 
 ## Project structure
 
@@ -197,10 +224,10 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed threat analysis.
 | `sshenc-core` | Domain models, SSH public key encoding, fingerprints, config |
 | `sshenc-se` | Secure Enclave / Keychain integration via Security.framework |
 | `sshenc-agent-proto` | SSH agent protocol types and wire encoding |
-| `sshenc-agent` | SSH agent daemon (alternative to PKCS#11 mode) |
+| `sshenc-agent` | SSH agent daemon (serves SE + legacy keys, auto-started by dylib) |
 | `sshenc-cli` | Main `sshenc` binary with all subcommands |
 | `sshenc-keygen-cli` | Standalone `sshenc-keygen` binary |
-| `sshenc-pkcs11` | PKCS#11 provider loaded by OpenSSH on demand |
+| `sshenc-pkcs11` | PKCS#11 dylib — thin agent client loaded by OpenSSH on demand |
 | `sshenc-ffi-apple` | Apple Security.framework bridge layer |
 | `sshenc-test-support` | Mock key backend for testing without hardware |
 
@@ -210,9 +237,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
 
 ```sh
 cargo build --workspace            # build everything
-cargo test --workspace             # run tests
+cargo test --workspace             # run 93 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
+make install                       # build release + install
 ```
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -199,4 +199,73 @@ mod tests {
         let config = Config::load(Path::new("/nonexistent/path/config.toml")).unwrap();
         assert!(config.allowed_labels.is_empty());
     }
+
+    #[test]
+    fn test_prompt_policy_serializes_lowercase() {
+        let config = Config {
+            prompt_policy: PromptPolicy::Always,
+            ..Config::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            toml_str.contains("\"always\""),
+            "PromptPolicy::Always should serialize as \"always\", got:\n{toml_str}"
+        );
+
+        let config2 = Config {
+            prompt_policy: PromptPolicy::Never,
+            ..Config::default()
+        };
+        let toml_str2 = toml::to_string_pretty(&config2).unwrap();
+        assert!(
+            toml_str2.contains("\"never\""),
+            "PromptPolicy::Never should serialize as \"never\", got:\n{toml_str2}"
+        );
+
+        let config3 = Config {
+            prompt_policy: PromptPolicy::KeyDefault,
+            ..Config::default()
+        };
+        let toml_str3 = toml::to_string_pretty(&config3).unwrap();
+        assert!(
+            toml_str3.contains("\"keydefault\""),
+            "PromptPolicy::KeyDefault should serialize as \"keydefault\", got:\n{toml_str3}"
+        );
+    }
+
+    #[test]
+    fn test_log_level_serializes_lowercase() {
+        for (level, expected) in [
+            (LogLevel::Error, "\"error\""),
+            (LogLevel::Warn, "\"warn\""),
+            (LogLevel::Info, "\"info\""),
+            (LogLevel::Debug, "\"debug\""),
+            (LogLevel::Trace, "\"trace\""),
+        ] {
+            let config = Config {
+                log_level: level,
+                ..Config::default()
+            };
+            let toml_str = toml::to_string_pretty(&config).unwrap();
+            assert!(
+                toml_str.contains(expected),
+                "LogLevel::{level:?} should serialize containing {expected}, got:\n{toml_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_config_unknown_fields_ignored() {
+        // serde(default) on Config means unknown fields should be silently ignored
+        let toml_str = r#"
+socket_path = "/tmp/agent.sock"
+some_future_field = "hello"
+another_unknown = 42
+
+[nested_unknown]
+key = "value"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.socket_path, PathBuf::from("/tmp/agent.sock"));
+    }
 }

@@ -1,9 +1,9 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! SSH agent Unix socket server implementation.
+//! SSH agent server implementation (Unix sockets / Windows named pipes).
 //!
-//! Serves only Secure Enclave keys. Legacy SSH keys from ~/.ssh/ are
+//! Serves only hardware-backed keys. Legacy SSH keys from ~/.ssh/ are
 //! handled by OpenSSH directly — the agent doesn't need to proxy them.
 
 use anyhow::Result;
@@ -12,13 +12,16 @@ use sshenc_agent_proto::signature;
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_se::KeyBackend;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixListener;
 use tokio::signal;
 
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use tokio::net::UnixListener;
+
 /// Run the SSH agent server on a Unix socket.
+#[cfg(unix)]
 pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Result<()> {
     // Clean up stale socket
     if socket_path.exists() {
@@ -33,7 +36,6 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
     let listener = UnixListener::bind(&socket_path)?;
 
     // Set restrictive permissions on the socket
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
@@ -51,9 +53,6 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
     #[cfg(target_os = "macos")]
     let backend: Arc<dyn KeyBackend> =
         Arc::new(sshenc_se::SecureEnclaveBackend::new(ssh_dir.clone()));
-
-    #[cfg(not(target_os = "macos"))]
-    compile_error!("sshenc-agent requires macOS");
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
 
@@ -81,8 +80,53 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
     Ok(())
 }
 
-async fn handle_connection(
-    mut stream: tokio::net::UnixStream,
+/// Run the SSH agent server on a Windows named pipe.
+#[cfg(windows)]
+pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let ssh_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
+        .join(".ssh");
+
+    let backend: Arc<dyn KeyBackend> = Arc::new(sshenc_se::TpmBackend::new(ssh_dir.clone()));
+
+    let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
+
+    let mut server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe_name)?;
+
+    tracing::info!(pipe = %pipe_name, "agent listening");
+
+    loop {
+        tokio::select! {
+            connect_result = server.connect() => {
+                connect_result?;
+                let stream = server;
+                // Create a new pipe instance for the next connection
+                server = ServerOptions::new().create(&pipe_name)?;
+
+                let backend = Arc::clone(&backend);
+                let allowed = Arc::clone(&allowed);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, &*backend, &allowed).await {
+                        tracing::warn!("connection error: {e}");
+                    }
+                });
+            }
+            _ = signal::ctrl_c() => {
+                tracing::info!("shutting down");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>(
+    mut stream: S,
     backend: &dyn KeyBackend,
     allowed_labels: &HashSet<String>,
 ) -> Result<()> {

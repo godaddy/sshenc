@@ -5,25 +5,29 @@
 
 use anyhow::Result;
 use clap::Parser;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(unix)]
+use std::path::Path;
 
 use sshenc_agent::server;
 
 #[derive(Parser)]
 #[command(
     name = "sshenc-agent",
-    about = "SSH agent daemon exposing Secure Enclave-backed identities to OpenSSH",
-    long_about = "sshenc-agent is an ssh-agent-compatible daemon that serves Secure Enclave-backed\n\
-                   SSH identities. It creates a Unix socket and handles identity enumeration\n\
-                   and signing requests using keys stored in the macOS Secure Enclave.\n\n\
+    about = "SSH agent daemon exposing hardware-backed identities to OpenSSH",
+    long_about = "sshenc-agent is an ssh-agent-compatible daemon that serves hardware-backed\n\
+                   SSH identities. It creates a Unix socket (macOS/Linux) or named pipe (Windows)\n\
+                   and handles identity enumeration and signing requests using keys stored in\n\
+                   the platform's hardware security module.\n\n\
                    By default the agent daemonizes (backgrounds itself). Use --foreground to\n\
                    keep it in the terminal.",
     version
 )]
 struct Cli {
-    /// Path for the agent Unix socket.
-    #[arg(long, short = 's', default_value_os_t = default_socket_path())]
-    socket: PathBuf,
+    /// Path for the agent socket (Unix) or pipe name (Windows).
+    #[arg(long, short = 's', default_value_t = default_socket_or_pipe())]
+    socket: String,
 
     /// Run in foreground (don't daemonize).
     #[arg(long, short = 'f')]
@@ -40,13 +44,25 @@ struct Cli {
     /// Only expose keys matching these labels (comma-separated).
     #[arg(long, value_delimiter = ',')]
     labels: Vec<String>,
+
+    /// Internal flag: the process is already the daemon child (Windows only).
+    #[arg(long = "_internal-daemon", hide = true)]
+    _internal_daemon: bool,
 }
 
-fn default_socket_path() -> PathBuf {
+#[cfg(unix)]
+fn default_socket_or_pipe() -> String {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".sshenc")
         .join("agent.sock")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(windows)]
+fn default_socket_or_pipe() -> String {
+    r"\\.\pipe\sshenc-agent".to_string()
 }
 
 fn default_pid_path() -> PathBuf {
@@ -61,7 +77,13 @@ fn main() -> Result<()> {
 
     // Daemonize MUST happen before any threads are spawned (e.g., tokio runtime),
     // because fork() in a multi-threaded process leads to undefined behavior.
+    #[cfg(unix)]
     if !cli.foreground {
+        daemonize(&cli.socket)?;
+    }
+
+    #[cfg(windows)]
+    if !cli.foreground && !cli._internal_daemon {
         daemonize(&cli.socket)?;
     }
 
@@ -85,20 +107,32 @@ fn main() -> Result<()> {
     };
 
     tracing::info!(
-        socket = %cli.socket.display(),
+        socket = %cli.socket,
         labels = ?allowed_labels,
         "starting sshenc-agent"
     );
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(server::run_agent(cli.socket, allowed_labels))
+
+    #[cfg(unix)]
+    {
+        let socket_path = PathBuf::from(&cli.socket);
+        rt.block_on(server::run_agent(socket_path, allowed_labels))
+    }
+
+    #[cfg(windows)]
+    {
+        rt.block_on(server::run_agent(cli.socket, allowed_labels))
+    }
 }
 
 /// Fork to background, detach from terminal, write pidfile.
-fn daemonize(socket_path: &Path) -> Result<()> {
+#[cfg(unix)]
+fn daemonize(socket_path: &str) -> Result<()> {
+    let socket_display = Path::new(socket_path).display();
     // Print connection info before forking (parent process)
-    println!("SSH_AUTH_SOCK={}", socket_path.display());
-    println!("export SSH_AUTH_SOCK={}", socket_path.display());
+    println!("SSH_AUTH_SOCK={socket_display}");
+    println!("export SSH_AUTH_SOCK={socket_display}");
 
     // Fork
     let pid = unsafe { libc::fork() };
@@ -137,4 +171,35 @@ fn daemonize(socket_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Re-exec as a detached background process and write pidfile (Windows).
+#[cfg(windows)]
+fn daemonize(pipe_name: &str) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    let exe = std::env::current_exe()?;
+    let child = std::process::Command::new(&exe)
+        .arg("--socket")
+        .arg(pipe_name)
+        .arg("--_internal-daemon")
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn daemon: {e}"))?;
+
+    // Write pidfile
+    let pid_path = default_pid_path();
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&pid_path, format!("{}\n", child.id())).ok();
+
+    std::process::exit(0);
 }

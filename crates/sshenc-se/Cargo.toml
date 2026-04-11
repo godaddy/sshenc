@@ -1,6 +1,6 @@
 [package]
 name = "sshenc-se"
-description = "Secure Enclave key management operations for sshenc"
+description = "Hardware-backed key management for sshenc (Secure Enclave / TPM)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,11 @@ repository.workspace = true
 
 [dependencies]
 sshenc-core = { workspace = true }
-sshenc-ffi-apple = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sshenc-ffi-apple = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sshenc-ffi-windows = { workspace = true }

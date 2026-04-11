@@ -14,7 +14,6 @@ path = "src/main.rs"
 [dependencies]
 sshenc-core = { workspace = true }
 sshenc-se = { workspace = true }
-sshenc-ffi-apple = { workspace = true }
 sshenc-agent = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
@@ -26,3 +25,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
 toml = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sshenc-ffi-apple = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sshenc-ffi-windows = { workspace = true }

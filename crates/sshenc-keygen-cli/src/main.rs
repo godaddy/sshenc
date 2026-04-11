@@ -13,8 +13,9 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "sshenc-keygen",
-    about = "Generate macOS Secure Enclave-backed SSH keys",
-    long_about = "sshenc-keygen generates a new SSH key backed by the macOS Secure Enclave.\n\
+    about = "Generate hardware-backed SSH keys",
+    long_about = "sshenc-keygen generates a new SSH key backed by hardware security:\n\
+                   macOS Secure Enclave or Windows TPM 2.0.\n\
                    The private key is non-exportable and device-bound. The generated key uses\n\
                    ECDSA with the NIST P-256 curve (ecdsa-sha2-nistp256).\n\n\
                    The public key is written to ~/.ssh/<label>.pub by default.",
@@ -47,86 +48,81 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    bail!("sshenc-keygen requires macOS with Secure Enclave");
+    let cli = Cli::parse();
+
+    let pub_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".ssh");
 
     #[cfg(target_os = "macos")]
-    {
-        let cli = Cli::parse();
+    let backend = sshenc_se::SecureEnclaveBackend::new(pub_dir.clone());
+    #[cfg(target_os = "windows")]
+    let backend = sshenc_se::TpmBackend::new(pub_dir.clone());
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    anyhow::bail!("sshenc-keygen requires macOS Secure Enclave or Windows TPM 2.0");
 
-        let pub_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(".ssh");
-        let backend = sshenc_se::SecureEnclaveBackend::new(pub_dir.clone());
+    let write_pub = if cli.no_pub_file {
+        None
+    } else if let Some(path) = cli.write_pub {
+        Some(path)
+    } else if cli.label == "default" {
+        Some(pub_dir.join("id_ecdsa.pub"))
+    } else {
+        Some(pub_dir.join(format!("{}.pub", cli.label)))
+    };
 
-        let write_pub = if cli.no_pub_file {
-            None
-        } else if let Some(path) = cli.write_pub {
-            Some(path)
-        } else {
-            if cli.label == "default" {
-                Some(pub_dir.join("id_ecdsa.pub"))
-            } else {
-                Some(pub_dir.join(format!("{}.pub", cli.label)))
-            }
-        };
+    // Check for existing files before overwriting (like ssh-keygen)
+    if let Some(ref path) = write_pub {
+        let private_path = path.with_extension("");
+        let has_private = private_path.exists() && private_path != *path;
 
-        // Check for existing files before overwriting (like ssh-keygen)
-        if let Some(ref path) = write_pub {
-            let private_path = path.with_extension("");
-            let has_private = private_path.exists() && private_path != *path;
-
-            if has_private {
-                use std::path::PathBuf;
-                let priv_bak = private_path.with_extension("bak");
-                let pub_bak = PathBuf::from(format!("{}.bak", path.display()));
-                eprintln!("Backing up existing key pair:");
-                eprintln!("  {} → {}", private_path.display(), priv_bak.display());
-                eprintln!("  {} → {}", path.display(), pub_bak.display());
-                std::fs::rename(&private_path, &priv_bak)?;
-                std::fs::rename(path, &pub_bak)?;
-            } else if path.exists() {
-                eprintln!("{} already exists.", path.display());
-                eprint!("Overwrite (y/n)? ");
-                use std::io::Write;
-                std::io::stderr().flush().ok();
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input).ok();
-                if !input.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("Cancelled.");
-                    std::process::exit(0);
-                }
+        if has_private {
+            let priv_bak = private_path.with_extension("bak");
+            let pub_bak = PathBuf::from(format!("{}.bak", path.display()));
+            eprintln!("Backing up existing key pair:");
+            eprintln!("  {} → {}", private_path.display(), priv_bak.display());
+            eprintln!("  {} → {}", path.display(), pub_bak.display());
+            std::fs::rename(&private_path, &priv_bak)?;
+            std::fs::rename(path, &pub_bak)?;
+        } else if path.exists() {
+            eprintln!("{} already exists.", path.display());
+            eprint!("Overwrite (y/n)? ");
+            use std::io::Write;
+            std::io::stderr().flush().ok();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+            if !input.trim().eq_ignore_ascii_case("y") {
+                eprintln!("Cancelled.");
+                std::process::exit(0);
             }
         }
-
-        let comment = cli.comment.or_else(default_comment);
-
-        let key_label = KeyLabel::new(&cli.label)?;
-        let opts = KeyGenOptions {
-            label: key_label,
-            comment,
-            requires_user_presence: cli.require_user_presence,
-            write_pub_path: write_pub,
-        };
-
-        let info = backend.generate(&opts)?;
-
-        if !cli.quiet {
-            eprintln!("Generated Secure Enclave key: {}", cli.label);
-            eprintln!("  Fingerprint: {}", info.fingerprint_sha256);
-            if let Some(ref path) = info.pub_file_path {
-                eprintln!("  Public key written to: {}", path.display());
-            }
-
-            let pubkey = SshPublicKey::from_sec1_bytes(
-                &info.public_key_bytes,
-                info.metadata.comment.clone(),
-            )?;
-            println!("{}", pubkey.to_openssh_line());
-        }
-
-        Ok(())
     }
+
+    let comment = cli.comment.or_else(default_comment);
+
+    let key_label = KeyLabel::new(&cli.label)?;
+    let opts = KeyGenOptions {
+        label: key_label,
+        comment,
+        requires_user_presence: cli.require_user_presence,
+        write_pub_path: write_pub,
+    };
+
+    let info = backend.generate(&opts)?;
+
+    if !cli.quiet {
+        eprintln!("Generated key: {}", cli.label);
+        eprintln!("  Fingerprint: {}", info.fingerprint_sha256);
+        if let Some(ref path) = info.pub_file_path {
+            eprintln!("  Public key written to: {}", path.display());
+        }
+
+        let pubkey =
+            SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
+        println!("{}", pubkey.to_openssh_line());
+    }
+
+    Ok(())
 }
 
 fn default_comment() -> Option<String> {

@@ -341,36 +341,76 @@ pub fn install() -> Result<()> {
         println!("Agent already running.");
     }
 
+    // On Windows, set GIT_SSH_COMMAND as a user environment variable so that
+    // Git Bash (which bundles MINGW SSH that doesn't support named pipes) uses
+    // the real Windows OpenSSH instead.
+    #[cfg(target_os = "windows")]
+    {
+        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        if std::path::Path::new(win_ssh).exists() {
+            let status = std::process::Command::new("setx")
+                .args(["GIT_SSH_COMMAND", win_ssh])
+                .stdout(std::process::Stdio::null())
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("Set GIT_SSH_COMMAND={win_ssh} (for Git Bash compatibility).");
+                }
+                _ => {
+                    eprintln!("warning: could not set GIT_SSH_COMMAND. Git Bash users should run:");
+                    eprintln!("  setx GIT_SSH_COMMAND \"{}\"", win_ssh);
+                }
+            }
+        }
+    }
+
+    // On Windows, configure WSL distros if any are installed
+    #[cfg(target_os = "windows")]
+    {
+        crate::wsl::configure_wsl_distros();
+    }
+
     println!();
     println!("SSH will now use sshenc for all connections.");
     println!("Your existing ~/.ssh keys continue to work as fallback.");
     Ok(())
 }
 
-/// Find the PKCS#11 launcher dylib, if installed.
+/// Find the PKCS#11 launcher library, if installed.
 fn find_launcher_dylib() -> Option<PathBuf> {
-    let dylib_name = "libsshenc_pkcs11.dylib";
+    #[cfg(target_os = "macos")]
+    let lib_name = "libsshenc_pkcs11.dylib";
+    #[cfg(target_os = "windows")]
+    let lib_name = "sshenc_pkcs11.dll";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let lib_name = "libsshenc_pkcs11.so";
 
     // Next to the current executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join(dylib_name);
+            let candidate = dir.join(lib_name);
             if candidate.exists() {
                 return Some(candidate);
             }
-            // Homebrew: binary in bin/, dylib in lib/
-            let lib_candidate = dir.parent()?.join("lib").join(dylib_name);
-            if lib_candidate.exists() {
-                return Some(lib_candidate);
+            // Homebrew (macOS): binary in bin/, dylib in lib/
+            #[cfg(target_os = "macos")]
+            {
+                let lib_candidate = dir.parent()?.join("lib").join(lib_name);
+                if lib_candidate.exists() {
+                    return Some(lib_candidate);
+                }
             }
         }
     }
 
-    let common = ["/opt/homebrew/lib", "/usr/local/lib"];
-    for dir in &common {
-        let candidate = PathBuf::from(dir).join(dylib_name);
-        if candidate.exists() {
-            return Some(candidate);
+    #[cfg(target_os = "macos")]
+    {
+        let common = ["/opt/homebrew/lib", "/usr/local/lib"];
+        for dir in &common {
+            let candidate = PathBuf::from(dir).join(lib_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
 
@@ -379,29 +419,62 @@ fn find_launcher_dylib() -> Option<PathBuf> {
 
 /// Check if the agent is actually running by attempting to connect.
 /// A stale socket file from a crashed agent will fail to connect.
+#[cfg(unix)]
 fn agent_is_running(socket_path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
+/// Check if the agent is running by attempting to open the named pipe.
+#[cfg(windows)]
+fn agent_is_running(socket_path: &Path) -> bool {
+    use std::fs::OpenOptions;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(socket_path)
+        .is_ok()
+}
+
 /// Find the sshenc-agent binary.
 fn find_agent_binary() -> Result<PathBuf> {
+    #[cfg(windows)]
+    let agent_name = "sshenc-agent.exe";
+    #[cfg(not(windows))]
+    let agent_name = "sshenc-agent";
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("sshenc-agent");
+            let candidate = dir.join(agent_name);
             if candidate.exists() {
                 return Ok(candidate);
             }
         }
     }
     // Check PATH
-    if let Ok(output) = std::process::Command::new("which")
-        .arg("sshenc-agent")
-        .output()
+    #[cfg(unix)]
     {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(PathBuf::from(path));
+        if let Ok(output) = std::process::Command::new("which").arg(agent_name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(output) = std::process::Command::new("where").arg(agent_name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !path.is_empty() {
+                    return Ok(PathBuf::from(path));
+                }
             }
         }
     }
@@ -428,6 +501,21 @@ pub fn uninstall() -> Result<()> {
             );
         }
     }
+
+    // On Windows, remove the GIT_SSH_COMMAND user environment variable
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("reg")
+            .args(["delete", "HKCU\\Environment", "/v", "GIT_SSH_COMMAND", "/f"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        println!("Removed GIT_SSH_COMMAND environment variable.");
+
+        // Clean up WSL distros
+        crate::wsl::unconfigure_wsl_distros();
+    }
+
     Ok(())
 }
 
@@ -472,6 +560,11 @@ pub fn openssh_print_config(
 }
 
 pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    use sshenc_ffi_apple::se;
+    #[cfg(target_os = "windows")]
+    use sshenc_ffi_windows::tpm as se;
+
     let config = Config::load_default()?;
 
     // Ensure agent is running
@@ -487,7 +580,7 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
             .ok();
         std::thread::sleep(std::time::Duration::from_millis(500));
         // Verify the agent is reachable; warn but don't fail — it may just be slow to start
-        if std::os::unix::net::UnixStream::connect(&config.socket_path).is_err() {
+        if !agent_is_running(&config.socket_path) {
             eprintln!("warning: agent may not be ready yet (socket not connectable)");
         }
     }
@@ -498,11 +591,11 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
 
     // If a label is specified, pin to that key only
     if let Some(label) = label {
-        let ssh_pub = sshenc_ffi_apple::se::ssh_pub_path(label);
+        let ssh_pub = se::ssh_pub_path(label);
         if !ssh_pub.exists() {
-            let pub_bytes = sshenc_ffi_apple::se::load_pub_key(label)
+            let pub_bytes = se::load_pub_key(label)
                 .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
-            sshenc_ffi_apple::se::save_ssh_pub_key(label, &pub_bytes)?;
+            se::save_ssh_pub_key(label, &pub_bytes)?;
         }
         cmd.arg("-o")
             .arg(format!("IdentityFile {}", ssh_pub.display()))

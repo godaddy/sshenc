@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package
+        Name="sshenc"
+        Manufacturer="Jay Gowdy"
+        Version="!(bind.FileVersion.sshenc.exe)"
+        UpgradeCode="E7A3F1B2-4D5C-6E7F-8A9B-0C1D2E3F4A5B"
+        Scope="perUser">
+
+        <MajorUpgrade
+            DowngradeErrorMessage="A newer version of sshenc is already installed." />
+
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- Install directory -->
+        <StandardDirectory Id="LocalAppDataFolder">
+            <Directory Id="INSTALLFOLDER" Name="sshenc">
+                <Directory Id="BinFolder" Name="bin" />
+            </Directory>
+        </StandardDirectory>
+
+        <!-- Files -->
+        <ComponentGroup Id="ProductComponents" Directory="BinFolder">
+            <Component Id="sshenc_exe">
+                <File Id="sshenc.exe" Source="dist\sshenc.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="sshenc_keygen_exe">
+                <File Id="sshenc_keygen.exe" Source="dist\sshenc-keygen.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="sshenc_agent_exe">
+                <File Id="sshenc_agent.exe" Source="dist\sshenc-agent.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="gitenc_exe">
+                <File Id="gitenc.exe" Source="dist\gitenc.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="sshenc_pkcs11_dll">
+                <File Id="sshenc_pkcs11.dll" Source="dist\sshenc_pkcs11.dll" KeyPath="yes" />
+            </Component>
+
+            <!-- Add to user PATH -->
+            <Component Id="PathEntry">
+                <Environment
+                    Id="PATH"
+                    Name="PATH"
+                    Value="[BinFolder]"
+                    Permanent="no"
+                    Part="last"
+                    Action="set"
+                    System="no" />
+                <RegistryValue
+                    Root="HKCU"
+                    Key="Software\sshenc"
+                    Name="PathSet"
+                    Type="integer"
+                    Value="1"
+                    KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
+        <!-- Feature -->
+        <Feature Id="MainFeature" Title="sshenc" Level="1">
+            <ComponentGroupRef Id="ProductComponents" />
+        </Feature>
+
+        <!-- Custom actions: run sshenc install after install, sshenc uninstall before uninstall -->
+        <CustomAction
+            Id="SshencInstall"
+            FileRef="sshenc.exe"
+            ExeCommand="install"
+            Execute="deferred"
+            Impersonate="yes"
+            Return="ignore" />
+
+        <CustomAction
+            Id="SshencUninstall"
+            FileRef="sshenc.exe"
+            ExeCommand="uninstall"
+            Execute="deferred"
+            Impersonate="yes"
+            Return="ignore" />
+
+        <InstallExecuteSequence>
+            <Custom Action="SshencInstall" After="InstallFiles">
+                NOT REMOVE
+            </Custom>
+            <Custom Action="SshencUninstall" Before="RemoveFiles">
+                REMOVE="ALL"
+            </Custom>
+        </InstallExecuteSequence>
+
+    </Package>
+</Wix>

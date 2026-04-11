@@ -21,7 +21,22 @@ brew install sshenc
 Pre-built binaries for Apple Silicon and Intel. No Rust toolchain or Apple
 Developer account needed.
 
-### From source
+### Windows — MSI installer
+
+Download `sshenc-x86_64-pc-windows-msvc.msi` from the
+[latest release](https://github.com/jgowdy/sshenc/releases). Double-click
+to install. The installer adds sshenc to your PATH and runs `sshenc install`
+automatically. Uninstalling via Windows Settings runs `sshenc uninstall`.
+
+### Windows — Scoop
+
+```powershell
+scoop bucket add sshenc https://github.com/jgowdy/sshenc
+scoop install sshenc
+sshenc install
+```
+
+### From source (macOS)
 
 Requires Rust 1.75+, Xcode command line tools, and macOS (Apple Silicon or
 T2 Mac).
@@ -34,6 +49,17 @@ make install
 
 No code signing is required. `cargo build` produces linker-signed binaries
 that macOS trusts for CryptoKit Secure Enclave access out of the box.
+
+### From source (Windows)
+
+Requires Rust 1.75+ and Visual Studio Build Tools.
+
+```powershell
+git clone https://github.com/jgowdy/sshenc.git
+cd sshenc
+cargo build --workspace --release
+# Copy binaries to a directory in your PATH
+```
 
 ## Quick start
 
@@ -338,24 +364,142 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 
 ## Limitations
 
-- **macOS only** — requires Apple Silicon or T2 Mac (Secure Enclave)
-- **P-256 only** — Ed25519 and RSA can't be created in the SE, but existing
+- **macOS or Windows** — requires Apple Silicon/T2 (Secure Enclave) or
+  Windows with TPM 2.0
+- **P-256 only** — Ed25519 and RSA can't be created in hardware, but existing
   keys in `~/.ssh` still work as SSH handles them natively
-- **Non-exportable** — losing the device means losing the SE keys
+- **Non-exportable** — losing the device means losing the hardware keys
 
 ## Development
 
 ```sh
 cargo build --workspace
-cargo test --workspace             # 157 tests
+cargo test --workspace             # 159 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Requires Xcode command line tools (for `swiftc`).
+macOS requires Xcode command line tools (for `swiftc`).
+Windows requires Visual Studio Build Tools (for MSVC linker).
 
 See [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT.md](DEVELOPMENT.md),
 and [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Windows
+
+### How it works on Windows
+
+On Windows, sshenc uses the TPM 2.0 chip (present in virtually every modern
+PC) via the CNG `Microsoft Platform Crypto Provider`. The security model is
+the same as macOS Secure Enclave — keys are generated inside the TPM hardware
+and never leave it.
+
+The agent communicates via a Windows named pipe (`\\.\pipe\sshenc-agent`)
+instead of a Unix socket. `sshenc install` configures everything automatically.
+
+### What `sshenc install` does on Windows
+
+1. Adds `IdentityAgent \\.\pipe\sshenc-agent` to `~/.ssh/config`
+2. Sets `GIT_SSH_COMMAND=C:\Windows\System32\OpenSSH\ssh.exe` as a
+   persistent user environment variable
+3. Starts the agent as a detached background process
+4. Detects WSL distros and configures them (see below)
+
+Step 2 is important: Git for Windows bundles its own MINGW SSH binary that
+doesn't understand Windows named pipes. By setting `GIT_SSH_COMMAND`, all
+git operations — including from Git Bash — use the real Windows OpenSSH
+that talks to the sshenc agent.
+
+`sshenc uninstall` reverses all steps including WSL configuration.
+
+### Compatibility by environment
+
+| Environment | Status | Notes |
+|---|---|---|
+| **PowerShell** | Works | `IdentityAgent` in ssh config → named pipe → agent |
+| **CMD** | Works | Same as PowerShell |
+| **Git Bash** | Works | `GIT_SSH_COMMAND` bypasses bundled MINGW SSH |
+| **VS Code terminal** | Works | Uses whichever shell is configured |
+| **Windows Terminal** | Works | Uses whichever shell is configured |
+| **WSL (git)** | Works | `GIT_SSH_COMMAND` in .bashrc/.zshrc |
+| **WSL (ssh/scp)** | Works with setup | Requires `socat` + `npiperelay` (see below) |
+| **PuTTY / Pageant** | Not supported | Different protocol; use Windows OpenSSH |
+
+### Key storage on Windows
+
+Unlike macOS where CryptoKit uses opaque `.handle` files, Windows CNG
+persists keys in the TPM's own key hierarchy. Only metadata and cached
+public keys are stored on disk:
+
+```
+%APPDATA%\sshenc\keys\
+  github.pub        # cached public key bytes
+  github.ssh.pub    # SSH-formatted public key
+  github.meta       # metadata (label, comment, auth policy, timestamp)
+```
+
+No key material is on disk. The TPM manages key persistence internally.
+
+### Windows Hello integration
+
+When generating a key with `--require-user-presence` or `--auth-policy`,
+sshenc configures the TPM key to require Windows Hello authentication
+(PIN, fingerprint, or facial recognition) for each signing operation:
+
+```sh
+sshenc keygen --label secure --require-user-presence
+```
+
+Each `git push` or `ssh` connection using that key will prompt for
+Windows Hello verification.
+
+### WSL (Windows Subsystem for Linux)
+
+WSL runs a real Linux kernel and can't directly access Windows named pipes.
+`sshenc install` automatically detects your WSL distros and sets up a
+bridge so everything works transparently:
+
+```bash
+# From any WSL shell — all use Windows TPM keys:
+ssh user@server
+git push
+scp file user@server:
+sftp user@server
+```
+
+It installs `socat` and `npiperelay` into each distro and adds a bridge
+to `.bashrc`/`.zshrc` that connects a Unix socket to the Windows named
+pipe. The bridge starts automatically when you open a shell.
+
+If installation of `socat` or `npiperelay` fails (e.g., no internet or
+non-standard distro), it falls back to a git-only mode using
+`GIT_SSH_COMMAND` so at least `git push` works.
+
+If you create a new WSL distro later, just run `sshenc install` again —
+it's idempotent and will pick up any unconfigured distros.
+
+`sshenc uninstall` removes the configuration from all WSL distros.
+
+### Git Bash details
+
+Git for Windows includes a complete MSYS2/MINGW environment with its own
+SSH binary at `C:\Program Files\Git\usr\bin\ssh.exe`. This MINGW SSH:
+
+- Reads `~/.ssh/config` (same file as Windows OpenSSH)
+- Does NOT support `IdentityAgent` with Windows named pipes
+- Does NOT support the Windows SSH agent
+
+The `GIT_SSH_COMMAND` environment variable set by `sshenc install` tells
+git to use `C:\Windows\System32\OpenSSH\ssh.exe` instead, which supports
+all Windows-native features.
+
+If you prefer not to set this globally, you can use `gitenc` instead —
+it sets `GIT_SSH_COMMAND` per-invocation:
+
+```sh
+gitenc push                    # uses sshenc automatically
+gitenc --label work push       # specific key
+```
 
 ## License
 

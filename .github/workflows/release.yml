@@ -24,6 +24,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Set version from tag
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          echo "Setting version to ${version}"
+          sed -i '' "s/^version = \".*\"/version = \"${version}\"/" Cargo.toml
+
       - name: Build release
         run: cargo build --workspace --release --target ${{ matrix.target }}
 
@@ -63,8 +69,8 @@ jobs:
             artifacts/sshenc-aarch64-apple-darwin/sshenc-aarch64-apple-darwin.tar.gz \
             artifacts/sshenc-x86_64-apple-darwin/sshenc-x86_64-apple-darwin.tar.gz
 
-  update-formula:
-    name: Update Homebrew Formula
+  update-repo:
+    name: Update Version and Formula
     needs: release
     runs-on: ubuntu-latest
     steps:
@@ -85,25 +91,32 @@ jobs:
           echo "arm_sha256=$arm_sha" >> "$GITHUB_OUTPUT"
           echo "intel_sha256=$intel_sha" >> "$GITHUB_OUTPUT"
 
+      - name: Update version in Cargo.toml
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          sed -i "s/^version = \".*\"/version = \"${version}\"/" Cargo.toml
+
       - name: Update formula
         run: |
           tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
 
-          cat > Formula/sshenc.rb << 'RUBY'
+          cat > Formula/sshenc.rb << RUBY
           class Sshenc < Formula
             desc "macOS Secure Enclave-backed SSH key management"
             homepage "https://github.com/jgowdy/sshenc"
-            version "TAG_PLACEHOLDER"
+            version "${version}"
             license "MIT"
 
             on_arm do
-              url "https://github.com/jgowdy/sshenc/releases/download/TAG_PLACEHOLDER/sshenc-aarch64-apple-darwin.tar.gz"
-              sha256 "ARM_SHA_PLACEHOLDER"
+              url "https://github.com/jgowdy/sshenc/releases/download/${tag}/sshenc-aarch64-apple-darwin.tar.gz"
+              sha256 "${{ steps.sha.outputs.arm_sha256 }}"
             end
 
             on_intel do
-              url "https://github.com/jgowdy/sshenc/releases/download/TAG_PLACEHOLDER/sshenc-x86_64-apple-darwin.tar.gz"
-              sha256 "INTEL_SHA_PLACEHOLDER"
+              url "https://github.com/jgowdy/sshenc/releases/download/${tag}/sshenc-x86_64-apple-darwin.tar.gz"
+              sha256 "${{ steps.sha.outputs.intel_sha256 }}"
             end
 
             depends_on :macos
@@ -142,20 +155,11 @@ jobs:
           # Strip leading whitespace from heredoc
           sed -i 's/^          //' Formula/sshenc.rb
 
-          # Fill in placeholders
-          version="${tag#v}"
-          sed -i "s/TAG_PLACEHOLDER/${tag}/g" Formula/sshenc.rb
-          sed -i "s/ARM_SHA_PLACEHOLDER/${{ steps.sha.outputs.arm_sha256 }}/" Formula/sshenc.rb
-          sed -i "s/INTEL_SHA_PLACEHOLDER/${{ steps.sha.outputs.intel_sha256 }}/" Formula/sshenc.rb
-
-          # Fix version line to not have v prefix
-          sed -i "s/version \"v/version \"/" Formula/sshenc.rb
-
-      - name: Commit and push formula
+      - name: Commit and push
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/sshenc.rb
-          git diff --cached --quiet || git commit -m "Update formula for ${tag}"
+          git add Cargo.toml Cargo.lock Formula/sshenc.rb
+          git diff --cached --quiet || git commit -m "Release ${tag}: update version and formula"
           git push origin main

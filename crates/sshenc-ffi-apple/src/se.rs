@@ -165,7 +165,7 @@ pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8]) -> Result<()> {
     let ssh_line = format_ssh_pub_key(pub_key, label);
     std::fs::write(&ssh_pub_path, format!("{ssh_line}\n"))?;
 
-    // Restrictive permissions on the key file
+    // Restrictive permissions on the key reference
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -180,7 +180,7 @@ pub fn load_key(label: &str) -> Result<Vec<u8>> {
     let path = keys_dir().join(format!("{label}.key"));
     if !path.exists() {
         return Err(SeError::LoadFailed(format!(
-            "key file not found: {}",
+            "key not found: {}",
             path.display()
         )));
     }

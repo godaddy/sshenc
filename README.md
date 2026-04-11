@@ -272,7 +272,7 @@ Config file: `~/Library/Application Support/sshenc/config.toml`
 - Keys are device-bound and non-exportable — cannot be backed up or cloned
 - Optional per-key Touch ID / password requirement for each signing operation
 - Agent socket restricted to owner-only permissions (0600)
-- Key files in `~/.sshenc/keys/` restricted to owner-only (0700/0600)
+- Key references in `~/.sshenc/keys/` restricted to owner-only (0700/0600)
 - No Keychain entitlements required — uses CryptoKit, not Security.framework
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.

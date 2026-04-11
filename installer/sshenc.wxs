@@ -80,12 +80,8 @@
             Return="ignore" />
 
         <InstallExecuteSequence>
-            <Custom Action="SshencInstall" After="InstallFiles">
-                NOT REMOVE
-            </Custom>
-            <Custom Action="SshencUninstall" Before="RemoveFiles">
-                REMOVE="ALL"
-            </Custom>
+            <Custom Action="SshencInstall" After="InstallFiles" Condition="NOT REMOVE" />
+            <Custom Action="SshencUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
         </InstallExecuteSequence>
 
     </Package>

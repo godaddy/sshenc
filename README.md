@@ -21,7 +21,22 @@ brew install sshenc
 Pre-built binaries for Apple Silicon and Intel. No Rust toolchain or Apple
 Developer account needed.
 
-### From source
+### Windows — MSI installer
+
+Download `sshenc-x86_64-pc-windows-msvc.msi` from the
+[latest release](https://github.com/jgowdy/sshenc/releases). Double-click
+to install. The installer adds sshenc to your PATH and runs `sshenc install`
+automatically. Uninstalling via Windows Settings runs `sshenc uninstall`.
+
+### Windows — Scoop
+
+```powershell
+scoop bucket add sshenc https://github.com/jgowdy/sshenc
+scoop install sshenc
+sshenc install
+```
+
+### From source (macOS)
 
 Requires Rust 1.75+, Xcode command line tools, and macOS (Apple Silicon or
 T2 Mac).
@@ -34,6 +49,17 @@ make install
 
 No code signing is required. `cargo build` produces linker-signed binaries
 that macOS trusts for CryptoKit Secure Enclave access out of the box.
+
+### From source (Windows)
+
+Requires Rust 1.75+ and Visual Studio Build Tools.
+
+```powershell
+git clone https://github.com/jgowdy/sshenc.git
+cd sshenc
+cargo build --workspace --release
+# Copy binaries to a directory in your PATH
+```
 
 ## Quick start
 

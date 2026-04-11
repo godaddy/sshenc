@@ -74,10 +74,18 @@ jobs:
           Copy-Item target/${{ matrix.target }}/release/sshenc_pkcs11.dll dist/
           Compress-Archive -Path dist/* -DestinationPath sshenc-${{ matrix.target }}.zip
 
+      - name: Build MSI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.*
+          wix build installer/sshenc.wxs -o sshenc-${{ matrix.target }}.msi -bindpath .
+
       - uses: actions/upload-artifact@v5
         with:
           name: sshenc-${{ matrix.target }}
-          path: sshenc-${{ matrix.target }}.*
+          path: |
+            sshenc-${{ matrix.target }}.*
 
   release:
     name: Create Release
@@ -100,7 +108,8 @@ jobs:
             --generate-notes \
             artifacts/sshenc-aarch64-apple-darwin/sshenc-aarch64-apple-darwin.tar.gz \
             artifacts/sshenc-x86_64-apple-darwin/sshenc-x86_64-apple-darwin.tar.gz \
-            artifacts/sshenc-x86_64-pc-windows-msvc/sshenc-x86_64-pc-windows-msvc.zip
+            artifacts/sshenc-x86_64-pc-windows-msvc/sshenc-x86_64-pc-windows-msvc.zip \
+            artifacts/sshenc-x86_64-pc-windows-msvc/sshenc-x86_64-pc-windows-msvc.msi
 
   update-repo:
     name: Update Version and Formula
@@ -121,8 +130,10 @@ jobs:
         run: |
           arm_sha=$(sha256sum artifacts/sshenc-aarch64-apple-darwin/sshenc-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
           intel_sha=$(sha256sum artifacts/sshenc-x86_64-apple-darwin/sshenc-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          win_sha=$(sha256sum artifacts/sshenc-x86_64-pc-windows-msvc/sshenc-x86_64-pc-windows-msvc.zip | cut -d' ' -f1)
           echo "arm_sha256=$arm_sha" >> "$GITHUB_OUTPUT"
           echo "intel_sha256=$intel_sha" >> "$GITHUB_OUTPUT"
+          echo "win_sha256=$win_sha" >> "$GITHUB_OUTPUT"
 
       - name: Update version in Cargo.toml
         run: |
@@ -189,11 +200,43 @@ jobs:
           # Strip leading whitespace from heredoc
           sed -i 's/^          //' Formula/sshenc.rb
 
+      - name: Update Scoop manifest
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          cat > scoop/sshenc.json << SCOOP
+          {
+              "version": "${version}",
+              "description": "Hardware-backed SSH key management (Windows TPM 2.0)",
+              "homepage": "https://github.com/jgowdy/sshenc",
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {
+                      "url": "https://github.com/jgowdy/sshenc/releases/download/${tag}/sshenc-x86_64-pc-windows-msvc.zip",
+                      "hash": "${{ steps.sha.outputs.win_sha256 }}"
+                  }
+              },
+              "bin": [
+                  "sshenc.exe",
+                  "sshenc-keygen.exe",
+                  "sshenc-agent.exe",
+                  "gitenc.exe"
+              ],
+              "post_install": "Write-Host 'Run \"sshenc install\" to configure SSH.'",
+              "notes": [
+                  "Run 'sshenc install' to configure SSH and start the agent.",
+                  "Run 'sshenc keygen' to create your first hardware-backed key.",
+                  "Run 'sshenc uninstall' to revert SSH configuration."
+              ]
+          }
+          SCOOP
+          sed -i 's/^          //' scoop/sshenc.json
+
       - name: Commit and push
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock Formula/sshenc.rb
-          git diff --cached --quiet || git commit -m "Release ${tag}: update version and formula"
+          git add Cargo.toml Cargo.lock Formula/sshenc.rb scoop/sshenc.json
+          git diff --cached --quiet || git commit -m "Release ${tag}: update version, formula, and scoop manifest"
           git push origin main

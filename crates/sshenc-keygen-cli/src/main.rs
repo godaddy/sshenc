@@ -71,6 +71,31 @@ fn main() -> Result<()> {
             }
         };
 
+        // Check for existing files before overwriting (like ssh-keygen)
+        if let Some(ref path) = write_pub {
+            if path.exists() {
+                let private_path = path.with_extension("");
+                let has_private = private_path.exists() && private_path != *path;
+                if has_private {
+                    eprintln!(
+                        "{} already exists (with matching private key).",
+                        path.display()
+                    );
+                } else {
+                    eprintln!("{} already exists.", path.display());
+                }
+                eprint!("Overwrite (y/n)? ");
+                use std::io::Write;
+                std::io::stderr().flush().ok();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).ok();
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Cancelled.");
+                    std::process::exit(0);
+                }
+            }
+        }
+
         let comment = cli.comment.or_else(default_comment);
 
         let key_label = KeyLabel::new(&cli.label)?;

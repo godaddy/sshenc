@@ -258,6 +258,29 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
                     Some(ssh_dir.join(format!("{label}.pub")))
                 }
             };
+            // Check for existing files before overwriting (like ssh-keygen)
+            if let Some(ref path) = pub_path {
+                if path.exists() {
+                    let private_path = path.with_extension("");
+                    let has_private = private_path.exists() && private_path != *path;
+                    if has_private {
+                        eprintln!(
+                            "{} already exists (with matching private key).",
+                            path.display()
+                        );
+                    } else {
+                        eprintln!("{} already exists.", path.display());
+                    }
+                    eprint!("Overwrite (y/n)? ");
+                    std::io::Write::flush(&mut std::io::stderr()).ok();
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input).ok();
+                    if !input.trim().eq_ignore_ascii_case("y") {
+                        println!("Cancelled.");
+                        return Ok(());
+                    }
+                }
+            }
             let comment = comment.or_else(default_comment);
             // auth_policy overrides require_user_presence
             let user_presence = auth_policy

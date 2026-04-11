@@ -35,12 +35,19 @@ pub fn is_installed(ssh_config_path: &Path) -> Result<bool> {
     Ok(content.contains(BEGIN_MARKER))
 }
 
-/// Install the sshenc agent block into the SSH config file.
+/// Install the sshenc block into the SSH config file.
 ///
-/// Adds a `Host *` block with `IdentityAgent` pointing at the sshenc agent socket.
+/// Adds a `Host *` block with `IdentityAgent` pointing at the sshenc agent socket,
+/// and optionally a `PKCS11Provider` pointing at the launcher dylib (which auto-starts
+/// the agent when SSH loads it).
+///
 /// Creates `~/.ssh/` and the config file if they don't exist.
 /// Idempotent: returns `AlreadyPresent` if the block is already there.
-pub fn install_block(ssh_config_path: &Path, socket_path: &Path) -> Result<InstallResult> {
+pub fn install_block(
+    ssh_config_path: &Path,
+    socket_path: &Path,
+    dylib_path: Option<&Path>,
+) -> Result<InstallResult> {
     // Ensure parent directory exists with 0700 permissions
     if let Some(parent) = ssh_config_path.parent() {
         if !parent.exists() {
@@ -64,8 +71,12 @@ pub fn install_block(ssh_config_path: &Path, socket_path: &Path) -> Result<Insta
     }
 
     let socket_display = socket_path.display();
-    let block =
-        format!("{BEGIN_MARKER}\nHost *\n    IdentityAgent {socket_display}\n{END_MARKER}\n");
+    let mut lines = format!("{BEGIN_MARKER}\nHost *\n    IdentityAgent {socket_display}\n");
+    if let Some(dylib) = dylib_path {
+        lines.push_str(&format!("    PKCS11Provider {}\n", dylib.display()));
+    }
+    lines.push_str(&format!("{END_MARKER}\n"));
+    let block = lines;
 
     let mut new_content = content;
     // Ensure existing content ends with newline
@@ -155,7 +166,7 @@ mod tests {
         let config_path = dir.join("config");
         let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
-        let result = install_block(&config_path, &socket).unwrap();
+        let result = install_block(&config_path, &socket, None).unwrap();
         assert_eq!(result, InstallResult::Installed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -174,7 +185,7 @@ mod tests {
 
         std::fs::write(&config_path, "Host example.com\n    User jay\n").unwrap();
 
-        let result = install_block(&config_path, &socket).unwrap();
+        let result = install_block(&config_path, &socket, None).unwrap();
         assert_eq!(result, InstallResult::Installed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -194,7 +205,7 @@ mod tests {
 
         std::fs::write(&config_path, "Host foo\n    User bar").unwrap(); // no trailing newline
 
-        let result = install_block(&config_path, &socket).unwrap();
+        let result = install_block(&config_path, &socket, None).unwrap();
         assert_eq!(result, InstallResult::Installed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -211,10 +222,10 @@ mod tests {
         let config_path = dir.join("config");
         let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
-        install_block(&config_path, &socket).unwrap();
+        install_block(&config_path, &socket, None).unwrap();
         let content_after_first = std::fs::read_to_string(&config_path).unwrap();
 
-        let result = install_block(&config_path, &socket).unwrap();
+        let result = install_block(&config_path, &socket, None).unwrap();
         assert_eq!(result, InstallResult::AlreadyPresent);
 
         let content_after_second = std::fs::read_to_string(&config_path).unwrap();
@@ -230,7 +241,7 @@ mod tests {
         let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
         std::fs::write(&config_path, "Host foo\n    User bar\n").unwrap();
-        install_block(&config_path, &socket).unwrap();
+        install_block(&config_path, &socket, None).unwrap();
 
         let result = uninstall_block(&config_path).unwrap();
         assert_eq!(result, UninstallResult::Removed);
@@ -271,7 +282,7 @@ mod tests {
 
         assert!(!is_installed(&config_path).unwrap());
 
-        install_block(&config_path, &socket).unwrap();
+        install_block(&config_path, &socket, None).unwrap();
         assert!(is_installed(&config_path).unwrap());
 
         uninstall_block(&config_path).unwrap();
@@ -288,7 +299,7 @@ mod tests {
         let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
 
         assert!(!ssh_dir.exists());
-        install_block(&config_path, &socket).unwrap();
+        install_block(&config_path, &socket, None).unwrap();
         assert!(ssh_dir.exists());
         assert!(config_path.exists());
 

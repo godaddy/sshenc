@@ -305,10 +305,20 @@ pub fn install() -> Result<()> {
         .join(".ssh")
         .join("config");
 
-    match sshenc_core::ssh_config::install_block(&ssh_config_path, &config.socket_path)? {
+    // Find the launcher dylib if available
+    let dylib_path = find_launcher_dylib();
+
+    match sshenc_core::ssh_config::install_block(
+        &ssh_config_path,
+        &config.socket_path,
+        dylib_path.as_deref(),
+    )? {
         sshenc_core::ssh_config::InstallResult::Installed => {
-            println!("Installed sshenc agent in {}", ssh_config_path.display());
+            println!("Installed sshenc in {}", ssh_config_path.display());
             println!("  IdentityAgent {}", config.socket_path.display());
+            if let Some(ref dylib) = dylib_path {
+                println!("  PKCS11Provider {} (agent launcher)", dylib.display());
+            }
         }
         sshenc_core::ssh_config::InstallResult::AlreadyPresent => {
             println!("sshenc already configured in {}", ssh_config_path.display());
@@ -335,6 +345,36 @@ pub fn install() -> Result<()> {
     println!("SSH will now use sshenc for all connections.");
     println!("Your existing ~/.ssh keys continue to work as fallback.");
     Ok(())
+}
+
+/// Find the PKCS#11 launcher dylib, if installed.
+fn find_launcher_dylib() -> Option<PathBuf> {
+    let dylib_name = "libsshenc_pkcs11.dylib";
+
+    // Next to the current executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(dylib_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            // Homebrew: binary in bin/, dylib in lib/
+            let lib_candidate = dir.parent()?.join("lib").join(dylib_name);
+            if lib_candidate.exists() {
+                return Some(lib_candidate);
+            }
+        }
+    }
+
+    let common = ["/opt/homebrew/lib", "/usr/local/lib"];
+    for dir in &common {
+        let candidate = PathBuf::from(dir).join(dylib_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 /// Find the sshenc-agent binary.

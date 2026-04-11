@@ -1,6 +1,6 @@
 [package]
 name = "sshenc-pkcs11"
-description = "PKCS#11 provider for sshenc Secure Enclave SSH keys"
+description = "PKCS#11 agent launcher for sshenc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,5 +12,4 @@ name = "sshenc_pkcs11"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-sshenc-agent-proto = { workspace = true }
 dirs = { workspace = true }

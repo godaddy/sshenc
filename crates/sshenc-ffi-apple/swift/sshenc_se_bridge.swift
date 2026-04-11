@@ -15,6 +15,8 @@
 
 import CryptoKit
 import Foundation
+import LocalAuthentication
+import Security
 
 // MARK: - Result codes
 
@@ -41,19 +43,39 @@ public func sshenc_se_available() -> Int32 {
 /// - pub_key_len: in/out, must be >= 65
 /// - data_rep_out: buffer for data representation
 /// - data_rep_len: in/out, must be large enough (typically ~300 bytes)
+/// - auth_policy: 0 = no auth, 1 = any (Touch ID or password), 2 = biometric only, 3 = password only
 @_cdecl("sshenc_se_generate")
 public func sshenc_se_generate(
     _ pub_key_out: UnsafeMutablePointer<UInt8>,
     _ pub_key_len: UnsafeMutablePointer<Int32>,
     _ data_rep_out: UnsafeMutablePointer<UInt8>,
-    _ data_rep_len: UnsafeMutablePointer<Int32>
+    _ data_rep_len: UnsafeMutablePointer<Int32>,
+    _ auth_policy: Int32
 ) -> Int32 {
     guard SecureEnclave.isAvailable else {
         return SE_ERR_NOT_AVAILABLE
     }
 
     do {
-        let key = try SecureEnclave.P256.Signing.PrivateKey()
+        let key: SecureEnclave.P256.Signing.PrivateKey
+        if auth_policy != 0 {
+            var flags: SecAccessControlCreateFlags = [.privateKeyUsage]
+            switch auth_policy {
+            case 1: flags.insert(.userPresence)      // Touch ID or password
+            case 2: flags.insert(.biometryAny)       // Touch ID only
+            case 3: flags.insert(.devicePasscode)    // password only
+            default: flags.insert(.userPresence)
+            }
+            let accessControl = SecAccessControlCreateWithFlags(
+                nil,
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                flags,
+                nil
+            )!
+            key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: accessControl)
+        } else {
+            key = try SecureEnclave.P256.Signing.PrivateKey()
+        }
 
         // Public key: CryptoKit gives raw 64-byte (X || Y), we need uncompressed 65-byte (0x04 || X || Y)
         let rawPub = key.publicKey.rawRepresentation

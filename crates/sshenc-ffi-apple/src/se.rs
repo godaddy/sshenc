@@ -34,6 +34,7 @@ extern "C" {
         pub_key_len: *mut i32,
         data_rep_out: *mut u8,
         data_rep_len: *mut i32,
+        auth_policy: i32,
     ) -> i32;
     fn sshenc_se_public_key(
         data_rep: *const u8,
@@ -64,17 +65,30 @@ pub fn keys_dir() -> PathBuf {
         .join("keys")
 }
 
+/// Authentication policy for signing operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthPolicy {
+    /// No authentication required (default).
+    None = 0,
+    /// Touch ID or device password.
+    Any = 1,
+    /// Touch ID only.
+    Biometric = 2,
+    /// Device password only.
+    Password = 3,
+}
+
 /// Generate a new Secure Enclave P-256 key.
 /// Returns (uncompressed_public_key_65_bytes, data_representation).
-pub fn generate() -> Result<(Vec<u8>, Vec<u8>)> {
+pub fn generate(auth_policy: AuthPolicy) -> Result<(Vec<u8>, Vec<u8>)> {
     if !is_available() {
         return Err(SeError::NotAvailable);
     }
 
     let mut pub_key = vec![0u8; 65];
     let mut pub_key_len: i32 = 65;
-    let mut data_rep = vec![0u8; 512];
-    let mut data_rep_len: i32 = 512;
+    let mut data_rep = vec![0u8; 1024]; // generous for future format changes
+    let mut data_rep_len: i32 = 1024;
 
     let rc = unsafe {
         sshenc_se_generate(
@@ -82,6 +96,7 @@ pub fn generate() -> Result<(Vec<u8>, Vec<u8>)> {
             &mut pub_key_len,
             data_rep.as_mut_ptr(),
             &mut data_rep_len,
+            auth_policy as i32,
         )
     };
 
@@ -142,39 +157,75 @@ pub fn sign(data_rep: &[u8], message: &[u8]) -> Result<Vec<u8>> {
     Ok(sig)
 }
 
-/// Save a key's data representation and public key to the keys directory.
-pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8]) -> Result<()> {
+/// Key metadata stored alongside the handle.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KeyMeta {
+    pub label: String,
+    pub comment: Option<String>,
+    pub auth_policy: i32, // 0=none, 1=any, 2=biometric, 3=password
+    pub created: String,  // ISO 8601
+}
+
+/// Save a key's data representation, public key, and metadata to the keys directory.
+/// Uses atomic writes (write to temp, rename) to prevent partial files.
+pub fn save_key(label: &str, data_rep: &[u8], pub_key: &[u8], meta: &KeyMeta) -> Result<()> {
     let dir = keys_dir();
     std::fs::create_dir_all(&dir)?;
 
-    // Restrictive permissions on the keys directory
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    let key_path = dir.join(format!("{label}.handle"));
+    let handle_path = dir.join(format!("{label}.handle"));
     let pub_path = dir.join(format!("{label}.pub"));
     let ssh_pub_path = dir.join(format!("{label}.ssh.pub"));
+    let meta_path = dir.join(format!("{label}.meta"));
 
-    std::fs::write(&key_path, data_rep)?;
-    std::fs::write(&pub_path, pub_key)?;
-
-    // Write SSH-formatted public key for use with IdentityFile selection
+    // Atomic write: temp file + rename
+    atomic_write(&handle_path, data_rep)?;
+    atomic_write(&pub_path, pub_key)?;
     let ssh_line = format_ssh_pub_key(pub_key, label);
-    std::fs::write(&ssh_pub_path, format!("{ssh_line}\n"))?;
+    atomic_write(&ssh_pub_path, format!("{ssh_line}\n").as_bytes())?;
+    let meta_json = serde_json::to_string_pretty(meta)
+        .map_err(|e| SeError::Io(std::io::Error::other(e)))?;
+    atomic_write(&meta_path, meta_json.as_bytes())?;
 
-    // Restrictive permissions on handle and ssh.pub files.
-    // SSH requires IdentityFile targets to be 0600 even for public keys.
+    // Restrictive permissions
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&handle_path, std::fs::Permissions::from_mode(0o600))?;
         std::fs::set_permissions(&ssh_pub_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
     Ok(())
+}
+
+/// Write data atomically: write to a temp file, then rename.
+fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Load key metadata.
+pub fn load_meta(label: &str) -> Result<KeyMeta> {
+    let path = keys_dir().join(format!("{label}.meta"));
+    if !path.exists() {
+        // Backwards compatibility: no .meta file means old key with no metadata
+        return Ok(KeyMeta {
+            label: label.to_string(),
+            comment: None,
+            auth_policy: 0,
+            created: String::new(),
+        });
+    }
+    let content = std::fs::read_to_string(&path)?;
+    serde_json::from_str(&content)
+        .map_err(|e| SeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
 }
 
 /// Load a key's data representation from the keys directory.
@@ -200,18 +251,19 @@ pub fn load_pub_key(label: &str) -> Result<Vec<u8>> {
     Ok(std::fs::read(&path)?)
 }
 
-/// Delete a key from the keys directory.
+/// Delete a key and all associated files from the keys directory.
 pub fn delete_key(label: &str) -> Result<()> {
     let dir = keys_dir();
-    let key_path = dir.join(format!("{label}.handle"));
-    let pub_path = dir.join(format!("{label}.pub"));
+    let handle_path = dir.join(format!("{label}.handle"));
 
-    if !key_path.exists() {
+    if !handle_path.exists() {
         return Err(SeError::LoadFailed(format!("key not found: {label}")));
     }
 
-    std::fs::remove_file(&key_path)?;
-    let _ = std::fs::remove_file(&pub_path); // pub file may not exist
+    std::fs::remove_file(&handle_path)?;
+    let _ = std::fs::remove_file(dir.join(format!("{label}.pub")));
+    let _ = std::fs::remove_file(dir.join(format!("{label}.ssh.pub")));
+    let _ = std::fs::remove_file(dir.join(format!("{label}.meta")));
     Ok(())
 }
 

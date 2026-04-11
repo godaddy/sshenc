@@ -48,9 +48,14 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         print_pub: bool,
 
-        /// Require user presence (Touch ID / password) for signing.
+        /// Require user presence (Touch ID or password) for each signing operation.
         #[arg(long)]
         require_user_presence: bool,
+
+        /// Authentication policy: none, any (Touch ID or password), biometric (Touch ID only), password.
+        /// Overrides --require-user-presence if both are specified.
+        #[arg(long, value_parser = ["none", "any", "biometric", "password"])]
+        auth_policy: Option<String>,
 
         /// Output in JSON format.
         #[arg(long)]
@@ -233,6 +238,7 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
             no_pub_file,
             print_pub,
             require_user_presence,
+            auth_policy,
             json,
         } => {
             let pub_path = if no_pub_file {
@@ -246,13 +252,18 @@ fn run_command(command: Commands, backend: &sshenc_se::SecureEnclaveBackend) -> 
                 Some(ssh_dir.join(format!("{label}.pub")))
             };
             let comment = comment.or_else(default_comment);
+            // auth_policy overrides require_user_presence
+            let user_presence = auth_policy
+                .as_deref()
+                .map(|p| p != "none")
+                .unwrap_or(require_user_presence);
             commands::keygen(
                 backend,
                 &label,
                 comment,
                 pub_path,
                 print_pub,
-                require_user_presence,
+                user_presence,
                 json,
             )
         }

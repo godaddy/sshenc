@@ -45,16 +45,34 @@ impl KeyBackend for SecureEnclaveBackend {
             });
         }
 
-        // Generate key in Secure Enclave
-        let (public_bytes, data_rep) = se::generate().map_err(|e| Error::SecureEnclave {
-            operation: "generate".into(),
-            detail: e.to_string(),
-        })?;
+        // Map requires_user_presence to auth policy
+        let auth_policy = if opts.requires_user_presence {
+            se::AuthPolicy::Any
+        } else {
+            se::AuthPolicy::None
+        };
 
-        // Save the data representation and public key to ~/.sshenc/keys/
-        se::save_key(label_str, &data_rep, &public_bytes).map_err(|e| Error::SecureEnclave {
-            operation: "save_key".into(),
-            detail: e.to_string(),
+        // Generate key in Secure Enclave
+        let (public_bytes, data_rep) =
+            se::generate(auth_policy).map_err(|e| Error::SecureEnclave {
+                operation: "generate".into(),
+                detail: e.to_string(),
+            })?;
+
+        // Build metadata
+        let meta = se::KeyMeta {
+            label: label_str.to_string(),
+            comment: opts.comment.clone(),
+            auth_policy: auth_policy as i32,
+            created: chrono_now(),
+        };
+
+        // Save handle, public key, and metadata to ~/.sshenc/keys/
+        se::save_key(label_str, &data_rep, &public_bytes, &meta).map_err(|e| {
+            Error::SecureEnclave {
+                operation: "save_key".into(),
+                detail: e.to_string(),
+            }
         })?;
 
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, opts.comment.clone())?;
@@ -111,12 +129,18 @@ impl KeyBackend for SecureEnclaveBackend {
             detail: e.to_string(),
         })?;
 
-        let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, None)?;
+        // Load persisted metadata
+        let meta = se::load_meta(label).map_err(|e| Error::SecureEnclave {
+            operation: "load_meta".into(),
+            detail: e.to_string(),
+        })?;
+
+        let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, meta.comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
         let pub_file = self.find_pub_file(label);
 
         Ok(KeyInfo {
-            metadata: KeyMetadata::new(KeyLabel::new(label)?, false, None),
+            metadata: KeyMetadata::new(KeyLabel::new(label)?, meta.auth_policy != 0, meta.comment),
             public_key_bytes: public_bytes,
             fingerprint_sha256: fp_sha256,
             fingerprint_md5: fp_md5,
@@ -147,4 +171,17 @@ impl KeyBackend for SecureEnclaveBackend {
     fn is_available(&self) -> bool {
         se::is_available()
     }
+}
+
+/// Simple ISO 8601 timestamp without pulling in chrono.
+fn chrono_now() -> String {
+    use std::process::Command;
+    Command::new("date")
+        .arg("-u")
+        .arg("+%Y-%m-%dT%H:%M:%SZ")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }

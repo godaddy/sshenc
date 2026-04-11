@@ -11,3 +11,5 @@ build = "build.rs"
 [dependencies]
 thiserror = { workspace = true }
 dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

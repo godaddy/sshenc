@@ -9,7 +9,7 @@ use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::Config;
 use sshenc_se::KeyBackend;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn keygen(
     backend: &dyn KeyBackend,
@@ -326,7 +326,7 @@ pub fn install() -> Result<()> {
     }
 
     // Start the agent as a daemon if it's not already running
-    if !config.socket_path.exists() {
+    if !agent_is_running(&config.socket_path) {
         let agent_bin = find_agent_binary()?;
         std::process::Command::new(&agent_bin)
             .arg("--socket")
@@ -375,6 +375,12 @@ fn find_launcher_dylib() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Check if the agent is actually running by attempting to connect.
+/// A stale socket file from a crashed agent will fail to connect.
+fn agent_is_running(socket_path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
 /// Find the sshenc-agent binary.
@@ -469,7 +475,7 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     let config = Config::load_default()?;
 
     // Ensure agent is running
-    if !config.socket_path.exists() {
+    if !agent_is_running(&config.socket_path) {
         let agent_bin = find_agent_binary()?;
         std::process::Command::new(&agent_bin)
             .arg("--socket")

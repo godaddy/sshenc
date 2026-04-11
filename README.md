@@ -130,12 +130,18 @@ cd my-personal-repo
 gitenc --config github-personal
 ```
 
-After that, regular git commands use the right key automatically:
+This configures both SSH auth and commit signing in one command. After
+that, regular git commands use the right key automatically, and all
+commits are signed with your Secure Enclave key:
 
 ```sh
 git pull
 git push
+git commit -m "this commit is signed"   # signed automatically
 ```
+
+GitHub shows signed commits as "Verified" — add your key under
+GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**.
 
 Without `--label`, `gitenc` uses whatever key the agent offers first:
 
@@ -183,6 +189,34 @@ Host myserver.com
   IdentityAgent ~/.sshenc/agent.sock
   IdentityFile ~/.ssh/servers.pub
   IdentitiesOnly yes
+```
+
+## Commit signing
+
+Git supports signing commits with SSH keys, and GitHub shows them as
+"Verified." `gitenc --config` sets this up automatically — every commit
+in that repo is signed with your Secure Enclave key.
+
+To enable it:
+
+1. Run `gitenc --config` (or `gitenc --config NAME`) in your repo
+2. Add the same public key to GitHub as a **Signing Key**:
+   GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**
+
+That's it. Commits are signed automatically:
+
+```sh
+git commit -m "hardware-signed commit"
+git log --show-signature                # verify locally
+```
+
+`gitenc --config` sets these git config values locally on the repo:
+
+```
+core.sshCommand = sshenc ssh --label NAME --
+gpg.format = ssh
+user.signingkey = ~/.ssh/NAME.pub
+commit.gpgsign = true
 ```
 
 ## How it works

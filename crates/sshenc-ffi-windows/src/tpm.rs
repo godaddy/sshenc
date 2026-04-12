@@ -73,7 +73,7 @@ impl Drop for NcryptHandle {
     fn drop(&mut self) {
         if self.0 .0 != 0 {
             unsafe {
-                NCryptFreeObject(self.0);
+                let _ = NCryptFreeObject(self.0);
             }
         }
     }
@@ -390,12 +390,12 @@ pub fn list_keys() -> Result<Vec<String>> {
             let key_info = unsafe { &*enum_state };
             let name = unsafe { key_info.pszName.to_string() };
             if let Ok(name_str) = name {
-                if name_str.starts_with(KEY_PREFIX) {
-                    labels.push(name_str[KEY_PREFIX.len()..].to_string());
+                if let Some(stripped) = name_str.strip_prefix(KEY_PREFIX) {
+                    labels.push(stripped.to_string());
                 }
             }
             unsafe {
-                NCryptFreeBuffer(enum_state as *mut _);
+                let _ = NCryptFreeBuffer(enum_state as *mut _);
             }
         }
     }

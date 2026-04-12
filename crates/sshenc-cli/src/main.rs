@@ -238,11 +238,18 @@ enum OpensshAction {
 }
 
 fn main() -> Result<()> {
-    // Intercept ssh-keygen-compatible signing mode before clap parsing.
-    // Git calls: sshenc -Y sign -n git -f <pubkey_path> <data_file>
+    // Intercept ssh-keygen-compatible mode before clap parsing.
+    // Git calls us with -Y sign, -Y verify, -Y find-principals, etc.
+    // We only handle -Y sign ourselves; everything else passes to real ssh-keygen.
     let raw_args: Vec<String> = std::env::args().collect();
-    if raw_args.len() >= 2 && raw_args[1] == "-Y" {
-        return commands::ssh_sign(&raw_args[1..]);
+    if raw_args.len() >= 3 && raw_args[1] == "-Y" {
+        if raw_args[2] == "sign" {
+            return commands::ssh_sign(&raw_args[1..]);
+        }
+        let status = std::process::Command::new("ssh-keygen")
+            .args(&raw_args[1..])
+            .status()?;
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     tracing_subscriber::fmt()

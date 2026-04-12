@@ -789,18 +789,35 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
         label
     };
 
-    // Read data to sign
-    let data = std::fs::read(&data_file)?;
+    // Build the SSHSIG "signed data" blob per the OpenSSH spec (sshsig.c).
+    // The key signs: MAGIC || string(namespace) || string("") || string(hash_alg) || string(H(message))
+    // Note: version is NOT part of the signed data — only the outer envelope.
+    let file_data = std::fs::read(&data_file)?;
+    let message_hash = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(&file_data)
+    };
+    let signed_data = {
+        use sshenc_core::pubkey::write_ssh_string;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"SSHSIG");
+        write_ssh_string(&mut buf, namespace.as_bytes());
+        write_ssh_string(&mut buf, b"");
+        write_ssh_string(&mut buf, b"sha256");
+        write_ssh_string(&mut buf, &message_hash);
+        buf
+    };
 
-    // Sign via the hardware backend
+    // Sign the SSHSIG blob via the hardware backend
     #[cfg(target_os = "macos")]
     let der_sig = {
         let data_rep = se::load_key(&label)
             .map_err(|_| anyhow::anyhow!("key '{label}' not found — is the label correct?"))?;
-        se::sign(&data_rep, &data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?
+        se::sign(&data_rep, &signed_data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?
     };
     #[cfg(target_os = "windows")]
-    let der_sig = se::sign(&label, &data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
+    let der_sig =
+        se::sign(&label, &signed_data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
 
     // Get the public key for the signature header
     let pub_bytes = se::load_pub_key(&label)?;

@@ -206,7 +206,7 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
 
-          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/jgowdy/scoop-sshenc.git /tmp/bucket
+          git clone https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/jgowdy/scoop-sshenc.git /tmp/bucket
 
           cat > /tmp/bucket/bucket/sshenc.json << SCOOP
           {

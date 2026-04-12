@@ -212,4 +212,60 @@ mod tests {
         let result = read_message_frame(&mut cursor);
         assert!(result.is_err(), "one byte over max should be rejected");
     }
+
+    #[test]
+    fn test_read_message_frame_exactly_max_size_256kb() {
+        let max_len: u32 = 256 * 1024;
+        let payload = vec![0x55_u8; max_len as usize];
+        let mut buf = Vec::new();
+        buf.write_u32::<BigEndian>(max_len).unwrap();
+        buf.extend_from_slice(&payload);
+
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_message_frame(&mut cursor).unwrap();
+        assert_eq!(result.len(), max_len as usize);
+        assert!(result.iter().all(|&b| b == 0x55));
+    }
+
+    #[test]
+    fn test_read_message_frame_size_over_256kb_rejected() {
+        let over: u32 = 300 * 1024;
+        let mut buf = Vec::new();
+        buf.write_u32::<BigEndian>(over).unwrap();
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_message_frame(&mut cursor);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("too large"),
+            "error should mention 'too large': {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_read_message_frame_size_zero_rejected() {
+        let mut buf = Vec::new();
+        buf.write_u32::<BigEndian>(0).unwrap();
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_message_frame(&mut cursor);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("empty"),
+            "error should mention 'empty': {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_write_read_message_frame_roundtrip_various_sizes() {
+        for size in [1, 2, 10, 100, 1000, 10_000] {
+            let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+            let mut buf = Vec::new();
+            write_message_frame(&mut buf, &payload).unwrap();
+
+            let mut cursor = Cursor::new(buf.as_slice());
+            let read_back = read_message_frame(&mut cursor).unwrap();
+            assert_eq!(read_back, payload, "roundtrip failed for size {size}");
+        }
+    }
 }

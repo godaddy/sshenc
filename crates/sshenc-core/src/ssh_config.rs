@@ -379,4 +379,87 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn test_install_block_empty_file_creates_new() {
+        let dir = temp_dir("empty-file");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+
+        // File does not exist at all
+        assert!(!config_path.exists());
+
+        let result = install_block(&config_path, &socket, None).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains(BEGIN_MARKER));
+        assert!(content.contains("IdentityAgent"));
+        assert!(content.contains(END_MARKER));
+        // No blank separator line at the start (no prior content)
+        assert!(!content.starts_with('\n'));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_install_block_sets_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("perms");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+
+        install_block(&config_path, &socket, None).unwrap();
+
+        let metadata = std::fs::metadata(&config_path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "ssh config file should be 0644");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_block_multiple_blank_lines_around_block() {
+        let dir = temp_dir("multi-blanks");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+
+        // Write content with multiple blank lines before where the block will go
+        std::fs::write(&config_path, "Host foo\n    User bar\n\n\n").unwrap();
+        install_block(&config_path, &socket, None).unwrap();
+
+        let result = uninstall_block(&config_path).unwrap();
+        assert_eq!(result, UninstallResult::Removed);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!content.contains(BEGIN_MARKER));
+        assert!(content.contains("Host foo"));
+        // Should not have excessive blank lines piling up
+        assert!(
+            !content.contains("\n\n\n\n"),
+            "should not accumulate excessive blank lines"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_is_installed_with_partial_marker_begin_only() {
+        let dir = temp_dir("partial-marker");
+        let config_path = dir.join("config");
+
+        // Write a file that has BEGIN marker but no END marker (corrupted/partial)
+        let content = format!(
+            "Host foo\n    User bar\n\n{}\nHost *\n    IdentityAgent /tmp/sock\n",
+            BEGIN_MARKER
+        );
+        std::fs::write(&config_path, &content).unwrap();
+
+        // is_installed only checks for BEGIN marker, so this should return true
+        assert!(is_installed(&config_path).unwrap());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

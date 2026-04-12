@@ -261,4 +261,91 @@ mod tests {
         assert_eq!(parsed_s[0], 0x00);
         assert_eq!(parsed_s[1], 0x80);
     }
+
+    #[test]
+    fn test_der_to_ssh_signature_known_bytes() {
+        // Known r=1..32, s=33..64 should produce a deterministic SSH signature
+        let r: Vec<u8> = (1..=32).collect();
+        let s: Vec<u8> = (33..=64).collect();
+        let der = make_der_signature(&r, &s);
+        let ssh_sig = der_to_ssh_signature(&der).unwrap();
+
+        // Parse outer: string("ecdsa-sha2-nistp256") || string(inner)
+        let (algo, rest) = sshenc_core::pubkey::read_ssh_string(&ssh_sig).unwrap();
+        assert_eq!(algo, b"ecdsa-sha2-nistp256");
+
+        let (inner, tail) = sshenc_core::pubkey::read_ssh_string(rest).unwrap();
+        assert!(tail.is_empty());
+
+        // Parse inner: mpint(r) || mpint(s)
+        let (parsed_r, remaining) = sshenc_core::pubkey::read_ssh_string(inner).unwrap();
+        let (parsed_s, rest2) = sshenc_core::pubkey::read_ssh_string(remaining).unwrap();
+        assert!(rest2.is_empty());
+
+        assert_eq!(parsed_r, &r[..]);
+        assert_eq!(parsed_s, &s[..]);
+    }
+
+    #[test]
+    fn test_der_to_ssh_signature_minimum_length() {
+        // Minimum valid DER: r=1 byte, s=1 byte
+        let r = vec![0x01];
+        let s = vec![0x02];
+        let der = make_der_signature(&r, &s);
+        let ssh_sig = der_to_ssh_signature(&der).unwrap();
+
+        let (algo, rest) = sshenc_core::pubkey::read_ssh_string(&ssh_sig).unwrap();
+        assert_eq!(algo, b"ecdsa-sha2-nistp256");
+
+        let (inner, _) = sshenc_core::pubkey::read_ssh_string(rest).unwrap();
+        let (parsed_r, remaining) = sshenc_core::pubkey::read_ssh_string(inner).unwrap();
+        let (parsed_s, _) = sshenc_core::pubkey::read_ssh_string(remaining).unwrap();
+        assert_eq!(parsed_r, &[0x01]);
+        assert_eq!(parsed_s, &[0x02]);
+    }
+
+    #[test]
+    fn test_der_to_ssh_signature_maximum_length_p256() {
+        // Maximum P-256 DER: 33 bytes per integer (leading 0x00 + 32 bytes with high bit set)
+        let mut r = vec![0x00_u8];
+        r.extend_from_slice(&[0xFF; 32]);
+        let mut s = vec![0x00_u8];
+        s.extend_from_slice(&[0x80; 32]);
+        let der = make_der_signature(&r, &s);
+        let ssh_sig = der_to_ssh_signature(&der).unwrap();
+
+        let (algo, rest) = sshenc_core::pubkey::read_ssh_string(&ssh_sig).unwrap();
+        assert_eq!(algo, b"ecdsa-sha2-nistp256");
+
+        let (inner, _) = sshenc_core::pubkey::read_ssh_string(rest).unwrap();
+        let (parsed_r, remaining) = sshenc_core::pubkey::read_ssh_string(inner).unwrap();
+        let (parsed_s, _) = sshenc_core::pubkey::read_ssh_string(remaining).unwrap();
+
+        // Leading zeros should be preserved since next byte has high bit set
+        assert_eq!(parsed_r[0], 0x00);
+        assert_eq!(parsed_r[1], 0xFF);
+        assert_eq!(parsed_s[0], 0x00);
+        assert_eq!(parsed_s[1], 0x80);
+    }
+
+    #[test]
+    fn test_parse_der_signature_wrong_tag() {
+        // First byte is 0x31 (SET) instead of 0x30 (SEQUENCE)
+        let bad = vec![0x31, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02];
+        let result = der_to_ssh_signature(&bad);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("SEQUENCE") || err_msg.contains("0x30"),
+            "error should mention SEQUENCE tag: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_der_signature_truncated() {
+        // Valid start but truncated in the middle
+        let truncated = vec![0x30, 0x10, 0x02, 0x01];
+        let result = der_to_ssh_signature(&truncated);
+        assert!(result.is_err());
+    }
 }

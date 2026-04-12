@@ -403,4 +403,85 @@ mod tests {
         let result = read_ssh_string(&buf);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_from_sec1_bytes_wrong_prefix_0x02() {
+        // 65 bytes with compressed point prefix 0x02 should be rejected
+        let mut point = vec![0x02_u8];
+        point.extend_from_slice(&[0x01; 64]);
+        let result = SshPublicKey::from_sec1_bytes(&point, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("uncompressed") || err_msg.contains("0x04"),
+            "error should mention uncompressed point: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_from_sec1_bytes_64_bytes() {
+        // 64 bytes is too short (should be 65)
+        let point = vec![0x04; 64];
+        let result = SshPublicKey::from_sec1_bytes(&point, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("65"),
+            "error should mention expected 65 bytes: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_to_wire_format_structure() {
+        let point = sample_ec_point();
+        let key = SshPublicKey::from_sec1_bytes(&point, None).unwrap();
+        let wire = key.to_wire_format();
+
+        // Verify SSH blob structure: string(key_type) || string(curve) || string(Q)
+        let (key_type, rest) = read_ssh_string(&wire).unwrap();
+        assert_eq!(key_type, b"ecdsa-sha2-nistp256");
+
+        let (curve, rest) = read_ssh_string(rest).unwrap();
+        assert_eq!(curve, b"nistp256");
+
+        let (q, rest) = read_ssh_string(rest).unwrap();
+        assert_eq!(q.len(), 65);
+        assert_eq!(q[0], 0x04);
+        assert!(rest.is_empty(), "no trailing bytes");
+    }
+
+    #[test]
+    fn test_from_openssh_line_extra_whitespace_in_comment() {
+        // A line with multiple spaces in the comment portion
+        let point = sample_ec_point();
+        let key =
+            SshPublicKey::from_sec1_bytes(&point, Some("user@host  extra  spaces".into())).unwrap();
+        let line = key.to_openssh_line();
+        let parsed = SshPublicKey::from_openssh_line(&line).unwrap();
+        assert_eq!(parsed.comment(), Some("user@host  extra  spaces"));
+        assert_eq!(parsed.ec_point(), key.ec_point());
+    }
+
+    #[test]
+    fn test_from_openssh_line_no_comment_roundtrip() {
+        let point = sample_ec_point();
+        let key = SshPublicKey::from_sec1_bytes(&point, None).unwrap();
+        let line = key.to_openssh_line();
+
+        // The line should just be "ecdsa-sha2-nistp256 <base64>" with no trailing space
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        assert_eq!(parts.len(), 2, "no comment means exactly 2 parts");
+
+        let parsed = SshPublicKey::from_openssh_line(&line).unwrap();
+        assert!(parsed.comment().is_none());
+        assert_eq!(parsed.ec_point(), key.ec_point());
+    }
+
+    #[test]
+    fn test_from_openssh_line_empty_base64_error() {
+        // Valid key type but empty base64 blob
+        let line = "ecdsa-sha2-nistp256  comment";
+        let result = SshPublicKey::from_openssh_line(line);
+        assert!(result.is_err());
+    }
 }

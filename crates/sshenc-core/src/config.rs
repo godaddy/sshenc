@@ -282,4 +282,93 @@ key = "value"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.socket_path, PathBuf::from("/tmp/agent.sock"));
     }
+
+    #[test]
+    fn test_config_all_fields_roundtrip() {
+        let config = Config {
+            socket_path: PathBuf::from("/custom/agent.sock"),
+            allowed_labels: vec!["key1".into(), "key2".into(), "key3".into()],
+            prompt_policy: PromptPolicy::Never,
+            pub_dir: PathBuf::from("/custom/pubkeys"),
+            log_level: LogLevel::Trace,
+            host_identities: vec![
+                HostIdentity {
+                    host: "github.com".into(),
+                    label: "github-key".into(),
+                },
+                HostIdentity {
+                    host: "*.internal.corp".into(),
+                    label: "work-key".into(),
+                },
+            ],
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(parsed.socket_path, config.socket_path);
+        assert_eq!(parsed.allowed_labels, config.allowed_labels);
+        assert_eq!(parsed.prompt_policy, PromptPolicy::Never);
+        assert_eq!(parsed.pub_dir, config.pub_dir);
+        assert_eq!(parsed.log_level, LogLevel::Trace);
+        assert_eq!(parsed.host_identities.len(), 2);
+        assert_eq!(parsed.host_identities[0].host, "github.com");
+        assert_eq!(parsed.host_identities[0].label, "github-key");
+        assert_eq!(parsed.host_identities[1].host, "*.internal.corp");
+        assert_eq!(parsed.host_identities[1].label, "work-key");
+    }
+
+    #[test]
+    fn test_config_host_identities_roundtrip() {
+        let toml_str = r#"
+socket_path = "/tmp/agent.sock"
+allowed_labels = []
+prompt_policy = "keydefault"
+pub_dir = "/tmp/pub"
+log_level = "info"
+
+[[host_identities]]
+host = "github.com"
+label = "gh"
+
+[[host_identities]]
+host = "gitlab.com"
+label = "gl"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.host_identities.len(), 2);
+        assert_eq!(config.host_identities[0].host, "github.com");
+        assert_eq!(config.host_identities[0].label, "gh");
+        assert_eq!(config.host_identities[1].host, "gitlab.com");
+        assert_eq!(config.host_identities[1].label, "gl");
+
+        // Roundtrip
+        let re_serialized = toml::to_string_pretty(&config).unwrap();
+        let re_parsed: Config = toml::from_str(&re_serialized).unwrap();
+        assert_eq!(re_parsed.host_identities.len(), 2);
+    }
+
+    #[test]
+    fn test_platform_conditional_socket_path() {
+        let config = Config::default();
+        #[cfg(unix)]
+        {
+            let path_str = config.socket_path.to_string_lossy();
+            assert!(
+                path_str.contains("agent.sock"),
+                "Unix socket path should contain 'agent.sock': {path_str}"
+            );
+            assert!(
+                path_str.contains(".sshenc"),
+                "Unix socket path should contain '.sshenc': {path_str}"
+            );
+        }
+        #[cfg(windows)]
+        {
+            let path_str = config.socket_path.to_string_lossy();
+            assert!(
+                path_str.contains(r"\\.\pipe\"),
+                "Windows socket path should be a named pipe: {path_str}"
+            );
+        }
+    }
 }

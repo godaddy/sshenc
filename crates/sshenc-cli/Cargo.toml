@@ -38,6 +38,7 @@ enclaveapp-windows = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 enclaveapp-software = { workspace = true }
+enclaveapp-linux-tpm = { workspace = true }
 
 [lints]
 workspace = true

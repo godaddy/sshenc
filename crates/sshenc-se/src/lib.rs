@@ -28,4 +28,4 @@ pub use macos::SecureEnclaveBackend;
 pub use windows::TpmBackend;
 
 #[cfg(target_os = "linux")]
-pub use linux::SoftwareBackend;
+pub use linux::LinuxBackend;

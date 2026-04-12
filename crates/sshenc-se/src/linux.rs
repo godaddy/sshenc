@@ -1,35 +1,24 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Linux software backend implementation using libenclaveapp.
+//! Linux backend implementation for sshenc.
 //!
-//! Keys are software-backed ECDSA P-256, stored on disk in `~/.sshenc/keys/`.
-//! This is NOT hardware-protected — use macOS Secure Enclave or Windows TPM
-//! when hardware security is required.
+//! Tries backends in order:
+//! 1. TPM 2.0 via tss-esapi (hardware-protected, same security model as macOS/Windows)
+//! 2. Software P-256 keys on disk, encrypted via system keyring if available
+//!
+//! The selected backend is transparent to the rest of sshenc.
 
 use crate::backend::KeyBackend;
 use crate::compat;
 use enclaveapp_core::metadata;
 use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
 use enclaveapp_core::types::{AccessPolicy, KeyType};
-use enclaveapp_software::SoftwareSigner;
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;
 use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyLabel, KeyMetadata};
 use sshenc_core::pubkey::SshPublicKey;
 use std::path::PathBuf;
-
-/// Software backend using ECDSA P-256 keys on disk via libenclaveapp.
-///
-/// Keys are stored as files in `~/.sshenc/keys/`. Unlike the macOS and
-/// Windows backends, keys are NOT hardware-protected.
-#[derive(Debug)]
-pub struct SoftwareBackend {
-    /// Directory where SSH .pub files are written (typically ~/.ssh).
-    pub_dir: PathBuf,
-    /// The libenclaveapp signer, configured to use ~/.sshenc/keys/.
-    signer: SoftwareSigner,
-}
 
 /// Return the sshenc keys directory (~/.sshenc/keys/).
 pub fn sshenc_keys_dir() -> PathBuf {
@@ -39,12 +28,38 @@ pub fn sshenc_keys_dir() -> PathBuf {
         .join("keys")
 }
 
-impl SoftwareBackend {
+/// Linux backend that auto-selects TPM or software.
+#[derive(Debug)]
+pub struct LinuxBackend {
+    pub_dir: PathBuf,
+    inner: LinuxSigner,
+}
+
+#[derive(Debug)]
+enum LinuxSigner {
+    Tpm(enclaveapp_linux_tpm::LinuxTpmSigner),
+    Software(enclaveapp_software::SoftwareSigner),
+}
+
+impl LinuxBackend {
+    #[allow(clippy::print_stderr)]
     pub fn new(pub_dir: PathBuf) -> Self {
-        SoftwareBackend {
-            pub_dir,
-            signer: SoftwareSigner::with_keys_dir("sshenc", sshenc_keys_dir()),
-        }
+        let keys_dir = sshenc_keys_dir();
+        let inner = if enclaveapp_linux_tpm::is_available() {
+            eprintln!("sshenc: using TPM 2.0 for hardware-backed keys");
+            LinuxSigner::Tpm(
+                enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir("sshenc", keys_dir),
+            )
+        } else {
+            eprintln!(
+                "sshenc: no TPM detected, using software-backed keys \
+                 (private keys stored on disk)"
+            );
+            LinuxSigner::Software(
+                enclaveapp_software::SoftwareSigner::with_keys_dir("sshenc", keys_dir),
+            )
+        };
+        LinuxBackend { pub_dir, inner }
     }
 
     fn find_pub_file(&self, label: &str) -> Option<PathBuf> {
@@ -59,9 +74,22 @@ impl SoftwareBackend {
             None
         }
     }
+
+    fn signer(&self) -> &dyn EnclaveSigner {
+        match &self.inner {
+            LinuxSigner::Tpm(s) => s,
+            LinuxSigner::Software(s) => s,
+        }
+    }
+
+    fn key_manager(&self) -> &dyn EnclaveKeyManager {
+        match &self.inner {
+            LinuxSigner::Tpm(s) => s,
+            LinuxSigner::Software(s) => s,
+        }
+    }
 }
 
-/// Map an enclaveapp_core error to an sshenc_core error.
 fn map_err(operation: &str, e: enclaveapp_core::Error) -> Error {
     Error::SecureEnclave {
         operation: operation.into(),
@@ -69,12 +97,11 @@ fn map_err(operation: &str, e: enclaveapp_core::Error) -> Error {
     }
 }
 
-impl KeyBackend for SoftwareBackend {
+impl KeyBackend for LinuxBackend {
     fn generate(&self, opts: &KeyGenOptions) -> Result<KeyInfo> {
         let label_str = opts.label.as_str();
 
-        // Check for duplicates
-        if self.signer.public_key(label_str).is_ok() {
+        if self.key_manager().public_key(label_str).is_ok() {
             return Err(Error::DuplicateLabel {
                 label: label_str.to_string(),
             });
@@ -86,13 +113,11 @@ impl KeyBackend for SoftwareBackend {
             AccessPolicy::None
         };
 
-        // Generate key (software-backed)
         let public_bytes = self
-            .signer
+            .key_manager()
             .generate(label_str, KeyType::Signing, policy)
             .map_err(|e| map_err("generate", e))?;
 
-        // Save app-specific metadata (comment, git_name, git_email)
         let keys_dir = sshenc_keys_dir();
         let mut meta =
             compat::load_sshenc_meta(&keys_dir, label_str).map_err(|e| map_err("load_meta", e))?;
@@ -104,7 +129,6 @@ impl KeyBackend for SoftwareBackend {
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, opts.comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
 
-        // Write SSH .pub file if requested
         let pub_file_path = if let Some(ref path) = opts.write_pub_path {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -131,7 +155,7 @@ impl KeyBackend for SoftwareBackend {
 
     fn list(&self) -> Result<Vec<KeyInfo>> {
         let labels = self
-            .signer
+            .key_manager()
             .list_keys()
             .map_err(|e| map_err("list_keys", e))?;
 
@@ -151,11 +175,10 @@ impl KeyBackend for SoftwareBackend {
         drop(KeyLabel::new(label)?);
 
         let public_bytes = self
-            .signer
+            .key_manager()
             .public_key(label)
             .map_err(|e| map_err("load_pub_key", e))?;
 
-        // Load persisted metadata
         let keys_dir = sshenc_keys_dir();
         let meta =
             compat::load_sshenc_meta(&keys_dir, label).map_err(|e| map_err("load_meta", e))?;
@@ -178,19 +201,19 @@ impl KeyBackend for SoftwareBackend {
 
     fn delete(&self, label: &str) -> Result<()> {
         drop(KeyLabel::new(label)?);
-        self.signer
+        self.key_manager()
             .delete_key(label)
             .map_err(|e| map_err("delete_key", e))
     }
 
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         drop(KeyLabel::new(label)?);
-        self.signer
+        self.signer()
             .sign(label, data)
             .map_err(|e| map_err("sign", e))
     }
 
     fn is_available(&self) -> bool {
-        self.signer.is_available()
+        self.key_manager().is_available()
     }
 }

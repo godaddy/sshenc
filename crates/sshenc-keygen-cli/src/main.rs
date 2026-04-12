@@ -60,7 +60,7 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     let backend = sshenc_se::TpmBackend::new(pub_dir.clone());
     #[cfg(target_os = "linux")]
-    let backend = sshenc_se::SoftwareBackend::new(pub_dir.clone());
+    let backend = sshenc_se::LinuxBackend::new(pub_dir.clone());
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     anyhow::bail!("sshenc requires macOS, Windows, or Linux");
 

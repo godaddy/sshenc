@@ -32,6 +32,7 @@ enclaveapp-core = { path = "../libenclaveapp/crates/enclaveapp-core" }
 enclaveapp-apple = { path = "../libenclaveapp/crates/enclaveapp-apple", features = ["signing"] }
 enclaveapp-windows = { path = "../libenclaveapp/crates/enclaveapp-windows", features = ["signing"] }
 enclaveapp-software = { path = "../libenclaveapp/crates/enclaveapp-software", features = ["signing"] }
+enclaveapp-linux-tpm = { path = "../libenclaveapp/crates/enclaveapp-linux-tpm", features = ["signing"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

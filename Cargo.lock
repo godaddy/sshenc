@@ -474,6 +474,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-wsl"
+version = "0.1.0"
+dependencies = [
+ "enclaveapp-core",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1227,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-agent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1247,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-agent-proto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "byteorder",
  "bytes",
@@ -1258,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1270,6 +1277,7 @@ dependencies = [
  "enclaveapp-linux-tpm",
  "enclaveapp-software",
  "enclaveapp-windows",
+ "enclaveapp-wsl",
  "serde",
  "serde_json",
  "sha2",
@@ -1285,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -1301,14 +1309,14 @@ dependencies = [
 
 [[package]]
 name = "sshenc-gitenc"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "sshenc-keygen-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1321,14 +1329,14 @@ dependencies = [
 
 [[package]]
 name = "sshenc-pkcs11"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "sshenc-se"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dirs",
  "enclaveapp-apple",
@@ -1344,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-test-support"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rand",
  "sshenc-core",

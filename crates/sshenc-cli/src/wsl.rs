@@ -4,193 +4,16 @@
 //! WSL (Windows Subsystem for Linux) integration.
 //!
 //! When `sshenc install` runs on Windows, it detects installed WSL distros
-//! and configures them for sshenc:
-//!
-//! Level 1: Sets GIT_SSH_COMMAND in .bashrc/.zshrc so git uses Windows SSH
-//! Level 2: Sets up socat + npiperelay bridge for full ssh/scp support
+//! and configures them for sshenc via the shared enclaveapp-wsl library.
 
 #![cfg(target_os = "windows")]
 
-use std::path::PathBuf;
+use enclaveapp_wsl::install::WslInstallConfig;
 
-/// A detected WSL distribution.
-struct WslDistro {
-    name: String,
-    /// Path to the distro's home directory from Windows side
-    /// e.g., \\wsl$\Ubuntu\home\username
-    home_path: PathBuf,
-}
-
-/// The sshenc block markers for shell configs.
-const BEGIN_MARKER: &str = "# BEGIN sshenc managed block -- do not edit";
-const END_MARKER: &str = "# END sshenc managed block";
-
-/// Configure all detected WSL distros for sshenc.
-pub fn configure_wsl_distros() {
-    let distros = detect_wsl_distros();
-    if distros.is_empty() {
-        return;
-    }
-
-    println!();
-    println!("Detected {} WSL distribution(s):", distros.len());
-
-    for distro in &distros {
-        println!("  Configuring {}...", distro.name);
-        if let Err(e) = configure_distro(distro) {
-            eprintln!("    warning: {e}");
-        }
-    }
-}
-
-/// Remove sshenc configuration from all WSL distros.
-pub fn unconfigure_wsl_distros() {
-    let distros = detect_wsl_distros();
-    for distro in &distros {
-        if let Err(e) = unconfigure_distro(distro) {
-            eprintln!("warning: could not clean WSL distro {}: {e}", distro.name);
-        }
-    }
-}
-
-/// Detect installed WSL distributions by running `wsl --list --quiet`.
-fn detect_wsl_distros() -> Vec<WslDistro> {
-    let output = match std::process::Command::new("wsl")
-        .args(["--list", "--quiet"])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-
-    // wsl --list outputs UTF-16LE on some Windows versions
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut distros = Vec::new();
-
-    for line in stdout.lines() {
-        let name = line.trim().trim_matches('\0').to_string();
-        if name.is_empty() {
-            continue;
-        }
-
-        // Find the home directory by asking WSL
-        if let Some(home_path) = find_wsl_home(&name) {
-            distros.push(WslDistro { name, home_path });
-        }
-    }
-
-    distros
-}
-
-/// Find the WSL user's home directory path from Windows.
-fn find_wsl_home(distro: &str) -> Option<PathBuf> {
-    // Run `wsl -d <distro> -- echo $HOME` to get the Linux home path
-    let output = std::process::Command::new("wsl")
-        .args(["-d", distro, "--", "echo", "$HOME"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let linux_home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if linux_home.is_empty() {
-        return None;
-    }
-
-    // Convert Linux path to Windows UNC path: /home/user → \\wsl$\<distro>\home\user
-    let win_path = format!(r"\\wsl$\{}{}", distro, linux_home.replace('/', r"\"));
-    let path = PathBuf::from(&win_path);
-    if path.exists() {
-        Some(path)
-    } else {
-        // Try wsl.localhost (newer Windows versions)
-        let win_path = format!(
-            r"\\wsl.localhost\{}{}",
-            distro,
-            linux_home.replace('/', r"\")
-        );
-        let path = PathBuf::from(&win_path);
-        if path.exists() {
-            Some(path)
-        } else {
-            None
-        }
-    }
-}
-
-/// Configure a single WSL distro.
-///
-/// Injects the sshenc block into shell config files:
-/// - .bashrc — read by bash for interactive AND non-interactive sessions on most
-///   Linux distros (Ubuntu/Debian .profile sources .bashrc, and most WSL distros
-///   are Ubuntu-based). This is the correct file for SSH_AUTH_SOCK.
-/// - .zshrc — read by zsh for interactive sessions. Most zsh users in WSL use it
-///   interactively; non-interactive zsh is rare.
-/// - .profile — only if .bashrc doesn't exist (some minimal distros).
-fn configure_distro(distro: &WslDistro) -> Result<(), String> {
-    let shell_block = generate_shell_block();
-    let mut configured = false;
-
-    // .bashrc — the primary target for bash users (covers interactive + non-interactive
-    // on most distros because .profile sources .bashrc)
-    let bashrc = distro.home_path.join(".bashrc");
-    if bashrc.exists() {
-        inject_block(&bashrc, &shell_block).map_err(|e| format!(".bashrc: {e}"))?;
-        println!("    Updated .bashrc");
-        configured = true;
-    }
-
-    // .zshrc — for zsh users
-    let zshrc = distro.home_path.join(".zshrc");
-    if zshrc.exists() {
-        inject_block(&zshrc, &shell_block).map_err(|e| format!(".zshrc: {e}"))?;
-        println!("    Updated .zshrc");
-        configured = true;
-    }
-
-    // .profile — fallback if no .bashrc exists (minimal distros)
-    if !configured {
-        let profile = distro.home_path.join(".profile");
-        if profile.exists() {
-            inject_block(&profile, &shell_block).map_err(|e| format!(".profile: {e}"))?;
-            println!("    Updated .profile");
-        } else {
-            // Create .bashrc as a last resort
-            let content = format!("{}\n", &shell_block);
-            std::fs::write(&bashrc, &content).map_err(|e| format!("create .bashrc: {e}"))?;
-            println!("    Created .bashrc");
-        }
-    }
-
-    // Install bridge dependencies (socat + npiperelay)
-    install_level2_deps(distro)?;
-
-    Ok(())
-}
-
-/// Remove sshenc configuration from a WSL distro.
-fn unconfigure_distro(distro: &WslDistro) -> Result<(), String> {
-    for name in &[".bashrc", ".zshrc", ".profile"] {
-        let path = distro.home_path.join(name);
-        if path.exists() {
-            remove_block(&path).map_err(|e| format!("{name}: {e}"))?;
-        }
-    }
-    Ok(())
-}
-
-/// Generate the shell block to inject into .bashrc/.zshrc.
-///
-/// The block is designed to be safe for both interactive and non-interactive
-/// sessions. It uses a PID file to prevent duplicate socat bridges when
-/// multiple shells start concurrently. The bridge process is started with
-/// setsid so it survives shell exit, and unlink-early cleans stale sockets.
-fn generate_shell_block() -> String {
-    format!(
-        r#"{BEGIN_MARKER}
-# sshenc: Bridge WSL to Windows sshenc-agent via named pipe relay.
+fn make_config() -> WslInstallConfig {
+    WslInstallConfig {
+        app_name: "sshenc".to_string(),
+        shell_block: r#"# sshenc: Bridge WSL to Windows sshenc-agent via named pipe relay.
 # All SSH operations (ssh, git, scp, sftp) use the Windows TPM keys.
 if command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1; then
     export SSH_AUTH_SOCK="$HOME/.sshenc/agent.sock"
@@ -208,204 +31,59 @@ if command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1
 else
     # Fallback: at least git works via Windows SSH
     export GIT_SSH_COMMAND="/mnt/c/Windows/System32/OpenSSH/ssh.exe"
-fi
-{END_MARKER}"#
-    )
+fi"#
+        .to_string(),
+        install_bridge_deps: true,
+        linux_binary_path: None,
+        linux_binary_target: None,
+    }
 }
 
-/// Inject the sshenc block into a shell config file.
-/// Creates a backup (.sshenc-backup) before first modification.
-fn inject_block(path: &PathBuf, block: &str) -> Result<(), String> {
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+/// Configure all detected WSL distros for sshenc.
+pub fn configure_wsl_distros() {
+    let config = make_config();
+    let results = enclaveapp_wsl::install::configure_all_distros(&config);
 
-    // Already present?
-    if content.contains(BEGIN_MARKER) {
-        return Ok(());
+    if results.is_empty() {
+        return;
     }
 
-    // Back up the original file before first modification
-    let backup = path.with_extension("sshenc-backup");
-    if !backup.exists() {
-        std::fs::copy(path, &backup).map_err(|e| format!("backup failed: {e}"))?;
-    }
+    println!();
+    println!("Detected {} WSL distribution(s):", results.len());
 
-    let mut new_content = content;
-    if !new_content.ends_with('\n') {
-        new_content.push('\n');
-    }
-    new_content.push('\n');
-    new_content.push_str(block);
-    new_content.push('\n');
-
-    // Write to a temp file first, then syntax check before committing
-    let tmp = path.with_extension("sshenc-tmp");
-    std::fs::write(&tmp, &new_content).map_err(|e| e.to_string())?;
-
-    // Determine the right shell to syntax-check with
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    let (shell, flag) = if file_name.contains("zsh") {
-        ("zsh", "-n")
-    } else {
-        ("bash", "-n")
-    };
-
-    // Ask WSL to syntax-check the modified file
-    // Convert Windows UNC path to a form WSL can read
-    let check = std::process::Command::new("wsl")
-        .args(["--", shell, flag])
-        .stdin(std::process::Stdio::from(
-            std::fs::File::open(&tmp).map_err(|e| e.to_string())?,
-        ))
-        .output();
-
-    match check {
-        Ok(o) if o.status.success() => {
-            // Syntax OK — commit the change
-            std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-        }
-        Ok(o) => {
-            // Syntax error — do NOT modify the original, restore from backup
-            drop(std::fs::remove_file(&tmp));
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            return Err(format!(
-                "ABORTED: modified file has syntax errors ({}). Original untouched. Error: {}",
-                shell,
-                stderr.trim()
-            ));
-        }
-        Err(_) => {
-            // Can't run syntax check (WSL not available?) — proceed cautiously
-            // but still commit since we know our block is valid shell
-            std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Remove the sshenc block from a shell config file.
-fn remove_block(path: &PathBuf) -> Result<(), String> {
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if !content.contains(BEGIN_MARKER) {
-        return Ok(());
-    }
-
-    let lines: Vec<&str> = content.lines().collect();
-    let mut new_lines: Vec<&str> = Vec::new();
-    let mut in_block = false;
-
-    for line in &lines {
-        if line.contains(BEGIN_MARKER) {
-            in_block = true;
-            if let Some(last) = new_lines.last() {
-                if last.is_empty() {
-                    new_lines.pop();
+    for result in &results {
+        println!("  Configuring {}...", result.distro_name);
+        match &result.outcome {
+            Ok(actions) => {
+                for action in actions {
+                    println!("    {action}");
                 }
             }
-            continue;
-        }
-        if line.contains(END_MARKER) {
-            in_block = false;
-            continue;
-        }
-        if !in_block {
-            new_lines.push(line);
-        }
-    }
-
-    let mut result = new_lines.join("\n");
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    std::fs::write(path, &result).map_err(|e| e.to_string())
-}
-
-/// Install Level 2 dependencies (socat + npiperelay) into a WSL distro.
-fn install_level2_deps(distro: &WslDistro) -> Result<(), String> {
-    // Check socat
-    let has_socat = wsl_has_command(distro, "socat");
-    if !has_socat {
-        println!("    Installing socat...");
-        let status = std::process::Command::new("wsl")
-            .args([
-                "-d",
-                &distro.name,
-                "--",
-                "bash",
-                "-c",
-                // Try apt, then apk, then dnf — covers most distros
-                "sudo apt-get install -y socat 2>/dev/null || sudo apk add socat 2>/dev/null || sudo dnf install -y socat 2>/dev/null",
-            ])
-            .status();
-        match status {
-            Ok(s) if s.success() => println!("    Installed socat"),
-            _ => println!("    warning: could not install socat automatically"),
-        }
-    } else {
-        println!("    socat already installed");
-    }
-
-    // Check npiperelay
-    let has_npiperelay = wsl_has_command(distro, "npiperelay.exe");
-    if !has_npiperelay {
-        println!("    Installing npiperelay...");
-        // Download pre-built binary from GitHub releases
-        let install_script = r#"
-            set -e
-            ARCH=$(uname -m)
-            case "$ARCH" in
-                x86_64) GOARCH=amd64 ;;
-                aarch64) GOARCH=arm64 ;;
-                *) echo "unsupported arch: $ARCH"; exit 1 ;;
-            esac
-            URL="https://github.com/jstarks/npiperelay/releases/latest/download/npiperelay_linux_${GOARCH}.tar.gz"
-            TMP=$(mktemp -d)
-            if command -v curl >/dev/null 2>&1; then
-                curl -sL "$URL" | tar xz -C "$TMP" 2>/dev/null
-            elif command -v wget >/dev/null 2>&1; then
-                wget -qO- "$URL" | tar xz -C "$TMP" 2>/dev/null
-            else
-                echo "no curl or wget"; exit 1
-            fi
-            if [ -f "$TMP/npiperelay.exe" ]; then
-                sudo mv "$TMP/npiperelay.exe" /usr/local/bin/npiperelay.exe
-                sudo chmod +x /usr/local/bin/npiperelay.exe
-                echo "OK"
-            else
-                # Try go install as fallback
-                if command -v go >/dev/null 2>&1; then
-                    GOBIN=/usr/local/bin go install github.com/jstarks/npiperelay@latest 2>/dev/null && echo "OK" || echo "FAIL"
-                else
-                    echo "FAIL"
-                fi
-            fi
-            rm -rf "$TMP"
-        "#;
-        let output = std::process::Command::new("wsl")
-            .args(["-d", &distro.name, "--", "bash", "-c", install_script])
-            .output();
-        match output {
-            Ok(o) if String::from_utf8_lossy(&o.stdout).contains("OK") => {
-                println!("    Installed npiperelay");
-            }
-            _ => {
-                println!("    warning: could not install npiperelay automatically");
-                println!("    For full SSH support, install it manually:");
-                println!("      https://github.com/jstarks/npiperelay/releases");
+            Err(e) => {
+                eprintln!("    warning: {e}");
             }
         }
-    } else {
-        println!("    npiperelay already installed");
     }
-
-    Ok(())
 }
 
-/// Check if a command exists in a WSL distro.
-fn wsl_has_command(distro: &WslDistro, cmd: &str) -> bool {
-    std::process::Command::new("wsl")
-        .args(["-d", &distro.name, "--", "command", "-v", cmd])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Remove sshenc configuration from all WSL distros.
+pub fn unconfigure_wsl_distros() {
+    let config = make_config();
+    let results = enclaveapp_wsl::install::unconfigure_all_distros(&config);
+
+    for result in &results {
+        match &result.outcome {
+            Ok(actions) => {
+                for action in actions {
+                    println!("    {action}");
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not clean WSL distro {}: {e}",
+                    result.distro_name
+                );
+            }
+        }
+    }
 }

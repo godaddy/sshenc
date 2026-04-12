@@ -35,6 +35,7 @@ enclaveapp-apple = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 enclaveapp-windows = { workspace = true }
+enclaveapp-wsl = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 enclaveapp-software = { workspace = true }

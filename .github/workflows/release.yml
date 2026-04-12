@@ -4,6 +4,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write
+
 jobs:
   release:
     uses: jgowdy/libenclaveapp/.github/workflows/reusable-release.yml@main

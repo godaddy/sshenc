@@ -16,7 +16,7 @@ keys. Nothing breaks when you install sshenc.
 ### Homebrew (macOS)
 
 ```sh
-brew tap jgowdy/sshenc https://github.com/jgowdy/sshenc
+brew tap jgowdy/sshenc
 brew install sshenc
 ```
 

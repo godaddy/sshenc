@@ -232,11 +232,23 @@ jobs:
           SCOOP
           sed -i 's/^          //' scoop/sshenc.json
 
-      - name: Commit and push
+      - name: Update main repo (version + scoop)
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock Formula/sshenc.rb scoop/sshenc.json
-          git diff --cached --quiet || git commit -m "Release ${tag}: update version, formula, and scoop manifest"
+          git add Cargo.toml Cargo.lock scoop/sshenc.json
+          git diff --cached --quiet || git commit -m "Release ${tag}: update version and scoop manifest"
           git push origin main
+
+      - name: Update Homebrew tap
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          git clone https://x-access-token:${{ secrets.RELEASE_PAT }}@github.com/jgowdy/homebrew-sshenc.git /tmp/tap
+          cp Formula/sshenc.rb /tmp/tap/sshenc.rb
+          cd /tmp/tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sshenc.rb
+          git diff --cached --quiet || git commit -m "Update sshenc to ${tag}"
+          git push

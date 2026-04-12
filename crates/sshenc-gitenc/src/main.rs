@@ -97,8 +97,31 @@ fn configure_repo(label: Option<&str>) {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "sshenc".to_string());
 
+    // Try to load identity from key metadata
+    let meta_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".sshenc")
+        .join("keys");
+    let meta_path = meta_dir.join(format!("{effective_label}.meta"));
+    let (git_name, git_email) = if let Ok(content) = std::fs::read_to_string(&meta_path) {
+        // Parse just the fields we need (avoid pulling in the full FFI crate)
+        let name = content
+            .lines()
+            .find(|l| l.contains("\"git_name\""))
+            .and_then(|l| l.split('"').nth(3))
+            .map(String::from);
+        let email = content
+            .lines()
+            .find(|l| l.contains("\"git_email\""))
+            .and_then(|l| l.split('"').nth(3))
+            .map(String::from);
+        (name, email)
+    } else {
+        (None, None)
+    };
+
     // Set SSH command for push/pull and commit signing
-    let configs: &[(&str, &str)] = &[
+    let mut configs: Vec<(&str, &str)> = vec![
         ("core.sshCommand", &ssh_command),
         ("gpg.format", "ssh"),
         ("gpg.ssh.program", &sshenc_bin),
@@ -106,7 +129,19 @@ fn configure_repo(label: Option<&str>) {
         ("commit.gpgsign", "true"),
     ];
 
-    for (key, value) in configs {
+    // Set identity if configured on the key
+    let name_ref;
+    let email_ref;
+    if let Some(ref name) = git_name {
+        name_ref = name.clone();
+        configs.push(("user.name", &name_ref));
+    }
+    if let Some(ref email) = git_email {
+        email_ref = email.clone();
+        configs.push(("user.email", &email_ref));
+    }
+
+    for (key, value) in &configs {
         let status = Command::new("git").args(["config", key, value]).status();
         match status {
             Ok(s) if s.success() => {}
@@ -127,6 +162,15 @@ fn configure_repo(label: Option<&str>) {
     println!("Configured this repo to use sshenc key: {effective_label}");
     println!("  SSH auth:       sshenc ssh --label {effective_label}");
     println!("  Commit signing: {signing_key}");
+    if let Some(ref name) = git_name {
+        println!("  Author:         {name}");
+    }
+    if let Some(ref email) = git_email {
+        println!("  Email:          {email}");
+    }
+    if git_name.is_none() && git_email.is_none() {
+        println!("  (no git identity set — use 'sshenc identity {effective_label} --name \"...\" --email \"...\"' to configure)");
+    }
 }
 
 enum ParsedArgs {

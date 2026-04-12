@@ -712,6 +712,9 @@ dependencies = [
 [[package]]
 name = "sshenc-gitenc"
 version = "0.3.0"
+dependencies = [
+ "dirs",
+]
 
 [[package]]
 name = "sshenc-keygen-cli"

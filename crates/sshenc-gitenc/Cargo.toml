@@ -12,3 +12,4 @@ name = "gitenc"
 path = "src/main.rs"
 
 [dependencies]
+dirs = { workspace = true }

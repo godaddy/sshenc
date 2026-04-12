@@ -157,6 +157,24 @@ enum Commands {
     /// Configure SSH to use sshenc for all hosts (adds IdentityAgent to ~/.ssh/config).
     Install,
 
+    /// Set the git identity (name and email) for a key.
+    ///
+    /// When gitenc --config uses this key, it will set user.name and user.email
+    /// on the repo automatically.
+    Identity {
+        /// Key label [default: "default"].
+        #[arg(default_value = "default")]
+        label: String,
+
+        /// Git author name (e.g., "Jay Gowdy").
+        #[arg(long)]
+        name: String,
+
+        /// Git author email (e.g., "jay@gowdy.me").
+        #[arg(long)]
+        email: String,
+    },
+
     /// Remove sshenc configuration from ~/.ssh/config.
     Uninstall,
 
@@ -357,6 +375,7 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
         },
         Commands::Install => commands::install(),
         Commands::Uninstall => commands::uninstall(),
+        Commands::Identity { label, name, email } => commands::set_identity(&label, &name, &email),
         Commands::Default { label } => commands::promote_to_default(&label),
         Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
         Commands::Completions { shell } => {

@@ -130,6 +130,10 @@ pub struct KeyMeta {
     pub comment: Option<String>,
     pub auth_policy: i32,
     pub created: String,
+    #[serde(default)]
+    pub git_name: Option<String>,
+    #[serde(default)]
+    pub git_email: Option<String>,
 }
 
 /// Generate a new TPM-backed ECDSA P-256 key.

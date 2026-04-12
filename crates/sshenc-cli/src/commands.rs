@@ -704,6 +704,28 @@ pub fn promote_to_default(label: &str) -> Result<()> {
     } // end #[cfg(target_os = "macos")]
 }
 
+pub fn set_identity(label: &str, name: &str, email: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    use sshenc_ffi_apple::se;
+    #[cfg(target_os = "windows")]
+    use sshenc_ffi_windows::tpm as se;
+
+    let mut meta = se::load_meta(label)?;
+    meta.git_name = Some(name.to_string());
+    meta.git_email = Some(email.to_string());
+
+    // Write updated metadata
+    let dir = se::keys_dir();
+    let meta_path = dir.join(format!("{label}.meta"));
+    let json = serde_json::to_string_pretty(&meta)?;
+    std::fs::write(&meta_path, &json)?;
+
+    println!("Set identity for key '{label}':");
+    println!("  Name:  {name}");
+    println!("  Email: {email}");
+    Ok(())
+}
+
 /// Handle ssh-keygen-compatible signing mode.
 /// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
 /// We sign via the agent and write an SSH signature to <data_file>.sig.

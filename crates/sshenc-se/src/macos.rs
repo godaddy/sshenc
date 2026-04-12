@@ -69,6 +69,8 @@ impl KeyBackend for SecureEnclaveBackend {
             label: label_str.to_string(),
             comment: opts.comment.clone(),
             auth_policy: auth_policy as i32,
+            git_name: None,
+            git_email: None,
             created: chrono_now(),
         };
 

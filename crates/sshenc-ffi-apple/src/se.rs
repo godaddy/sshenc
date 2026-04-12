@@ -168,7 +168,11 @@ pub struct KeyMeta {
     pub label: String,
     pub comment: Option<String>,
     pub auth_policy: i32, // 0=none, 1=any, 2=biometric, 3=password
-    pub created: String,  // ISO 8601
+    #[serde(default)]
+    pub git_name: Option<String>,
+    #[serde(default)]
+    pub git_email: Option<String>,
+    pub created: String, // ISO 8601
 }
 
 /// Save a key's data representation, public key, and metadata to the keys directory.
@@ -267,6 +271,8 @@ pub fn load_meta(label: &str) -> Result<KeyMeta> {
             label: label.to_string(),
             comment: None,
             auth_policy: 0,
+            git_name: None,
+            git_email: None,
             created: String::new(),
         });
     }

@@ -75,6 +75,8 @@ impl KeyBackend for TpmBackend {
                     .unwrap_or_default()
                     .as_secs()
             ),
+            git_name: None,
+            git_email: None,
         };
 
         // Save metadata and cached public key

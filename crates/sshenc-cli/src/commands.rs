@@ -797,7 +797,6 @@ pub fn forward_to_ssh_keygen(args: &[String]) -> Result<()> {
 /// We sign via the hardware backend and write an SSH signature to <data_file>.sig.
 pub fn ssh_sign(args: &[String]) -> Result<()> {
     use enclaveapp_core::metadata;
-    #[cfg(target_os = "linux")]
     use enclaveapp_core::traits::EnclaveSigner;
 
     // Parse: -Y sign -n <namespace> -f <key_file> <data_file>

@@ -19,7 +19,7 @@ use std::path::Path;
 pub fn load_sshenc_meta(
     keys_dir: &Path,
     label: &str,
-) -> std::result::Result<enclaveapp_core::KeyMeta, enclaveapp_core::Error> {
+) -> Result<enclaveapp_core::KeyMeta, enclaveapp_core::Error> {
     let meta_path = keys_dir.join(format!("{label}.meta"));
     if !meta_path.exists() {
         return Ok(enclaveapp_core::KeyMeta::new(

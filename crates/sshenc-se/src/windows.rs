@@ -19,6 +19,7 @@ use std::path::PathBuf;
 ///
 /// Keys are stored in the TPM's key hierarchy by CNG. Only metadata and
 /// cached public keys are stored on disk.
+#[derive(Debug)]
 pub struct TpmBackend {
     /// Directory where SSH .pub files are written (typically ~/.ssh).
     pub_dir: PathBuf,
@@ -27,6 +28,7 @@ pub struct TpmBackend {
 }
 
 /// Return the sshenc keys directory (%APPDATA%\sshenc\keys\).
+#[allow(clippy::print_stderr)]
 pub fn sshenc_keys_dir() -> PathBuf {
     dirs::data_dir()
         .or_else(dirs::home_dir)
@@ -147,7 +149,7 @@ impl KeyBackend for TpmBackend {
     }
 
     fn get(&self, label: &str) -> Result<KeyInfo> {
-        let _ = KeyLabel::new(label)?;
+        drop(KeyLabel::new(label)?);
 
         let public_bytes = self
             .signer
@@ -176,14 +178,14 @@ impl KeyBackend for TpmBackend {
     }
 
     fn delete(&self, label: &str) -> Result<()> {
-        let _ = KeyLabel::new(label)?;
+        drop(KeyLabel::new(label)?);
         self.signer
             .delete_key(label)
             .map_err(|e| map_err("delete_key", e))
     }
 
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
-        let _ = KeyLabel::new(label)?;
+        drop(KeyLabel::new(label)?);
         self.signer
             .sign(label, data)
             .map_err(|e| map_err("sign", e))

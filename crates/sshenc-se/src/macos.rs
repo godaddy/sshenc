@@ -17,6 +17,7 @@ use std::path::PathBuf;
 /// Secure Enclave backend using CryptoKit via libenclaveapp.
 ///
 /// Keys are stored as CryptoKit data representation files in `~/.sshenc/keys/`.
+#[derive(Debug)]
 pub struct SecureEnclaveBackend {
     /// Directory where SSH .pub files are written (typically ~/.ssh).
     pub_dir: PathBuf,
@@ -148,7 +149,7 @@ impl KeyBackend for SecureEnclaveBackend {
     }
 
     fn get(&self, label: &str) -> Result<KeyInfo> {
-        let _ = KeyLabel::new(label)?;
+        drop(KeyLabel::new(label)?);
 
         let public_bytes = self
             .signer
@@ -175,14 +176,14 @@ impl KeyBackend for SecureEnclaveBackend {
     }
 
     fn delete(&self, label: &str) -> Result<()> {
-        let _ = KeyLabel::new(label)?;
+        drop(KeyLabel::new(label)?);
         self.signer
             .delete_key(label)
             .map_err(|e| map_err("delete_key", e))
     }
 
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
-        let _ = KeyLabel::new(label)?;
+        drop(KeyLabel::new(label)?);
         self.signer
             .sign(label, data)
             .map_err(|e| map_err("sign", e))

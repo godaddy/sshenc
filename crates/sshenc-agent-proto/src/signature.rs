@@ -70,7 +70,7 @@ fn read_der_length(data: &[u8]) -> Result<(usize, usize)> {
         if num_bytes == 0 || num_bytes > 4 || data.len() < 1 + num_bytes {
             return Err(Error::AgentProtocol("invalid DER length".into()));
         }
-        let mut len = 0usize;
+        let mut len = 0_usize;
         for i in 0..num_bytes {
             len = (len << 8) | (data[1 + i] as usize);
         }
@@ -126,6 +126,7 @@ fn strip_leading_zeros(data: &[u8]) -> &[u8] {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

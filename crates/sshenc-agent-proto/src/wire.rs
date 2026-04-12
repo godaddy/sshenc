@@ -26,7 +26,7 @@ pub fn read_message_frame<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
         )));
     }
 
-    let mut buf = vec![0u8; len as usize];
+    let mut buf = vec![0_u8; len as usize];
     reader
         .read_exact(&mut buf)
         .map_err(|e| Error::AgentProtocol(format!("failed to read message body: {e}")))?;
@@ -50,7 +50,7 @@ pub fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>> {
     let len = cursor
         .read_u32::<BigEndian>()
         .map_err(|e| Error::AgentProtocol(format!("failed to read string length: {e}")))?;
-    let mut buf = vec![0u8; len as usize];
+    let mut buf = vec![0_u8; len as usize];
     cursor
         .read_exact(&mut buf)
         .map_err(|e| Error::AgentProtocol(format!("failed to read string data: {e}")))?;
@@ -59,9 +59,10 @@ pub fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>> {
 
 /// Write an SSH string (uint32 length + data) to a buffer.
 pub fn write_string(buf: &mut Vec<u8>, data: &[u8]) {
-    // Writing to Vec cannot fail
-    buf.write_u32::<BigEndian>(data.len() as u32).unwrap();
-    buf.write_all(data).unwrap();
+    // Writing to Vec<u8> cannot fail — these expect() calls are unreachable
+    buf.write_u32::<BigEndian>(data.len() as u32)
+        .expect("write to Vec<u8> cannot fail");
+    buf.write_all(data).expect("write to Vec<u8> cannot fail");
 }
 
 /// Read a uint32 from a cursor.
@@ -72,6 +73,7 @@ pub fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Cursor;

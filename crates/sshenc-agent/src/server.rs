@@ -22,6 +22,7 @@ use tokio::net::UnixListener;
 
 /// Run the SSH agent server on a Unix socket.
 #[cfg(unix)]
+#[allow(clippy::print_stdout)]
 pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Result<()> {
     // Clean up stale socket
     if socket_path.exists() {
@@ -76,7 +77,7 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
     }
 
     // Cleanup socket
-    let _ = std::fs::remove_file(&socket_path);
+    drop(std::fs::remove_file(&socket_path));
     Ok(())
 }
 
@@ -149,7 +150,7 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
         }
 
         // Read message body
-        let mut payload = vec![0u8; len as usize];
+        let mut payload = vec![0_u8; len as usize];
         stream.read_exact(&mut payload).await?;
 
         // Parse and handle
@@ -204,11 +205,7 @@ fn handle_request(
             tracing::debug!(count = identities.len(), "returning identities");
             Ok(AgentResponse::IdentitiesAnswer(identities))
         }
-        AgentRequest::SignRequest {
-            key_blob,
-            data,
-            flags: _,
-        } => {
+        AgentRequest::SignRequest { key_blob, data, .. } => {
             tracing::debug!(
                 blob_len = key_blob.len(),
                 data_len = data.len(),
@@ -261,6 +258,7 @@ fn handle_request(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use sshenc_core::key::{KeyGenOptions, KeyLabel};

@@ -20,3 +20,6 @@ toml = { workspace = true }
 byteorder = { workspace = true }
 
 [dev-dependencies]
+
+[lints]
+workspace = true

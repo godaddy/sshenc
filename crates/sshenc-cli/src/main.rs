@@ -237,6 +237,7 @@ enum OpensshAction {
     },
 }
 
+#[allow(clippy::print_stderr)]
 fn main() -> Result<()> {
     // Intercept ssh-keygen-compatible mode before clap parsing.
     // Git calls us with -Y sign, -Y verify, -Y find-principals, etc.
@@ -246,10 +247,7 @@ fn main() -> Result<()> {
         if raw_args[2] == "sign" {
             return commands::ssh_sign(&raw_args[1..]);
         }
-        let status = std::process::Command::new("ssh-keygen")
-            .args(&raw_args[1..])
-            .status()?;
-        std::process::exit(status.code().unwrap_or(1));
+        return commands::forward_to_ssh_keygen(&raw_args[1..]);
     }
 
     tracing_subscriber::fmt()
@@ -275,6 +273,7 @@ fn main() -> Result<()> {
     run_command(cli.command, &backend)
 }
 
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result<()> {
     match command {
         Commands::Keygen {

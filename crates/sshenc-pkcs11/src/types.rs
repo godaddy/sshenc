@@ -6,12 +6,14 @@
 #![allow(non_camel_case_types, dead_code)]
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct CK_VERSION {
     pub major: u8,
     pub minor: u8,
 }
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct CK_INFO {
     pub cryptoki_version: CK_VERSION,
     pub manufacturer_id: [u8; 32],

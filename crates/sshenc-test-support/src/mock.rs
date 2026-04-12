@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// A stored mock key.
+#[derive(Debug)]
 struct MockKey {
     info: KeyInfo,
     /// Seed used to generate deterministic signatures.
@@ -19,9 +20,14 @@ struct MockKey {
 }
 
 /// In-memory key backend for testing without Secure Enclave hardware.
+#[derive(Debug)]
 pub struct MockKeyBackend {
     keys: Mutex<HashMap<String, MockKey>>,
     next_seed: Mutex<u8>,
+}
+
+fn lock_err() -> Error {
+    Error::Other("mock mutex poisoned".into())
 }
 
 impl MockKeyBackend {
@@ -34,7 +40,7 @@ impl MockKeyBackend {
 
     /// Return the number of stored keys.
     pub fn key_count(&self) -> usize {
-        self.keys.lock().unwrap().len()
+        self.keys.lock().expect("mock keys mutex poisoned").len()
     }
 }
 
@@ -44,23 +50,24 @@ impl Default for MockKeyBackend {
     }
 }
 
+#[allow(clippy::unwrap_in_result)]
 impl KeyBackend for MockKeyBackend {
     fn generate(&self, opts: &KeyGenOptions) -> Result<KeyInfo> {
         let label_str = opts.label.as_str().to_string();
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.keys.lock().map_err(|_| lock_err())?;
 
         if keys.contains_key(&label_str) {
             return Err(Error::DuplicateLabel { label: label_str });
         }
 
-        let mut seed_guard = self.next_seed.lock().unwrap();
+        let mut seed_guard = self.next_seed.lock().map_err(|_| lock_err())?;
         let seed = *seed_guard;
         *seed_guard = seed.wrapping_add(1);
         drop(seed_guard);
 
         let public_key_bytes = crate::test_ec_point(seed);
-        let ssh_pubkey =
-            SshPublicKey::from_sec1_bytes(&public_key_bytes, opts.comment.clone()).unwrap();
+        let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_key_bytes, opts.comment.clone())
+            .expect("mock EC point must be valid");
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
 
         let pub_file_path = if let Some(ref path) = opts.write_pub_path {
@@ -97,12 +104,12 @@ impl KeyBackend for MockKeyBackend {
     }
 
     fn list(&self) -> Result<Vec<KeyInfo>> {
-        let keys = self.keys.lock().unwrap();
+        let keys = self.keys.lock().map_err(|_| lock_err())?;
         Ok(keys.values().map(|k| k.info.clone()).collect())
     }
 
     fn get(&self, label: &str) -> Result<KeyInfo> {
-        let keys = self.keys.lock().unwrap();
+        let keys = self.keys.lock().map_err(|_| lock_err())?;
         keys.get(label)
             .map(|k| k.info.clone())
             .ok_or_else(|| Error::KeyNotFound {
@@ -111,7 +118,7 @@ impl KeyBackend for MockKeyBackend {
     }
 
     fn delete(&self, label: &str) -> Result<()> {
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.keys.lock().map_err(|_| lock_err())?;
         if keys.remove(label).is_some() {
             Ok(())
         } else {
@@ -122,7 +129,7 @@ impl KeyBackend for MockKeyBackend {
     }
 
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
-        let keys = self.keys.lock().unwrap();
+        let keys = self.keys.lock().map_err(|_| lock_err())?;
         let key = keys.get(label).ok_or_else(|| Error::KeyNotFound {
             label: label.to_string(),
         })?;
@@ -135,6 +142,7 @@ impl KeyBackend for MockKeyBackend {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use sshenc_core::key::KeyLabel;

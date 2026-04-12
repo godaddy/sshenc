@@ -20,3 +20,6 @@ enclaveapp-apple = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 enclaveapp-windows = { workspace = true }
+
+[lints]
+workspace = true

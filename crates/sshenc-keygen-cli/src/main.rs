@@ -47,6 +47,7 @@ struct Cli {
     quiet: bool,
 }
 
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -93,7 +94,7 @@ fn main() -> Result<()> {
             std::io::stdin().read_line(&mut input).ok();
             if !input.trim().eq_ignore_ascii_case("y") {
                 eprintln!("Cancelled.");
-                std::process::exit(0);
+                return Ok(());
             }
         }
     }

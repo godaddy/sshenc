@@ -44,7 +44,8 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// # Safety
 /// Called from C code via PKCS#11 interface.
-#[no_mangle]
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_Initialize(_init_args: *mut std::ffi::c_void) -> CK_RV {
     if INITIALIZED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -55,14 +56,15 @@ pub unsafe extern "C" fn C_Initialize(_init_args: *mut std::ffi::c_void) -> CK_R
 
     // Start the agent if it's not running. We don't care if this fails —
     // the agent might already be running, or it'll be started another way.
-    let _ = agent_client::ensure_agent_running();
+    drop(agent_client::ensure_agent_running());
 
     CKR_OK
 }
 
 /// # Safety
 /// Called from C code via PKCS#11 interface.
-#[no_mangle]
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_Finalize(_reserved: *mut std::ffi::c_void) -> CK_RV {
     if !INITIALIZED.swap(false, Ordering::SeqCst) {
         return CKR_CRYPTOKI_NOT_INITIALIZED;
@@ -74,7 +76,8 @@ pub unsafe extern "C" fn C_Finalize(_reserved: *mut std::ffi::c_void) -> CK_RV {
 
 /// # Safety
 /// Called from C code via PKCS#11 interface.
-#[no_mangle]
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetInfo(info: *mut CK_INFO) -> CK_RV {
     if info.is_null() {
         return CKR_ARGUMENTS_BAD;
@@ -94,7 +97,8 @@ pub unsafe extern "C" fn C_GetInfo(info: *mut CK_INFO) -> CK_RV {
 ///
 /// # Safety
 /// Called from C code via PKCS#11 interface.
-#[no_mangle]
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetSlotList(
     _token_present: u8,
     _slot_list: *mut u64,
@@ -111,7 +115,7 @@ pub unsafe extern "C" fn C_GetSlotList(
 
 /// PKCS#11 function list. OpenSSH requires C_GetFunctionList as the entry point.
 #[repr(C)]
-#[allow(non_snake_case, dead_code)]
+#[allow(non_snake_case, dead_code, unsafe_code, missing_debug_implementations)]
 pub struct CK_FUNCTION_LIST {
     pub version: CK_VERSION,
     pub C_Initialize: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> CK_RV>,
@@ -123,6 +127,7 @@ pub struct CK_FUNCTION_LIST {
     _padding: [Option<unsafe extern "C" fn() -> CK_RV>; 63],
 }
 
+#[allow(unsafe_code)]
 static FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     version: CK_VERSION {
         major: 2,
@@ -138,7 +143,8 @@ static FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
 
 /// # Safety
 /// Called from C code via PKCS#11 interface.
-#[no_mangle]
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetFunctionList(
     pp_function_list: *mut *const CK_FUNCTION_LIST,
 ) -> CK_RV {

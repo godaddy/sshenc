@@ -115,7 +115,7 @@ impl SshPublicKey {
         let blob = STANDARD
             .decode(parts[1])
             .map_err(|e| Error::InvalidPublicKey(format!("invalid base64: {e}")))?;
-        let comment = parts.get(2).map(|s| s.to_string());
+        let comment = parts.get(2).map(|s| (*s).to_string());
         let ec_point = parse_wire_format(&blob)?;
         SshPublicKey::from_sec1_bytes(&ec_point, comment)
     }
@@ -123,9 +123,10 @@ impl SshPublicKey {
 
 /// Write an SSH string (uint32 length prefix + data) to a buffer.
 pub fn write_ssh_string(buf: &mut Vec<u8>, data: &[u8]) {
-    // Writing to Vec cannot fail
-    buf.write_u32::<BigEndian>(data.len() as u32).unwrap();
-    buf.write_all(data).unwrap();
+    // Writing to Vec<u8> cannot fail — these expect() calls are unreachable
+    buf.write_u32::<BigEndian>(data.len() as u32)
+        .expect("write to Vec<u8> cannot fail");
+    buf.write_all(data).expect("write to Vec<u8> cannot fail");
 }
 
 /// Read an SSH string from a byte slice, returning (data, remaining).
@@ -154,7 +155,7 @@ fn parse_wire_format(blob: &[u8]) -> Result<Vec<u8>> {
     if key_type != expected {
         return Err(Error::InvalidPublicKey(format!(
             "key type mismatch: expected {:?}, got {:?}",
-            std::str::from_utf8(expected).unwrap(),
+            std::str::from_utf8(expected).unwrap_or("<invalid utf8>"),
             std::str::from_utf8(key_type).unwrap_or("<invalid utf8>"),
         )));
     }
@@ -168,6 +169,7 @@ fn parse_wire_format(blob: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -387,7 +389,7 @@ mod tests {
     #[test]
     fn test_read_ssh_string_buffer_too_short() {
         // Only 3 bytes, need at least 4 for the length prefix
-        let buf = [0u8; 3];
+        let buf = [0_u8; 3];
         let result = read_ssh_string(&buf);
         assert!(result.is_err());
     }
@@ -396,8 +398,8 @@ mod tests {
     fn test_read_ssh_string_truncated_data() {
         // Length says 10 bytes, but only 5 available
         let mut buf = Vec::new();
-        buf.extend_from_slice(&10u32.to_be_bytes());
-        buf.extend_from_slice(&[0u8; 5]);
+        buf.extend_from_slice(&10_u32.to_be_bytes());
+        buf.extend_from_slice(&[0_u8; 5]);
         let result = read_ssh_string(&buf);
         assert!(result.is_err());
     }

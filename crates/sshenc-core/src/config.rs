@@ -152,6 +152,7 @@ impl Config {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -193,7 +194,7 @@ mod tests {
     #[test]
     fn test_config_save_load() {
         let dir = std::env::temp_dir().join("sshenc-test-config");
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_dir_all(&dir));
         let path = dir.join("config.toml");
 
         let config = Config {

@@ -42,6 +42,7 @@ fn sshenc_keys_dir() -> PathBuf {
     }
 }
 
+#[allow(clippy::print_stdout)]
 pub fn keygen(
     backend: &dyn KeyBackend,
     label: &str,
@@ -83,6 +84,7 @@ pub fn keygen(
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn list(backend: &dyn KeyBackend, json: bool) -> Result<()> {
     let keys = backend.list()?;
 
@@ -123,6 +125,7 @@ pub fn list(backend: &dyn KeyBackend, json: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn inspect(backend: &dyn KeyBackend, label: &str, json: bool, show_pub: bool) -> Result<()> {
     let info = backend.get(label)?;
 
@@ -173,6 +176,7 @@ pub fn inspect(backend: &dyn KeyBackend, label: &str, json: bool, show_pub: bool
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn delete(
     backend: &dyn KeyBackend,
     labels: &[String],
@@ -219,6 +223,7 @@ pub fn delete(
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn export_pub(
     backend: &dyn KeyBackend,
     label: &str,
@@ -273,6 +278,7 @@ pub fn export_pub(
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn agent(
     socket: Option<PathBuf>,
     _foreground: bool,
@@ -286,9 +292,11 @@ pub fn agent(
 
     // Re-initialize tracing for agent mode
     // (the main CLI already initialized at warn level, but the agent needs more)
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(level))
-        .try_init();
+    drop(
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(level))
+            .try_init(),
+    );
 
     let allowed_labels = if labels.is_empty() {
         config.allowed_labels
@@ -316,23 +324,27 @@ pub fn agent(
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn config_init() -> Result<()> {
     let path = Config::init()?;
     println!("Config file created: {}", path.display());
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn config_path() -> Result<()> {
     println!("{}", Config::default_path().display());
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn config_show() -> Result<()> {
     let config = Config::load_default()?;
     println!("{}", toml::to_string_pretty(&config)?);
     Ok(())
 }
 
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn install() -> Result<()> {
     let config = Config::load_default()?;
     let ssh_config_path = dirs::home_dir()
@@ -516,6 +528,7 @@ fn find_agent_binary() -> Result<PathBuf> {
     bail!("sshenc-agent not found");
 }
 
+#[allow(clippy::print_stdout)]
 pub fn uninstall() -> Result<()> {
     let ssh_config_path = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
@@ -554,6 +567,7 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 pub fn openssh_print_config(
     backend: &dyn KeyBackend,
     label: &str,
@@ -594,6 +608,7 @@ pub fn openssh_print_config(
     Ok(())
 }
 
+#[allow(clippy::exit, clippy::print_stderr)]
 pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     use enclaveapp_core::metadata;
 
@@ -645,6 +660,7 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn promote_to_default(label: &str) -> Result<()> {
     // On Windows, CNG key names are immutable — create keys with the right name from the start.
     #[cfg(not(target_os = "macos"))]
@@ -690,9 +706,9 @@ pub fn promote_to_default(label: &str) -> Result<()> {
             // Just the pub file, no private key — prompt before overwriting
             eprintln!("{} already exists.", id_ecdsa_pub.display());
             eprint!("Overwrite (y/n)? ");
-            std::io::Write::flush(&mut std::io::stderr()).ok();
+            Write::flush(&mut io::stderr()).ok();
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input).ok();
+            io::stdin().read_line(&mut input).ok();
             if !input.trim().eq_ignore_ascii_case("y") {
                 println!("Cancelled.");
                 return Ok(());
@@ -714,7 +730,7 @@ pub fn promote_to_default(label: &str) -> Result<()> {
         // Write ~/.ssh/id_ecdsa.pub
         let pub_bytes = metadata::load_pub_key(&keys_dir, "default")
             .map_err(|e| anyhow::anyhow!("failed to load renamed key: {e}"))?;
-        let ssh_pubkey = sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
+        let ssh_pubkey = SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
         let line = ssh_pubkey.to_openssh_line();
         std::fs::create_dir_all(&ssh_dir)?;
         std::fs::write(&id_ecdsa_pub, format!("{line}\n"))?;
@@ -730,9 +746,9 @@ pub fn promote_to_default(label: &str) -> Result<()> {
         println!("  Public key: {}", id_ecdsa_pub.display());
         println!(
             "  Fingerprint: {}",
-            sshenc_core::fingerprint::fingerprint_sha256(
-                &sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?
-            )
+            sshenc_core::fingerprint::fingerprint_sha256(&SshPublicKey::from_sec1_bytes(
+                &pub_bytes, None
+            )?)
         );
         println!();
         println!("The agent will now present this key first for all connections.");
@@ -743,6 +759,7 @@ pub fn promote_to_default(label: &str) -> Result<()> {
     } // end #[cfg(target_os = "macos")]
 }
 
+#[allow(clippy::print_stdout)]
 pub fn set_identity(label: &str, name: &str, email: &str) -> Result<()> {
     use enclaveapp_core::metadata;
 
@@ -761,6 +778,15 @@ pub fn set_identity(label: &str, name: &str, email: &str) -> Result<()> {
     println!("  Name:  {name}");
     println!("  Email: {email}");
     Ok(())
+}
+
+/// Forward unhandled -Y subcommands to real ssh-keygen.
+#[allow(clippy::exit)]
+pub fn forward_to_ssh_keygen(args: &[String]) -> Result<()> {
+    let status = std::process::Command::new("ssh-keygen")
+        .args(args)
+        .status()?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// Handle ssh-keygen-compatible signing mode.
@@ -806,7 +832,7 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let data_file = data_file.ok_or_else(|| anyhow::anyhow!("missing data file argument"))?;
 
     // Determine which label to use from the key file path
-    let key_path = std::path::Path::new(&key_file);
+    let key_path = Path::new(&key_file);
     let label = if key_path.file_name().map(|f| f.to_string_lossy()) == Some("id_ecdsa.pub".into())
     {
         "default".to_string()
@@ -858,7 +884,7 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     // Get the public key for the signature header
     let pub_bytes = metadata::load_pub_key(&keys_dir, &label)
         .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
-    let ssh_pubkey = sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
+    let ssh_pubkey = SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
 
     // Build the SSH signature in the format ssh-keygen produces:
     // MAGIC_PREAMBLE || uint32(version) || string(publickey) || string(namespace)
@@ -877,11 +903,7 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
 }
 
 /// Build an SSH signature blob per the SSH signature format spec.
-fn build_ssh_signature(
-    pubkey: &sshenc_core::pubkey::SshPublicKey,
-    namespace: &str,
-    der_sig: &[u8],
-) -> Result<Vec<u8>> {
+fn build_ssh_signature(pubkey: &SshPublicKey, namespace: &str, der_sig: &[u8]) -> Result<Vec<u8>> {
     use sshenc_core::pubkey::write_ssh_string;
 
     let mut buf = Vec::new();
@@ -890,7 +912,7 @@ fn build_ssh_signature(
     buf.extend_from_slice(b"SSHSIG");
 
     // Version (uint32)
-    buf.extend_from_slice(&1u32.to_be_bytes());
+    buf.extend_from_slice(&1_u32.to_be_bytes());
 
     // Public key blob
     let pubkey_blob = pubkey.wire_blob();
@@ -921,7 +943,7 @@ fn base64_wrap(data: &[u8], width: usize) -> String {
     encoded
         .as_bytes()
         .chunks(width)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
         .collect::<Vec<_>>()
         .join("\n")
 }

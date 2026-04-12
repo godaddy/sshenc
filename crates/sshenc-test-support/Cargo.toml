@@ -11,3 +11,6 @@ repository.workspace = true
 sshenc-core = { workspace = true }
 sshenc-se = { workspace = true }
 rand = { workspace = true }
+
+[lints]
+workspace = true

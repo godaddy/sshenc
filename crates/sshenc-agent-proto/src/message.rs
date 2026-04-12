@@ -190,6 +190,7 @@ pub fn parse_response(payload: &[u8]) -> Result<AgentResponse> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -205,7 +206,7 @@ mod tests {
         let mut payload = vec![SSH_AGENTC_SIGN_REQUEST];
         wire::write_string(&mut payload, b"key-blob-data");
         wire::write_string(&mut payload, b"data-to-sign");
-        payload.extend_from_slice(&0u32.to_be_bytes()); // flags
+        payload.extend_from_slice(&0_u32.to_be_bytes()); // flags
 
         let req = parse_request(&payload).unwrap();
         match req {
@@ -282,7 +283,7 @@ mod tests {
     fn test_roundtrip_sign_request() {
         let key_blob = b"my-key-blob-data".to_vec();
         let data = b"data-to-be-signed".to_vec();
-        let flags = 0x02u32;
+        let flags = 0x02_u32;
 
         let original = AgentRequest::SignRequest {
             key_blob: key_blob.clone(),

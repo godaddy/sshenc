@@ -29,6 +29,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::exit, clippy::print_stderr)]
 fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
     let ssh_command = match label {
         Some(l) => format!("sshenc ssh --label {} --", l),
@@ -63,6 +64,7 @@ fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
     }
 }
 
+#[allow(clippy::print_stdout, clippy::print_stderr, clippy::exit)]
 fn configure_repo(label: Option<&str>) {
     let effective_label = label.unwrap_or("default");
     let ssh_command = format!("sshenc ssh --label {} --", effective_label);
@@ -83,7 +85,7 @@ fn configure_repo(label: Option<&str>) {
         .and_then(|p| p.parent().map(|d| d.join("sshenc")))
         .filter(|p| p.exists())
         .or_else(|| {
-            std::process::Command::new("which")
+            Command::new("which")
                 .arg("sshenc")
                 .output()
                 .ok()
@@ -173,6 +175,7 @@ fn configure_repo(label: Option<&str>) {
     }
 }
 
+#[derive(Debug)]
 enum ParsedArgs {
     Config(Option<String>),
     Run {
@@ -205,11 +208,12 @@ fn parse_args(args: &[String]) -> ParsedArgs {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 
     fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
+        v.iter().map(|s| (*s).to_string()).collect()
     }
 
     #[test]
@@ -225,7 +229,7 @@ mod tests {
                 assert_eq!(label, Some("github-work".to_string()));
                 assert_eq!(git_args, s(&["clone", "git@github.com:org/repo.git"]));
             }
-            _ => panic!("expected Run"),
+            other => panic!("expected Run, got {other:?}"),
         }
     }
 
@@ -237,7 +241,7 @@ mod tests {
                 assert_eq!(label, Some("mykey".to_string()));
                 assert_eq!(git_args, s(&["push", "origin", "main"]));
             }
-            _ => panic!("expected Run"),
+            other => panic!("expected Run, got {other:?}"),
         }
     }
 
@@ -249,7 +253,7 @@ mod tests {
                 assert_eq!(label, None);
                 assert_eq!(git_args, s(&["pull", "--rebase"]));
             }
-            _ => panic!("expected Run"),
+            other => panic!("expected Run, got {other:?}"),
         }
     }
 
@@ -261,7 +265,7 @@ mod tests {
                 assert_eq!(label, None);
                 assert!(git_args.is_empty());
             }
-            _ => panic!("expected Run"),
+            other => panic!("expected Run, got {other:?}"),
         }
     }
 
@@ -273,7 +277,7 @@ mod tests {
                 assert_eq!(label, None);
                 assert_eq!(git_args, s(&["--label"]));
             }
-            _ => panic!("expected Run"),
+            other => panic!("expected Run, got {other:?}"),
         }
     }
 
@@ -284,7 +288,7 @@ mod tests {
             ParsedArgs::Config(label) => {
                 assert_eq!(label, Some("github-work".to_string()));
             }
-            _ => panic!("expected Config"),
+            other => panic!("expected Config, got {other:?}"),
         }
     }
 
@@ -295,7 +299,7 @@ mod tests {
             ParsedArgs::Config(label) => {
                 assert_eq!(label, None);
             }
-            _ => panic!("expected Config"),
+            other => panic!("expected Config, got {other:?}"),
         }
     }
 }

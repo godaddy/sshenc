@@ -128,6 +128,7 @@ fn main() -> Result<()> {
 
 /// Fork to background, detach from terminal, write pidfile.
 #[cfg(unix)]
+#[allow(unsafe_code, clippy::print_stdout, clippy::exit)]
 fn daemonize(socket_path: &str) -> Result<()> {
     let socket_display = Path::new(socket_path).display();
     // Print connection info before forking (parent process)
@@ -175,6 +176,7 @@ fn daemonize(socket_path: &str) -> Result<()> {
 
 /// Re-exec as a detached background process and write pidfile (Windows).
 #[cfg(windows)]
+#[allow(clippy::exit)]
 fn daemonize(pipe_name: &str) -> Result<()> {
     use std::os::windows::process::CommandExt;
 

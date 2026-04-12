@@ -13,10 +13,10 @@ pub use mock::MockKeyBackend;
 /// Generate a deterministic test EC point from a seed byte.
 pub fn test_ec_point(seed: u8) -> Vec<u8> {
     let mut point = vec![0x04];
-    for i in 0u8..32 {
+    for i in 0_u8..32 {
         point.push(seed.wrapping_mul(7).wrapping_add(i).wrapping_mul(3));
     }
-    for i in 0u8..32 {
+    for i in 0_u8..32 {
         point.push(seed.wrapping_mul(11).wrapping_add(i).wrapping_mul(5));
     }
     point
@@ -27,8 +27,8 @@ pub fn test_ec_point(seed: u8) -> Vec<u8> {
 pub fn test_signature(data: &[u8], seed: u8) -> Vec<u8> {
     // Create a fake but structurally valid DER ECDSA signature.
     // SEQUENCE { INTEGER r, INTEGER s }
-    let mut r = vec![0u8; 32];
-    let mut s = vec![0u8; 32];
+    let mut r = vec![0_u8; 32];
+    let mut s = vec![0_u8; 32];
     for i in 0..32 {
         r[i] = data.get(i).copied().unwrap_or(0).wrapping_add(seed);
         s[i] = data

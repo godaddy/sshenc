@@ -13,3 +13,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 dirs = { workspace = true }
+
+[lints]
+workspace = true

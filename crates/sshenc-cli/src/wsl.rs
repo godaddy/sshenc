@@ -265,7 +265,7 @@ fn inject_block(path: &PathBuf, block: &str) -> Result<(), String> {
         }
         Ok(o) => {
             // Syntax error — do NOT modify the original, restore from backup
-            let _ = std::fs::remove_file(&tmp);
+            drop(std::fs::remove_file(&tmp));
             let stderr = String::from_utf8_lossy(&o.stderr);
             return Err(format!(
                 "ABORTED: modified file has syntax errors ({}). Original untouched. Error: {}",

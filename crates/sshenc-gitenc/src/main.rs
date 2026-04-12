@@ -302,4 +302,54 @@ mod tests {
             other => panic!("expected Config, got {other:?}"),
         }
     }
+
+    #[test]
+    fn test_parse_args_config_with_label_flag() {
+        // gitenc --config --label my-key
+        let args = s(&["--config", "--label", "my-key"]);
+        match parse_args(&args) {
+            ParsedArgs::Config(label) => {
+                assert_eq!(label, Some("my-key".to_string()));
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_config_with_short_label_flag() {
+        // gitenc --config -l my-key
+        let args = s(&["--config", "-l", "my-key"]);
+        match parse_args(&args) {
+            ParsedArgs::Config(label) => {
+                assert_eq!(label, Some("my-key".to_string()));
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_label_only_no_git_args() {
+        // gitenc --label mykey (no git subcommand)
+        let args = s(&["--label", "mykey"]);
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, Some("mykey".to_string()));
+                assert!(git_args.is_empty());
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_passthrough_git_args() {
+        // gitenc status --short
+        let args = s(&["status", "--short"]);
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, None);
+                assert_eq!(git_args, s(&["status", "--short"]));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
 }

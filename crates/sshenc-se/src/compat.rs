@@ -66,3 +66,263 @@ pub fn load_sshenc_meta(
     // New format
     serde_json::from_str(&content).map_err(|e| enclaveapp_core::Error::Serialization(e.to_string()))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use enclaveapp_core::types::{AccessPolicy, KeyType};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_dir() -> std::path::PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("sshenc-se-compat-test-{pid}-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_old_format_basic_fields() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "mykey",
+            "comment": "user@host",
+            "auth_policy": 1,
+            "git_name": "Jay Gowdy",
+            "git_email": "jay@example.com",
+            "created": "1700000000"
+        });
+        std::fs::write(dir.join("mykey.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "mykey").unwrap();
+        assert_eq!(meta.label, "mykey");
+        assert_eq!(meta.key_type, KeyType::Signing);
+        assert_eq!(meta.access_policy, AccessPolicy::Any);
+        assert_eq!(meta.created, "1700000000");
+        assert_eq!(meta.get_app_field("comment"), Some("user@host"));
+        assert_eq!(meta.get_app_field("git_name"), Some("Jay Gowdy"));
+        assert_eq!(meta.get_app_field("git_email"), Some("jay@example.com"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_new_format_basic_fields() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "newkey",
+            "key_type": "signing",
+            "access_policy": "any",
+            "created": "1700000001",
+            "app_specific": {
+                "comment": "new comment",
+                "git_name": "New Name"
+            }
+        });
+        std::fs::write(dir.join("newkey.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "newkey").unwrap();
+        assert_eq!(meta.label, "newkey");
+        assert_eq!(meta.key_type, KeyType::Signing);
+        assert_eq!(meta.access_policy, AccessPolicy::Any);
+        assert_eq!(meta.created, "1700000001");
+        assert_eq!(meta.get_app_field("comment"), Some("new comment"));
+        assert_eq!(meta.get_app_field("git_name"), Some("New Name"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_missing_file_returns_default() {
+        let dir = test_dir();
+
+        let meta = load_sshenc_meta(&dir, "nonexistent").unwrap();
+        assert_eq!(meta.label, "nonexistent");
+        assert_eq!(meta.key_type, KeyType::Signing);
+        assert_eq!(meta.access_policy, AccessPolicy::None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_auth_policy_0_maps_to_none() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "auth_policy": 0
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").unwrap();
+        assert_eq!(meta.access_policy, AccessPolicy::None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_auth_policy_1_maps_to_any() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "auth_policy": 1
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").unwrap();
+        assert_eq!(meta.access_policy, AccessPolicy::Any);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_auth_policy_2_maps_to_biometric() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "auth_policy": 2
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").unwrap();
+        assert_eq!(meta.access_policy, AccessPolicy::BiometricOnly);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_auth_policy_3_maps_to_password() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "auth_policy": 3
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").unwrap();
+        assert_eq!(meta.access_policy, AccessPolicy::PasswordOnly);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_missing_auth_policy_defaults_to_none() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "comment": "just a comment"
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").unwrap();
+        assert_eq!(meta.access_policy, AccessPolicy::None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_git_fields_migrate_to_app_specific() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "comment": "my key",
+            "git_name": "Alice",
+            "git_email": "alice@example.com"
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").unwrap();
+        // git_name and git_email should be in app_specific
+        assert!(meta.app_specific.is_object());
+        assert_eq!(meta.get_app_field("git_name"), Some("Alice"));
+        assert_eq!(meta.get_app_field("git_email"), Some("alice@example.com"));
+        assert_eq!(meta.get_app_field("comment"), Some("my key"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_without_optional_fields() {
+        let dir = test_dir();
+        // Minimal old format: just auth_policy, no comment/git fields
+        let json = serde_json::json!({
+            "label": "k",
+            "auth_policy": 0
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").unwrap();
+        assert_eq!(meta.access_policy, AccessPolicy::None);
+        assert!(meta.get_app_field("comment").is_none());
+        assert!(meta.get_app_field("git_name").is_none());
+        assert!(meta.get_app_field("git_email").is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_missing_created_defaults_to_empty() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "comment": "c"
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").unwrap();
+        assert_eq!(meta.created, "");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn new_format_encryption_key_type() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "enckey",
+            "key_type": "encryption",
+            "access_policy": "biometric_only",
+            "created": "1700000002",
+            "app_specific": null
+        });
+        std::fs::write(dir.join("enckey.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "enckey").unwrap();
+        assert_eq!(meta.key_type, KeyType::Encryption);
+        assert_eq!(meta.access_policy, AccessPolicy::BiometricOnly);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn new_format_with_empty_app_specific() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "bare",
+            "key_type": "signing",
+            "access_policy": "none",
+            "created": "1700000003",
+            "app_specific": {}
+        });
+        std::fs::write(dir.join("bare.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "bare").unwrap();
+        assert_eq!(meta.label, "bare");
+        assert_eq!(meta.access_policy, AccessPolicy::None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_json_returns_error() {
+        let dir = test_dir();
+        std::fs::write(dir.join("bad.meta"), "not json at all").unwrap();
+
+        let result = load_sshenc_meta(&dir, "bad");
+        assert!(result.is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

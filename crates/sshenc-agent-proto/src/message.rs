@@ -432,4 +432,121 @@ mod tests {
         let result = parse_response(&payload);
         assert!(result.is_err());
     }
+
+    // --- Additional tests per test plan ---
+
+    #[test]
+    fn test_parse_request_identities_exact_payload() {
+        // Verify that a single-byte payload of REQUEST_IDENTITIES parses correctly
+        let payload = vec![SSH_AGENTC_REQUEST_IDENTITIES];
+        let req = parse_request(&payload).unwrap();
+        match req {
+            AgentRequest::RequestIdentities => {} // expected
+            other => panic!("expected RequestIdentities, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_request_sign_request_with_flags() {
+        let mut payload = vec![SSH_AGENTC_SIGN_REQUEST];
+        wire::write_string(&mut payload, b"my-key-blob");
+        wire::write_string(&mut payload, b"sign-this-data");
+        payload.extend_from_slice(&SSH_AGENT_RSA_SHA2_256.to_be_bytes());
+
+        let req = parse_request(&payload).unwrap();
+        match req {
+            AgentRequest::SignRequest {
+                key_blob,
+                data,
+                flags,
+            } => {
+                assert_eq!(key_blob, b"my-key-blob");
+                assert_eq!(data, b"sign-this-data");
+                assert_eq!(flags, SSH_AGENT_RSA_SHA2_256);
+            }
+            other => panic!("expected SignRequest, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_request_unknown_message_type() {
+        let payload = vec![0xFE];
+        let req = parse_request(&payload).unwrap();
+        match req {
+            AgentRequest::Unknown(t) => assert_eq!(t, 0xFE),
+            other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_identities_answer_zero_identities() {
+        let payload = serialize_response(&AgentResponse::IdentitiesAnswer(vec![]));
+        assert_eq!(payload[0], SSH_AGENT_IDENTITIES_ANSWER);
+        let nkeys = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        assert_eq!(nkeys, 0);
+        assert_eq!(payload.len(), 5); // type byte + 4 bytes for count
+    }
+
+    #[test]
+    fn test_serialize_identities_answer_one_identity() {
+        let identities = vec![Identity {
+            key_blob: b"single-key".to_vec(),
+            comment: "the-only-key".into(),
+        }];
+        let payload = serialize_response(&AgentResponse::IdentitiesAnswer(identities));
+        let parsed = parse_response(&payload).unwrap();
+        match parsed {
+            AgentResponse::IdentitiesAnswer(ids) => {
+                assert_eq!(ids.len(), 1);
+                assert_eq!(ids[0].key_blob, b"single-key");
+                assert_eq!(ids[0].comment, "the-only-key");
+            }
+            other => panic!("expected IdentitiesAnswer, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_identities_answer_five_identities() {
+        let identities: Vec<Identity> = (0..5)
+            .map(|i| Identity {
+                key_blob: format!("blob-{i}").into_bytes(),
+                comment: format!("key-{i}"),
+            })
+            .collect();
+        let payload = serialize_response(&AgentResponse::IdentitiesAnswer(identities));
+        let parsed = parse_response(&payload).unwrap();
+        match parsed {
+            AgentResponse::IdentitiesAnswer(ids) => {
+                assert_eq!(ids.len(), 5);
+                for (i, id) in ids.iter().enumerate().take(5) {
+                    assert_eq!(id.key_blob, format!("blob-{i}").into_bytes());
+                    assert_eq!(id.comment, format!("key-{i}"));
+                }
+            }
+            other => panic!("expected IdentitiesAnswer, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_sign_response_known_bytes() {
+        let sig_bytes = b"known-signature-data-1234567890".to_vec();
+        let payload = serialize_response(&AgentResponse::SignResponse {
+            signature_blob: sig_bytes.clone(),
+        });
+        assert_eq!(payload[0], SSH_AGENT_SIGN_RESPONSE);
+
+        let parsed = parse_response(&payload).unwrap();
+        match parsed {
+            AgentResponse::SignResponse { signature_blob } => {
+                assert_eq!(signature_blob, sig_bytes);
+            }
+            other => panic!("expected SignResponse, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_failure_is_single_byte() {
+        let payload = serialize_response(&AgentResponse::Failure);
+        assert_eq!(payload, vec![SSH_AGENT_FAILURE]);
+    }
 }

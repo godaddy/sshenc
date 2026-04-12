@@ -84,4 +84,36 @@ mod tests {
         assert_eq!(sha, sha2);
         assert_eq!(md5, md5_2);
     }
+
+    #[test]
+    fn test_fingerprint_sha256_matches_known_value() {
+        // Compute the expected SHA-256 fingerprint for our sample key by hand.
+        // The wire format blob is deterministic, so the fingerprint is too.
+        let key = sample_key();
+        let blob = key.to_wire_format();
+        let hash = Sha256::digest(&blob);
+        let expected = format!("SHA256:{}", STANDARD_NO_PAD.encode(hash));
+        let actual = fingerprint_sha256(&key);
+        assert_eq!(actual, expected);
+        // Verify it starts with SHA256: and has reasonable base64 length
+        assert!(actual.starts_with("SHA256:"));
+        let b64_part = &actual["SHA256:".len()..];
+        // SHA-256 is 32 bytes -> ~43 chars base64 no-pad
+        assert_eq!(b64_part.len(), 43);
+    }
+
+    #[test]
+    fn test_fingerprint_md5_matches_known_value() {
+        let key = sample_key();
+        let blob = key.to_wire_format();
+        let hash = Md5::digest(&blob);
+        let expected_hex: Vec<String> = hash.iter().map(|b| format!("{b:02x}")).collect();
+        let expected = format!("MD5:{}", expected_hex.join(":"));
+        let actual = fingerprint_md5(&key);
+        assert_eq!(actual, expected);
+        // MD5 fingerprint should have 16 colon-separated hex pairs
+        let hex_part = &actual["MD5:".len()..];
+        let parts: Vec<&str> = hex_part.split(':').collect();
+        assert_eq!(parts.len(), 16);
+    }
 }

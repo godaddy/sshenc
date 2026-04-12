@@ -162,3 +162,198 @@ fn copy_padded(dest: &mut [u8], src: &[u8]) {
     let len = src.len().min(dest.len());
     dest[..len].copy_from_slice(&src[..len]);
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, unsafe_code)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serialize all PKCS#11 tests since they share global INITIALIZED state.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Reset the global INITIALIZED state so each test starts fresh.
+    fn reset_state() {
+        INITIALIZED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn c_initialize_succeeds_first_time() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // Safety: calling PKCS#11 C functions in a test context with a null pointer.
+        let rv = unsafe { C_Initialize(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_OK);
+
+        // Cleanup
+        unsafe { C_Finalize(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn c_initialize_second_time_returns_already_initialized() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // Safety: calling PKCS#11 C functions in test context.
+        unsafe {
+            let rv = C_Initialize(std::ptr::null_mut());
+            assert_eq!(rv, CKR_OK);
+
+            let rv2 = C_Initialize(std::ptr::null_mut());
+            assert_eq!(rv2, CKR_CRYPTOKI_ALREADY_INITIALIZED);
+
+            C_Finalize(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn c_finalize_succeeds_after_initialize() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // Safety: calling PKCS#11 C functions in test context.
+        unsafe {
+            C_Initialize(std::ptr::null_mut());
+            let rv = C_Finalize(std::ptr::null_mut());
+            assert_eq!(rv, CKR_OK);
+        }
+    }
+
+    #[test]
+    fn c_finalize_without_initialize_returns_not_initialized() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // Safety: calling PKCS#11 C functions in test context.
+        let rv = unsafe { C_Finalize(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+
+    #[test]
+    fn c_get_info_fills_fields() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        let mut info = CK_INFO {
+            cryptoki_version: CK_VERSION { major: 0, minor: 0 },
+            manufacturer_id: [0_u8; 32],
+            flags: 99,
+            library_description: [0_u8; 32],
+            library_version: CK_VERSION { major: 0, minor: 0 },
+        };
+
+        // Safety: calling C_GetInfo with a valid pointer to our stack-allocated struct.
+        let rv = unsafe { C_GetInfo(&mut info) };
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(info.cryptoki_version.major, 2);
+        assert_eq!(info.cryptoki_version.minor, 40);
+        assert_eq!(info.flags, 0);
+        assert_eq!(info.library_version.major, 0);
+        assert_eq!(info.library_version.minor, 1);
+
+        // manufacturer_id should start with "sshenc" padded with spaces
+        let mfr = String::from_utf8_lossy(&info.manufacturer_id);
+        assert!(
+            mfr.starts_with("sshenc"),
+            "expected manufacturer_id to start with 'sshenc', got: {mfr}"
+        );
+
+        // library_description should start with "sshenc agent launcher"
+        let desc = String::from_utf8_lossy(&info.library_description);
+        assert!(
+            desc.starts_with("sshenc agent launcher"),
+            "expected library_description to start with 'sshenc agent launcher', got: {desc}"
+        );
+    }
+
+    #[test]
+    fn c_get_info_null_pointer_returns_bad_args() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        // Safety: testing null pointer handling.
+        let rv = unsafe { C_GetInfo(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_ARGUMENTS_BAD);
+    }
+
+    #[test]
+    fn c_get_slot_list_returns_zero_slots() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut count: u64 = 42;
+        // Safety: calling C_GetSlotList with valid pointer.
+        let rv = unsafe { C_GetSlotList(0, std::ptr::null_mut(), &mut count) };
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn c_get_slot_list_null_count_returns_bad_args() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        // Safety: testing null pointer handling.
+        let rv = unsafe { C_GetSlotList(0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_ARGUMENTS_BAD);
+    }
+
+    #[test]
+    fn c_get_function_list_returns_valid_pointer() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut func_list: *const CK_FUNCTION_LIST = std::ptr::null();
+        // Safety: calling C_GetFunctionList with a valid pointer to our pointer variable.
+        let rv = unsafe { C_GetFunctionList(&mut func_list) };
+        assert_eq!(rv, CKR_OK);
+        assert!(!func_list.is_null());
+
+        // Verify function list has expected version
+        // Safety: we just verified the pointer is non-null.
+        let fl = unsafe { &*func_list };
+        assert_eq!(fl.version.major, 2);
+        assert_eq!(fl.version.minor, 40);
+
+        // Verify function pointers are set
+        assert!(fl.C_Initialize.is_some());
+        assert!(fl.C_Finalize.is_some());
+        assert!(fl.C_GetInfo.is_some());
+        assert!(fl.C_GetFunctionList.is_some());
+        assert!(fl.C_GetSlotList.is_some());
+    }
+
+    #[test]
+    fn c_get_function_list_null_pointer_returns_bad_args() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        // Safety: testing null pointer handling.
+        let rv = unsafe { C_GetFunctionList(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_ARGUMENTS_BAD);
+    }
+
+    #[test]
+    fn copy_padded_short_source() {
+        let mut dest = [0_u8; 10];
+        copy_padded(&mut dest, b"abc");
+        assert_eq!(&dest, b"abc       ");
+    }
+
+    #[test]
+    fn copy_padded_exact_fit() {
+        let mut dest = [0_u8; 5];
+        copy_padded(&mut dest, b"hello");
+        assert_eq!(&dest, b"hello");
+    }
+
+    #[test]
+    fn copy_padded_source_longer_than_dest() {
+        let mut dest = [0_u8; 3];
+        copy_padded(&mut dest, b"hello world");
+        assert_eq!(&dest, b"hel");
+    }
+
+    #[test]
+    fn copy_padded_empty_source() {
+        let mut dest = [0_u8; 5];
+        copy_padded(&mut dest, b"");
+        assert_eq!(&dest, b"     ");
+    }
+}

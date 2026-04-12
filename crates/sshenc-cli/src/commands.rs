@@ -797,6 +797,7 @@ pub fn forward_to_ssh_keygen(args: &[String]) -> Result<()> {
 /// We sign via the hardware backend and write an SSH signature to <data_file>.sig.
 pub fn ssh_sign(args: &[String]) -> Result<()> {
     use enclaveapp_core::metadata;
+    #[cfg(target_os = "linux")]
     use enclaveapp_core::traits::EnclaveSigner;
 
     // Parse: -Y sign -n <namespace> -f <key_file> <data_file>
@@ -880,18 +881,17 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     #[cfg(target_os = "windows")]
     let signer = enclaveapp_windows::TpmSigner::with_keys_dir("sshenc", keys_dir.clone());
     #[cfg(target_os = "linux")]
-    let signer: Box<dyn enclaveapp_core::traits::EnclaveSigner> =
-        if enclaveapp_linux_tpm::is_available() {
-            Box::new(enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(
-                "sshenc",
-                keys_dir.clone(),
-            ))
-        } else {
-            Box::new(enclaveapp_software::SoftwareSigner::with_keys_dir(
-                "sshenc",
-                keys_dir.clone(),
-            ))
-        };
+    let signer: Box<dyn EnclaveSigner> = if enclaveapp_linux_tpm::is_available() {
+        Box::new(enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(
+            "sshenc",
+            keys_dir.clone(),
+        ))
+    } else {
+        Box::new(enclaveapp_software::SoftwareSigner::with_keys_dir(
+            "sshenc",
+            keys_dir.clone(),
+        ))
+    };
 
     let der_sig = signer
         .sign(&label, &signed_data)

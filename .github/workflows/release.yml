@@ -245,10 +245,13 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/jgowdy/homebrew-sshenc.git /tmp/tap
-          cp Formula/sshenc.rb /tmp/tap/sshenc.rb
+          mkdir -p /tmp/tap/Formula
+          cp Formula/sshenc.rb /tmp/tap/Formula/sshenc.rb
+          # Clean up old root-level formula if present
+          rm -f /tmp/tap/sshenc.rb
           cd /tmp/tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add sshenc.rb
+          git add -A
           git diff --cached --quiet || git commit -m "Update sshenc to ${tag}"
           git push

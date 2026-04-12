@@ -59,8 +59,10 @@ fn main() -> Result<()> {
     let backend = sshenc_se::SecureEnclaveBackend::new(pub_dir.clone());
     #[cfg(target_os = "windows")]
     let backend = sshenc_se::TpmBackend::new(pub_dir.clone());
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    anyhow::bail!("sshenc-keygen requires macOS Secure Enclave or Windows TPM 2.0");
+    #[cfg(target_os = "linux")]
+    let backend = sshenc_se::SoftwareBackend::new(pub_dir.clone());
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    anyhow::bail!("sshenc requires macOS, Windows, or Linux");
 
     let write_pub = if cli.no_pub_file {
         None

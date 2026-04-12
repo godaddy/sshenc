@@ -18,7 +18,8 @@ mod wsl;
     about = "Manage hardware-backed SSH keys",
     long_about = "sshenc creates, manages, and uses hardware-backed SSH keys for\n\
                    OpenSSH and git+ssh workflows. Keys are non-exportable, device-bound ECDSA P-256\n\
-                   keys stored in the Secure Enclave (macOS) or TPM 2.0 (Windows).",
+                   keys stored in the Secure Enclave (macOS), TPM 2.0 (Windows), or software-backed\n\
+                   keys on disk (Linux).",
     version,
     propagate_version = true
 )]
@@ -268,8 +269,10 @@ fn main() -> Result<()> {
     let backend = sshenc_se::SecureEnclaveBackend::new(pub_dir);
     #[cfg(target_os = "windows")]
     let backend = sshenc_se::TpmBackend::new(pub_dir);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    anyhow::bail!("sshenc requires macOS Secure Enclave or Windows TPM 2.0");
+    #[cfg(target_os = "linux")]
+    let backend = sshenc_se::SoftwareBackend::new(pub_dir);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    anyhow::bail!("sshenc requires macOS, Windows, or Linux");
 
     run_command(cli.command, &backend)
 }

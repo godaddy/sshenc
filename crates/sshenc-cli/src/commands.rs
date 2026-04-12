@@ -666,13 +666,13 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn promote_to_default(label: &str) -> Result<()> {
     // On Windows, CNG key names are immutable — create keys with the right name from the start.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         let _ = label;
-        bail!("'sshenc default' is not yet supported on this platform. Create your default key with: sshenc keygen");
+        bail!("'sshenc default' is not yet supported on Windows. Create your default key with: sshenc keygen");
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "windows"))]
     {
         use enclaveapp_core::metadata;
 
@@ -759,7 +759,7 @@ pub fn promote_to_default(label: &str) -> Result<()> {
         println!("  pkill sshenc-agent && sshenc install");
 
         Ok(())
-    } // end #[cfg(target_os = "macos")]
+    } // end #[cfg(not(target_os = "windows"))]
 }
 
 #[allow(clippy::print_stdout)]
@@ -879,6 +879,8 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let signer = enclaveapp_apple::SecureEnclaveSigner::with_keys_dir("sshenc", keys_dir.clone());
     #[cfg(target_os = "windows")]
     let signer = enclaveapp_windows::TpmSigner::with_keys_dir("sshenc", keys_dir.clone());
+    #[cfg(target_os = "linux")]
+    let signer = enclaveapp_software::SoftwareSigner::with_keys_dir("sshenc", keys_dir.clone());
 
     let der_sig = signer
         .sign(&label, &signed_data)

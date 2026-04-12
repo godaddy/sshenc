@@ -54,6 +54,8 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
     #[cfg(target_os = "macos")]
     let backend: Arc<dyn KeyBackend> =
         Arc::new(sshenc_se::SecureEnclaveBackend::new(ssh_dir.clone()));
+    #[cfg(target_os = "linux")]
+    let backend: Arc<dyn KeyBackend> = Arc::new(sshenc_se::SoftwareBackend::new(ssh_dir.clone()));
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
 

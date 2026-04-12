@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`sshenc` (SSH Secure Enclave) is a macOS-only Rust project that provides Secure Enclave-backed SSH key management. It creates, manages, and uses non-exportable, device-bound ECDSA P-256 keys for OpenSSH and git+ssh workflows. Licensed under MIT.
+`sshenc` (SSH Secure Enclave) is a cross-platform Rust project that provides hardware-backed SSH key management. It creates, manages, and uses ECDSA P-256 keys for OpenSSH and git+ssh workflows. On macOS keys are stored in the Secure Enclave, on Windows in TPM 2.0, and on Linux as software-backed keys on disk. Licensed under MIT.
 
 ## Build & Development
 
-Rust workspace. Requires macOS and Rust 1.75+.
+Rust workspace. Requires macOS, Windows, or Linux with Rust 1.75+.
 
 ```bash
 cargo build --workspace            # build all crates
@@ -27,7 +27,7 @@ Rust workspace under `crates/`:
 
 - **sshenc-core** — Domain models, SSH public key encoding (ecdsa-sha2-nistp256), fingerprints (SHA-256/MD5), config model, shared error types. No platform-specific code.
 - **sshenc-ffi-apple** — Apple Security.framework bridge. All raw Apple API calls isolated here. Defines `kSecAttrApplicationTag` via extern link since it's missing from `security-framework-sys`. Keys tagged with `sshenc:<label>` Keychain label and `com.sshenc.key.<label>` application tag.
-- **sshenc-se** — High-level Secure Enclave operations via `KeyBackend` trait. Real implementation in `macos.rs` wraps `sshenc-ffi-apple`. The trait enables mock backends for testing.
+- **sshenc-se** — High-level key operations via `KeyBackend` trait. Platform backends: `macos.rs` (Secure Enclave via `sshenc-ffi-apple`), `windows.rs` (TPM via `enclaveapp-windows`), `linux.rs` (software-backed via `enclaveapp-software`). The trait enables mock backends for testing.
 - **sshenc-agent-proto** — SSH agent protocol: message parsing/serialization, DER-to-SSH signature conversion. Implements identity enumeration and sign request/response.
 - **sshenc-agent** — SSH agent daemon (tokio async). Unix socket server, key selection by label allowlist. Both a library (`sshenc_agent::server`) and binary (`sshenc-agent`).
 - **sshenc-cli** — Main CLI (`sshenc`). Subcommands: keygen, list, inspect, delete, export-pub, agent, config, openssh. Uses sshenc-agent library for embedded agent mode.
@@ -65,4 +65,7 @@ Real Secure Enclave integration tests require macOS hardware and are not yet gat
 
 ## Platform
 
-macOS only. Uses Apple Secure Enclave via Security.framework. The `sshenc-ffi-apple` crate links against the Security framework at build time.
+Supports macOS, Windows, and Linux:
+- **macOS**: Uses Apple Secure Enclave via Security.framework. The `sshenc-ffi-apple` crate links against the Security framework at build time.
+- **Windows**: Uses TPM 2.0 via Windows CNG.
+- **Linux**: Uses software-backed ECDSA P-256 keys via `enclaveapp-software`. Keys are stored on disk in `~/.sshenc/keys/` and are NOT hardware-protected.

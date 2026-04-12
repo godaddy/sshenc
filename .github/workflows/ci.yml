@@ -17,10 +17,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Clone libenclaveapp
-        uses: actions/checkout@v5
-        with:
-          repository: jgowdy/libenclaveapp
-          path: ../libenclaveapp
+        run: git clone --depth 1 https://github.com/jgowdy/libenclaveapp.git ../libenclaveapp
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -57,10 +54,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Clone libenclaveapp
-        uses: actions/checkout@v5
-        with:
-          repository: jgowdy/libenclaveapp
-          path: ../libenclaveapp
+        run: git clone --depth 1 https://github.com/jgowdy/libenclaveapp.git ../libenclaveapp
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

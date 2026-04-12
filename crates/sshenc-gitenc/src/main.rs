@@ -139,6 +139,10 @@ enum ParsedArgs {
 
 fn parse_args(args: &[String]) -> ParsedArgs {
     if !args.is_empty() && args[0] == "--config" {
+        // Support both: gitenc --config <label> AND gitenc --config --label <label>
+        if args.len() >= 3 && (args[1] == "--label" || args[1] == "-l") {
+            return ParsedArgs::Config(Some(args[2].clone()));
+        }
         let label = args.get(1).cloned();
         return ParsedArgs::Config(label);
     }

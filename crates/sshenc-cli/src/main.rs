@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 mod commands;
 #[cfg(target_os = "windows")]
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 mod wsl;
 
 #[derive(Parser)]

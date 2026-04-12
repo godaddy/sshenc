@@ -63,7 +63,9 @@ fn map_err(operation: &str, e: enclaveapp_core::Error) -> Error {
     }
 }
 
-fn load_sshenc_meta(label: &str) -> std::result::Result<enclaveapp_core::KeyMeta, enclaveapp_core::Error> {
+fn load_sshenc_meta(
+    label: &str,
+) -> std::result::Result<enclaveapp_core::KeyMeta, enclaveapp_core::Error> {
     crate::compat::load_sshenc_meta(&sshenc_keys_dir(), label)
 }
 
@@ -93,8 +95,7 @@ impl KeyBackend for SecureEnclaveBackend {
 
         // Save app-specific metadata (comment, git_name, git_email)
         let keys_dir = sshenc_keys_dir();
-        let mut meta =
-            load_sshenc_meta(label_str).map_err(|e| map_err("load_meta", e))?;
+        let mut meta = load_sshenc_meta(label_str).map_err(|e| map_err("load_meta", e))?;
         if let Some(ref comment) = opts.comment {
             meta.set_app_field("comment", comment.clone());
         }

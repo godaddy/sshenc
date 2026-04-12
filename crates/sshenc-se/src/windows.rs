@@ -156,7 +156,8 @@ impl KeyBackend for TpmBackend {
 
         // Load persisted metadata
         let keys_dir = sshenc_keys_dir();
-        let meta = compat::load_sshenc_meta(&keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        let meta =
+            compat::load_sshenc_meta(&keys_dir, label).map_err(|e| map_err("load_meta", e))?;
 
         let comment = meta.get_app_field("comment").map(|s| s.to_string());
         let requires_user_presence = meta.access_policy != AccessPolicy::None;

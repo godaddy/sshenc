@@ -37,10 +37,7 @@ pub fn load_sshenc_meta(
     if raw.get("key_type").is_none()
         && (raw.get("comment").is_some() || raw.get("auth_policy").is_some())
     {
-        let auth_policy_int = raw
-            .get("auth_policy")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
+        let auth_policy_int = raw.get("auth_policy").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let access_policy = AccessPolicy::from_ffi_value(auth_policy_int);
         let created = raw
             .get("created")
@@ -67,6 +64,5 @@ pub fn load_sshenc_meta(
     }
 
     // New format
-    serde_json::from_str(&content)
-        .map_err(|e| enclaveapp_core::Error::Serialization(e.to_string()))
+    serde_json::from_str(&content).map_err(|e| enclaveapp_core::Error::Serialization(e.to_string()))
 }

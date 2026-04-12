@@ -33,7 +33,7 @@ automatically. Uninstalling via Windows Settings runs `sshenc uninstall`.
 ### Windows — Scoop
 
 ```powershell
-scoop bucket add sshenc https://github.com/jgowdy/sshenc
+scoop bucket add sshenc https://github.com/jgowdy/scoop-sshenc
 scoop install sshenc
 sshenc install
 ```

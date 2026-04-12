@@ -212,6 +212,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-apple"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "dirs",
+ "enclaveapp-core",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "enclaveapp-core"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "enclaveapp-windows"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "enclaveapp-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "windows",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -616,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-agent"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -636,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-agent-proto"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "byteorder",
  "bytes",
@@ -647,21 +683,22 @@ dependencies = [
 
 [[package]]
 name = "sshenc-cli"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "base64",
  "clap",
  "clap_complete",
  "dirs",
+ "enclaveapp-apple",
+ "enclaveapp-core",
+ "enclaveapp-windows",
  "serde",
  "serde_json",
  "sha2",
  "sshenc-agent",
  "sshenc-agent-proto",
  "sshenc-core",
- "sshenc-ffi-apple",
- "sshenc-ffi-windows",
  "sshenc-se",
  "tokio",
  "toml",
@@ -671,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "base64",
  "byteorder",
@@ -686,40 +723,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "sshenc-ffi-apple"
-version = "0.3.6"
-dependencies = [
- "base64",
- "dirs",
- "libc",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "sshenc-ffi-windows"
-version = "0.3.6"
-dependencies = [
- "base64",
- "dirs",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "windows",
-]
-
-[[package]]
 name = "sshenc-gitenc"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "sshenc-keygen-cli"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -732,25 +744,28 @@ dependencies = [
 
 [[package]]
 name = "sshenc-pkcs11"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "sshenc-se"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
+ "dirs",
+ "enclaveapp-apple",
+ "enclaveapp-core",
+ "enclaveapp-windows",
+ "serde_json",
  "sshenc-core",
- "sshenc-ffi-apple",
- "sshenc-ffi-windows",
  "thiserror",
  "tracing",
 ]
 
 [[package]]
 name = "sshenc-test-support"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "rand",
  "sshenc-core",

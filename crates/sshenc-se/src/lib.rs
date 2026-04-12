@@ -7,6 +7,7 @@
 //! implementations for macOS (Secure Enclave) and Windows (TPM 2.0).
 
 pub mod backend;
+pub mod compat;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

@@ -9,11 +9,14 @@ repository.workspace = true
 
 [dependencies]
 sshenc-core = { workspace = true }
+enclaveapp-core = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+dirs = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-sshenc-ffi-apple = { workspace = true }
+enclaveapp-apple = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-sshenc-ffi-windows = { workspace = true }
+enclaveapp-windows = { workspace = true }

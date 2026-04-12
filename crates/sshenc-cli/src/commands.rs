@@ -11,6 +11,37 @@ use sshenc_se::KeyBackend;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Return the sshenc keys directory.
+/// macOS: ~/.sshenc/keys/
+/// Windows: %APPDATA%\sshenc\keys\
+fn sshenc_keys_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".sshenc")
+            .join("keys")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        dirs::data_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| {
+                eprintln!("warning: could not determine app data directory, using temp");
+                std::env::temp_dir()
+            })
+            .join("sshenc")
+            .join("keys")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".sshenc")
+            .join("keys")
+    }
+}
+
 pub fn keygen(
     backend: &dyn KeyBackend,
     label: &str,
@@ -564,11 +595,9 @@ pub fn openssh_print_config(
 }
 
 pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    use sshenc_ffi_apple::se;
-    #[cfg(target_os = "windows")]
-    use sshenc_ffi_windows::tpm as se;
+    use enclaveapp_core::metadata;
 
+    let keys_dir = sshenc_keys_dir();
     let config = Config::load_default()?;
 
     // Ensure agent is running
@@ -595,11 +624,15 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
 
     // If a label is specified, pin to that key only
     if let Some(label) = label {
-        let ssh_pub = se::ssh_pub_path(label);
+        let ssh_pub = keys_dir.join(format!("{label}.ssh.pub"));
         if !ssh_pub.exists() {
-            let pub_bytes = se::load_pub_key(label)
+            let pub_bytes = metadata::load_pub_key(&keys_dir, label)
                 .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
-            se::save_ssh_pub_key(label, &pub_bytes)?;
+            // Write the SSH-formatted public key file
+            let ssh_pubkey = SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
+            let line = ssh_pubkey.to_openssh_line();
+            std::fs::create_dir_all(&keys_dir)?;
+            std::fs::write(&ssh_pub, format!("{line}\n"))?;
         }
         cmd.arg("-o")
             .arg(format!("IdentityFile {}", ssh_pub.display()))
@@ -622,14 +655,17 @@ pub fn promote_to_default(label: &str) -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        use sshenc_ffi_apple::se;
+        use enclaveapp_core::metadata;
+
+        let keys_dir = sshenc_keys_dir();
 
         if label == "default" {
             bail!("key is already named 'default'");
         }
 
         // Verify the source key exists
-        se::load_key(label).map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
+        metadata::load_pub_key(&keys_dir, label)
+            .map_err(|_| anyhow::anyhow!("key '{label}' not found"))?;
 
         let ssh_dir = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
@@ -664,17 +700,20 @@ pub fn promote_to_default(label: &str) -> Result<()> {
         }
 
         // If there's already a "default" key, rename it to a backup label
-        if se::load_key("default").is_ok() {
+        if metadata::load_pub_key(&keys_dir, "default").is_ok() {
             let backup_label = format!("default-backup-{}", std::process::id());
             eprintln!("Renaming existing default key to '{backup_label}'");
-            se::rename_key("default", &backup_label)?;
+            metadata::rename_key_files(&keys_dir, "default", &backup_label)
+                .map_err(|e| anyhow::anyhow!("failed to rename default key: {e}"))?;
         }
 
         // Rename the source key to "default"
-        se::rename_key(label, "default")?;
+        metadata::rename_key_files(&keys_dir, label, "default")
+            .map_err(|e| anyhow::anyhow!("failed to rename key: {e}"))?;
 
         // Write ~/.ssh/id_ecdsa.pub
-        let pub_bytes = se::load_pub_key("default")?;
+        let pub_bytes = metadata::load_pub_key(&keys_dir, "default")
+            .map_err(|e| anyhow::anyhow!("failed to load renamed key: {e}"))?;
         let ssh_pubkey = sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
         let line = ssh_pubkey.to_openssh_line();
         std::fs::create_dir_all(&ssh_dir)?;
@@ -705,20 +744,18 @@ pub fn promote_to_default(label: &str) -> Result<()> {
 }
 
 pub fn set_identity(label: &str, name: &str, email: &str) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    use sshenc_ffi_apple::se;
-    #[cfg(target_os = "windows")]
-    use sshenc_ffi_windows::tpm as se;
+    use enclaveapp_core::metadata;
 
-    let mut meta = se::load_meta(label)?;
-    meta.git_name = Some(name.to_string());
-    meta.git_email = Some(email.to_string());
+    let keys_dir = sshenc_keys_dir();
+
+    let mut meta = sshenc_se::compat::load_sshenc_meta(&keys_dir, label)
+        .map_err(|e| anyhow::anyhow!("failed to load metadata for '{label}': {e}"))?;
+    meta.set_app_field("git_name", name.to_string());
+    meta.set_app_field("git_email", email.to_string());
 
     // Write updated metadata
-    let dir = se::keys_dir();
-    let meta_path = dir.join(format!("{label}.meta"));
-    let json = serde_json::to_string_pretty(&meta)?;
-    std::fs::write(&meta_path, &json)?;
+    metadata::save_meta(&keys_dir, label, &meta)
+        .map_err(|e| anyhow::anyhow!("failed to save metadata for '{label}': {e}"))?;
 
     println!("Set identity for key '{label}':");
     println!("  Name:  {name}");
@@ -728,12 +765,10 @@ pub fn set_identity(label: &str, name: &str, email: &str) -> Result<()> {
 
 /// Handle ssh-keygen-compatible signing mode.
 /// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
-/// We sign via the agent and write an SSH signature to <data_file>.sig.
+/// We sign via the hardware backend and write an SSH signature to <data_file>.sig.
 pub fn ssh_sign(args: &[String]) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    use sshenc_ffi_apple::se;
-    #[cfg(target_os = "windows")]
-    use sshenc_ffi_windows::tpm as se;
+    use enclaveapp_core::metadata;
+    use enclaveapp_core::traits::EnclaveSigner;
 
     // Parse: -Y sign -n <namespace> -f <key_file> <data_file>
     let mut namespace = "git";
@@ -808,19 +843,21 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
         buf
     };
 
-    // Sign the SSHSIG blob via the hardware backend
+    // Sign via the hardware backend
+    let keys_dir = sshenc_keys_dir();
+
     #[cfg(target_os = "macos")]
-    let der_sig = {
-        let data_rep = se::load_key(&label)
-            .map_err(|_| anyhow::anyhow!("key '{label}' not found — is the label correct?"))?;
-        se::sign(&data_rep, &signed_data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?
-    };
+    let signer = enclaveapp_apple::SecureEnclaveSigner::with_keys_dir("sshenc", keys_dir.clone());
     #[cfg(target_os = "windows")]
-    let der_sig =
-        se::sign(&label, &signed_data).map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
+    let signer = enclaveapp_windows::TpmSigner::with_keys_dir("sshenc", keys_dir.clone());
+
+    let der_sig = signer
+        .sign(&label, &signed_data)
+        .map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
 
     // Get the public key for the signature header
-    let pub_bytes = se::load_pub_key(&label)?;
+    let pub_bytes = metadata::load_pub_key(&keys_dir, &label)
+        .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
     let ssh_pubkey = sshenc_core::pubkey::SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
 
     // Build the SSH signature in the format ssh-keygen produces:

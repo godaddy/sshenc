@@ -174,6 +174,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_install_new_file() {
         let dir = temp_dir("new-file");
         let config_path = dir.join("config");
@@ -191,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_install_existing_file() {
         let dir = temp_dir("existing-file");
         let config_path = dir.join("config");
@@ -211,6 +213,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_install_no_trailing_newline() {
         let dir = temp_dir("no-trailing-nl");
         let config_path = dir.join("config");
@@ -230,6 +233,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_install_idempotent() {
         let dir = temp_dir("idempotent");
         let config_path = dir.join("config");
@@ -248,6 +252,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_uninstall() {
         let dir = temp_dir("uninstall");
         let config_path = dir.join("config");
@@ -269,6 +274,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported under Miri isolation
     fn test_uninstall_not_present() {
         let dir = temp_dir("uninstall-absent");
         let config_path = dir.join("config");
@@ -282,12 +288,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported under Miri isolation
     fn test_uninstall_missing_file() {
         let result = uninstall_block(Path::new("/nonexistent/config")).unwrap();
         assert_eq!(result, UninstallResult::NotPresent);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_is_installed() {
         let dir = temp_dir("is-installed");
         let config_path = dir.join("config");
@@ -305,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_install_creates_parent_dir() {
         let dir = temp_dir("creates-parent");
         let ssh_dir = dir.join("newssh");
@@ -320,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_install_with_dylib_path() {
         let dir = temp_dir("with-dylib");
         let config_path = dir.join("config");
@@ -337,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_install_without_dylib_path() {
         let dir = temp_dir("without-dylib");
         let config_path = dir.join("config");
@@ -353,6 +364,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_uninstall_removes_block_with_dylib() {
         let dir = temp_dir("uninstall-dylib");
         let config_path = dir.join("config");
@@ -381,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_install_block_empty_file_creates_new() {
         let dir = temp_dir("empty-file");
         let config_path = dir.join("config");
@@ -404,6 +417,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(miri, ignore)] // libc::chmod not supported by Miri
     fn test_install_block_sets_file_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -421,6 +435,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
     fn test_uninstall_block_multiple_blank_lines_around_block() {
         let dir = temp_dir("multi-blanks");
         let config_path = dir.join("config");
@@ -446,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported under Miri isolation
     fn test_is_installed_with_partial_marker_begin_only() {
         let dir = temp_dir("partial-marker");
         let config_path = dir.join("config");

@@ -178,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // C_Initialize calls dirs::home_dir() -> FFI
     fn c_initialize_succeeds_first_time() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
@@ -191,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // C_Initialize calls dirs::home_dir() -> FFI
     fn c_initialize_second_time_returns_already_initialized() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
@@ -208,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // C_Initialize calls dirs::home_dir() -> FFI
     fn c_finalize_succeeds_after_initialize() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();

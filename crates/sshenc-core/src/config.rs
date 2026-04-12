@@ -157,6 +157,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI
     fn test_default_config() {
         let config = Config::default();
         #[cfg(unix)]
@@ -171,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI
     fn test_config_roundtrip() {
         let config = Config {
             allowed_labels: vec!["github-personal".into(), "work".into()],
@@ -192,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI; file I/O
     fn test_config_save_load() {
         let dir = std::env::temp_dir().join("sshenc-test-config");
         drop(std::fs::remove_dir_all(&dir));
@@ -209,12 +212,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI
     fn test_config_load_missing_returns_default() {
         let config = Config::load(Path::new("/nonexistent/path/config.toml")).unwrap();
         assert!(config.allowed_labels.is_empty());
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI
     fn test_prompt_policy_serializes_lowercase() {
         let config = Config {
             prompt_policy: PromptPolicy::Always,
@@ -248,6 +253,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI
     fn test_log_level_serializes_lowercase() {
         for (level, expected) in [
             (LogLevel::Error, "\"error\""),
@@ -269,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // serde(default) on Config calls dirs::home_dir() -> FFI
     fn test_config_unknown_fields_ignored() {
         // serde(default) on Config means unknown fields should be silently ignored
         let toml_str = r#"
@@ -284,6 +291,7 @@ key = "value"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // serde(default) on Config calls dirs::home_dir() -> FFI
     fn test_config_all_fields_roundtrip() {
         let config = Config {
             socket_path: PathBuf::from("/custom/agent.sock"),
@@ -318,6 +326,7 @@ key = "value"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // serde(default) on Config calls dirs::home_dir() -> FFI
     fn test_config_host_identities_roundtrip() {
         let toml_str = r#"
 socket_path = "/tmp/agent.sock"
@@ -348,6 +357,7 @@ label = "gl"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI
     fn test_platform_conditional_socket_path() {
         let config = Config::default();
         #[cfg(unix)]

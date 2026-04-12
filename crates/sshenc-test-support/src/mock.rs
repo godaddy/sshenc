@@ -241,6 +241,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn test_mock_generate_with_write_pub_path() {
         let dir = std::env::temp_dir().join("sshenc-test-mock-pubkey");
         std::fs::create_dir_all(&dir).unwrap();

@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: JGowdy.sshenc
+PackageVersion: 0.3.6
+PackageLocale: en-US
+Publisher: Jay Gowdy
+PublisherUrl: https://github.com/jgowdy
+PackageName: sshenc
+PackageUrl: https://github.com/jgowdy/sshenc
+License: MIT
+LicenseUrl: https://github.com/jgowdy/sshenc/blob/main/LICENSE
+ShortDescription: Hardware-backed SSH key management using Windows TPM 2.0
+Description: |-
+  sshenc creates, manages, and uses hardware-backed SSH keys for OpenSSH and git+ssh workflows.
+  Keys are non-exportable, device-bound ECDSA P-256 keys stored in the TPM 2.0 via the
+  Microsoft Platform Crypto Provider. Includes an SSH agent, git commit signing, and
+  per-key identity management.
+Tags:
+  - ssh
+  - tpm
+  - security
+  - git
+  - cryptography
+  - ssh-agent
+  - ssh-keys
+ReleaseNotesUrl: https://github.com/jgowdy/sshenc/releases/tag/v0.3.6
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

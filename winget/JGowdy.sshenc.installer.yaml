@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: JGowdy.sshenc
+PackageVersion: 0.3.6
+MinimumOSVersion: 10.0.17763.0
+InstallerType: wix
+Scope: machine
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+Commands:
+  - sshenc
+  - sshenc-keygen
+  - sshenc-agent
+  - gitenc
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/jgowdy/sshenc/releases/download/v0.3.6/sshenc-x86_64-pc-windows-msvc.msi
+    InstallerSha256: 21293ED6DAC7D0EF44A8EC5292CB4EF6E79D444400317E71FB5E0C43756F2C5F
+ManifestType: installer
+ManifestVersion: 1.6.0

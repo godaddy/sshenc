@@ -120,15 +120,19 @@ jobs:
         with:
           path: artifacts
 
+      - uses: actions/checkout@v5
+
       - name: Compute SHA256s
         id: sha
         run: |
           arm_sha=$(sha256sum artifacts/sshenc-aarch64-apple-darwin/sshenc-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
           intel_sha=$(sha256sum artifacts/sshenc-x86_64-apple-darwin/sshenc-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
           win_sha=$(sha256sum artifacts/sshenc-x86_64-pc-windows-msvc/sshenc-x86_64-pc-windows-msvc.zip | cut -d' ' -f1)
+          msi_sha=$(sha256sum artifacts/sshenc-x86_64-pc-windows-msvc/sshenc-x86_64-pc-windows-msvc.msi | cut -d' ' -f1)
           echo "arm_sha256=$arm_sha" >> "$GITHUB_OUTPUT"
           echo "intel_sha256=$intel_sha" >> "$GITHUB_OUTPUT"
           echo "win_sha256=$win_sha" >> "$GITHUB_OUTPUT"
+          echo "msi_sha256=$msi_sha" >> "$GITHUB_OUTPUT"
 
       - name: Update Homebrew tap
         run: |
@@ -242,3 +246,36 @@ jobs:
           git add -A
           git diff --cached --quiet || git commit -m "Update sshenc to ${tag}"
           git push
+
+      - name: Generate winget manifest
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          msi_sha=$(echo "${{ steps.sha.outputs.msi_sha256 }}" | tr 'a-f' 'A-F')
+
+          mkdir -p /tmp/winget
+
+          sed -e "s/PackageVersion: .*/PackageVersion: ${version}/" \
+            winget/JGowdy.sshenc.yaml > /tmp/winget/JGowdy.sshenc.yaml
+
+          sed -e "s/PackageVersion: .*/PackageVersion: ${version}/" \
+              -e "s|InstallerUrl: .*|InstallerUrl: https://github.com/jgowdy/sshenc/releases/download/${tag}/sshenc-x86_64-pc-windows-msvc.msi|" \
+              -e "s/InstallerSha256: .*/InstallerSha256: ${msi_sha}/" \
+            winget/JGowdy.sshenc.installer.yaml > /tmp/winget/JGowdy.sshenc.installer.yaml
+
+          sed -e "s/PackageVersion: .*/PackageVersion: ${version}/" \
+              -e "s|ReleaseNotesUrl: .*|ReleaseNotesUrl: https://github.com/jgowdy/sshenc/releases/tag/${tag}|" \
+            winget/JGowdy.sshenc.locale.en-US.yaml > /tmp/winget/JGowdy.sshenc.locale.en-US.yaml
+
+          echo "Generated winget manifests for ${version}:"
+          cat /tmp/winget/JGowdy.sshenc.yaml
+          echo "---"
+          cat /tmp/winget/JGowdy.sshenc.installer.yaml
+          echo "---"
+          cat /tmp/winget/JGowdy.sshenc.locale.en-US.yaml
+
+      - name: Upload winget manifest
+        uses: actions/upload-artifact@v5
+        with:
+          name: winget-manifest
+          path: /tmp/winget/

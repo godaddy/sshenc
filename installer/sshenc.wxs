@@ -36,6 +36,9 @@
             <Component Id="sshenc_pkcs11_dll">
                 <File Id="sshenc_pkcs11.dll" Source="dist\sshenc_pkcs11.dll" KeyPath="yes" />
             </Component>
+            <Component Id="linux_binary">
+                <File Id="sshenc_linux" Source="dist\sshenc-linux" KeyPath="yes" />
+            </Component>
 
             <!-- Add to user PATH -->
             <Component Id="PathEntry">

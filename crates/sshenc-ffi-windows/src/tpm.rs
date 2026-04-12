@@ -468,6 +468,8 @@ pub fn load_meta(label: &str) -> Result<KeyMeta> {
             comment: None,
             auth_policy: 0,
             created: String::new(),
+            git_name: None,
+            git_email: None,
         });
     }
     let content = std::fs::read_to_string(&path)?;

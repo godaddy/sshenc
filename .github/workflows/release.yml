@@ -244,7 +244,7 @@ jobs:
       - name: Update Homebrew tap
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          git clone https://x-access-token:${{ secrets.RELEASE_PAT }}@github.com/jgowdy/homebrew-sshenc.git /tmp/tap
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/jgowdy/homebrew-sshenc.git /tmp/tap
           cp Formula/sshenc.rb /tmp/tap/sshenc.rb
           cd /tmp/tap
           git config user.name "github-actions[bot]"

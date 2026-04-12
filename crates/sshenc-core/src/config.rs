@@ -158,7 +158,13 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
+        #[cfg(unix)]
         assert!(config.socket_path.to_string_lossy().contains("agent.sock"));
+        #[cfg(windows)]
+        assert!(config
+            .socket_path
+            .to_string_lossy()
+            .contains("sshenc-agent"));
         assert!(config.allowed_labels.is_empty());
         assert_eq!(config.prompt_policy, PromptPolicy::KeyDefault);
     }

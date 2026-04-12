@@ -37,6 +37,7 @@ pub struct LinuxBackend {
 
 #[derive(Debug)]
 enum LinuxSigner {
+    #[cfg(target_env = "gnu")]
     Tpm(enclaveapp_linux_tpm::LinuxTpmSigner),
     Software(enclaveapp_software::SoftwareSigner),
 }
@@ -45,6 +46,8 @@ impl LinuxBackend {
     #[allow(clippy::print_stderr)]
     pub fn new(pub_dir: PathBuf) -> Self {
         let keys_dir = sshenc_keys_dir();
+
+        #[cfg(target_env = "gnu")]
         let inner = if enclaveapp_linux_tpm::is_available() {
             eprintln!("sshenc: using TPM 2.0 for hardware-backed keys");
             LinuxSigner::Tpm(enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(
@@ -59,6 +62,15 @@ impl LinuxBackend {
                 "sshenc", keys_dir,
             ))
         };
+
+        #[cfg(not(target_env = "gnu"))]
+        let inner = {
+            eprintln!("sshenc: using software-backed keys (musl/static build)");
+            LinuxSigner::Software(enclaveapp_software::SoftwareSigner::with_keys_dir(
+                "sshenc", keys_dir,
+            ))
+        };
+
         LinuxBackend { pub_dir, inner }
     }
 
@@ -77,6 +89,7 @@ impl LinuxBackend {
 
     fn signer(&self) -> &dyn EnclaveSigner {
         match &self.inner {
+            #[cfg(target_env = "gnu")]
             LinuxSigner::Tpm(s) => s,
             LinuxSigner::Software(s) => s,
         }
@@ -84,6 +97,7 @@ impl LinuxBackend {
 
     fn key_manager(&self) -> &dyn EnclaveKeyManager {
         match &self.inner {
+            #[cfg(target_env = "gnu")]
             LinuxSigner::Tpm(s) => s,
             LinuxSigner::Software(s) => s,
         }

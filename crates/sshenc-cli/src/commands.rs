@@ -879,7 +879,7 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let signer = enclaveapp_apple::SecureEnclaveSigner::with_keys_dir("sshenc", keys_dir.clone());
     #[cfg(target_os = "windows")]
     let signer = enclaveapp_windows::TpmSigner::with_keys_dir("sshenc", keys_dir.clone());
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     let signer: Box<dyn EnclaveSigner> = if enclaveapp_linux_tpm::is_available() {
         Box::new(enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(
             "sshenc",
@@ -891,6 +891,8 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
             keys_dir.clone(),
         ))
     };
+    #[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+    let signer = enclaveapp_software::SoftwareSigner::with_keys_dir("sshenc", keys_dir.clone());
 
     let der_sig = signer
         .sign(&label, &signed_data)

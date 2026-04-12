@@ -12,7 +12,7 @@ jobs:
     uses: jgowdy/libenclaveapp/.github/workflows/reusable-release.yml@main
     with:
       app_name: sshenc
-      targets: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]'
+      targets: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]'
       linux_deps: "libdbus-1-dev pkg-config libtss2-dev"
       unix_binaries: "sshenc sshenc-keygen sshenc-agent gitenc"
       windows_binaries: "sshenc.exe sshenc-keygen.exe sshenc-agent.exe gitenc.exe"

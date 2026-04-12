@@ -1,0 +1,24 @@
+[package]
+name = "sshenc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sshenc-agent-proto = { path = "../crates/sshenc-agent-proto" }
+
+[[bin]]
+name = "fuzz_parse_request"
+path = "fuzz_targets/parse_request.rs"
+
+[[bin]]
+name = "fuzz_parse_der_signature"
+path = "fuzz_targets/parse_der_signature.rs"
+
+[[bin]]
+name = "fuzz_read_ssh_string"
+path = "fuzz_targets/read_ssh_string.rs"

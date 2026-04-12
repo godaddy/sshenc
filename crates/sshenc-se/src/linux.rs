@@ -47,17 +47,17 @@ impl LinuxBackend {
         let keys_dir = sshenc_keys_dir();
         let inner = if enclaveapp_linux_tpm::is_available() {
             eprintln!("sshenc: using TPM 2.0 for hardware-backed keys");
-            LinuxSigner::Tpm(
-                enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir("sshenc", keys_dir),
-            )
+            LinuxSigner::Tpm(enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(
+                "sshenc", keys_dir,
+            ))
         } else {
             eprintln!(
                 "sshenc: no TPM detected, using software-backed keys \
                  (private keys stored on disk)"
             );
-            LinuxSigner::Software(
-                enclaveapp_software::SoftwareSigner::with_keys_dir("sshenc", keys_dir),
-            )
+            LinuxSigner::Software(enclaveapp_software::SoftwareSigner::with_keys_dir(
+                "sshenc", keys_dir,
+            ))
         };
         LinuxBackend { pub_dir, inner }
     }

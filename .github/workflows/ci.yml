@@ -16,6 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Clone libenclaveapp
+        uses: actions/checkout@v5
+        with:
+          repository: jgowdy/libenclaveapp
+          path: ../libenclaveapp
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,6 +55,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+
+      - name: Clone libenclaveapp
+        uses: actions/checkout@v5
+        with:
+          repository: jgowdy/libenclaveapp
+          path: ../libenclaveapp
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

@@ -1,12 +1,13 @@
 # sshenc
 
-macOS Secure Enclave-backed SSH key management.
+Hardware-backed SSH key management.
 
-`sshenc` generates SSH keys inside the macOS Secure Enclave and serves them
-via a standard SSH agent. Private key material never leaves the hardware —
-it can't be exported, copied, or stolen from disk.
+`sshenc` generates SSH keys inside the Secure Enclave (macOS), TPM 2.0
+(Windows/Linux), or a software fallback and serves them via a standard SSH
+agent. Private key material never leaves the hardware -- it can't be
+exported, copied, or stolen from disk.
 
-Your existing SSH keys in `~/.ssh` continue to work alongside Secure Enclave
+Your existing SSH keys in `~/.ssh` continue to work alongside hardware-backed
 keys. Nothing breaks when you install sshenc.
 
 ## Installation
@@ -38,6 +39,18 @@ scoop install sshenc
 sshenc install
 ```
 
+### Linux -- tarball
+
+Download `sshenc-x86_64-unknown-linux-gnu.tar.gz` from the
+[latest release](https://github.com/jgowdy/sshenc/releases). Extract and
+copy the binaries to a directory in your PATH:
+
+```sh
+tar xzf sshenc-x86_64-unknown-linux-gnu.tar.gz
+sudo cp sshenc sshenc-agent sshenc-keygen gitenc /usr/local/bin/
+sshenc install
+```
+
 ### From source (macOS)
 
 Requires Rust 1.75+, Xcode command line tools, and macOS (Apple Silicon or
@@ -61,6 +74,19 @@ git clone https://github.com/jgowdy/sshenc.git
 cd sshenc
 cargo build --workspace --release
 # Copy binaries to a directory in your PATH
+```
+
+### From source (Linux)
+
+Requires Rust 1.75+. For TPM support, install `tpm2-tss` development
+libraries (`libtss2-dev` on Debian/Ubuntu, `tpm2-tss-devel` on Fedora).
+
+```sh
+git clone https://github.com/jgowdy/sshenc.git
+cd sshenc
+cargo build --workspace --release
+sudo cp target/release/sshenc target/release/sshenc-agent target/release/sshenc-keygen target/release/gitenc /usr/local/bin/
+sshenc install
 ```
 
 ## Quick start
@@ -352,25 +378,39 @@ sshenc config show    # print current config
 
 Config file: `~/Library/Application Support/sshenc/config.toml`
 
+## Platform support
+
+| Platform | Backend | Notes |
+|---|---|---|
+| macOS (Apple Silicon / T2) | Secure Enclave | CryptoKit via libenclaveapp |
+| Windows (native) | TPM 2.0 | CNG Platform Crypto Provider |
+| Windows (Git Bash) | TPM 2.0 | GIT_SSH_COMMAND bypasses MINGW SSH |
+| WSL | Windows TPM via bridge | socat + npiperelay to named pipe |
+| Linux (with TPM) | TPM 2.0 | tss-esapi via libenclaveapp |
+| Linux (no TPM) | Software P-256 | Fallback, one-time warning |
+
+All platform-specific crypto is provided by
+[libenclaveapp](https://github.com/jgowdy/libenclaveapp).
+
 ## Security model
 
-- Private keys are generated inside and never leave the Secure Enclave
-- Keys are ECDSA P-256 — the only curve the Secure Enclave supports
-- Keys are device-bound and non-exportable — cannot be backed up or cloned
-- Optional per-key Touch ID / password requirement for each signing operation
+- Private keys are generated inside and never leave the hardware security module
+- Keys are ECDSA P-256 -- the only curve with hardware support on all platforms
+- Keys are device-bound and non-exportable -- cannot be backed up or cloned
+- Optional per-key Touch ID / Windows Hello / password for each signing operation
 - Agent socket restricted to owner-only permissions (0600)
 - Key references in `~/.sshenc/keys/` restricted to owner-only (0700/0600)
-- No Keychain entitlements required — uses CryptoKit, not Security.framework
+- No Keychain entitlements required on macOS -- uses CryptoKit, not Security.framework
+- Software fallback on Linux stores keys on disk with restrictive permissions
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 
 ## Limitations
 
-- **macOS or Windows** — requires Apple Silicon/T2 (Secure Enclave) or
-  Windows with TPM 2.0
-- **P-256 only** — Ed25519 and RSA can't be created in hardware, but existing
+- **P-256 only** -- Ed25519 and RSA can't be created in hardware, but existing
   keys in `~/.ssh` still work as SSH handles them natively
-- **Non-exportable** — losing the device means losing the hardware keys
+- **Non-exportable** -- losing the device means losing the hardware keys
+- **Software fallback** -- on Linux without TPM, keys are not hardware-protected
 
 ## Development
 

@@ -1,4 +1,4 @@
 /target
-*.dylib
 .DS_Store
-DESIGN.md
+*.swp
+*.swo

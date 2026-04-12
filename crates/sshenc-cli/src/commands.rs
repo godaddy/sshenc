@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 /// Return the sshenc keys directory.
 /// macOS: ~/.sshenc/keys/
 /// Windows: %APPDATA%\sshenc\keys\
+#[allow(clippy::print_stderr)]
 fn sshenc_keys_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -344,7 +345,7 @@ pub fn config_show() -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+#[allow(clippy::print_stdout, clippy::print_stderr, unused_qualifications)]
 pub fn install() -> Result<()> {
     let config = Config::load_default()?;
     let ssh_config_path = dirs::home_dir()

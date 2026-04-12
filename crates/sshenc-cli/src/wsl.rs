@@ -26,6 +26,7 @@ const BEGIN_MARKER: &str = "# BEGIN sshenc managed block -- do not edit";
 const END_MARKER: &str = "# END sshenc managed block";
 
 /// Configure all detected WSL distros for sshenc.
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn configure_wsl_distros() {
     let distros = detect_wsl_distros();
     if distros.is_empty() {
@@ -44,6 +45,7 @@ pub fn configure_wsl_distros() {
 }
 
 /// Remove sshenc configuration from all WSL distros.
+#[allow(clippy::print_stderr)]
 pub fn unconfigure_wsl_distros() {
     let distros = detect_wsl_distros();
     for distro in &distros {

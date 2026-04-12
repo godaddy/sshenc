@@ -83,6 +83,7 @@ fn main() -> Result<()> {
     }
 
     #[cfg(windows)]
+    #[allow(clippy::used_underscore_binding)]
     if !cli.foreground && !cli._internal_daemon {
         daemonize(&cli.socket)?;
     }

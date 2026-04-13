@@ -62,7 +62,7 @@ fn default_socket_or_pipe() -> String {
 
 #[cfg(windows)]
 fn default_socket_or_pipe() -> String {
-    r"\\.\pipe\sshenc-agent".to_string()
+    r"\\.\pipe\openssh-ssh-agent".to_string()
 }
 
 fn default_pid_path() -> PathBuf {

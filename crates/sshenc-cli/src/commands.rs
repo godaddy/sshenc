@@ -373,6 +373,25 @@ pub fn install() -> Result<()> {
         }
     }
 
+    // On Windows, stop the built-in ssh-agent service so sshenc can bind
+    // \\.\pipe\openssh-ssh-agent (the default Windows SSH agent pipe).
+    #[cfg(target_os = "windows")]
+    {
+        let stop = std::process::Command::new("sc")
+            .args(["stop", "ssh-agent"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let disable = std::process::Command::new("sc")
+            .args(["config", "ssh-agent", "start=", "disabled"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if stop.map_or(false, |s| s.success()) || disable.map_or(false, |s| s.success()) {
+            println!("Disabled Windows ssh-agent service (sshenc replaces it).");
+        }
+    }
+
     // Start the agent as a daemon if it's not already running
     if !agent_is_running(&config.socket_path) {
         let agent_bin = find_agent_binary()?;
@@ -389,27 +408,41 @@ pub fn install() -> Result<()> {
         println!("Agent already running.");
     }
 
-    // On Windows, set GIT_SSH_COMMAND as a user environment variable so that
-    // Git Bash (which bundles MINGW SSH that doesn't support named pipes) uses
-    // the real Windows OpenSSH instead.
+    // On Windows, set SSH_AUTH_SOCK as a persistent user environment variable
+    // pointing to the Unix domain socket that the agent also listens on.
+    // This allows Git for Windows' MINGW SSH (and any other Unix socket-aware
+    // SSH client) to connect to the sshenc agent.
     #[cfg(target_os = "windows")]
     {
-        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
-        if std::path::Path::new(win_ssh).exists() {
-            let status = std::process::Command::new("setx")
-                .args(["GIT_SSH_COMMAND", win_ssh])
-                .stdout(std::process::Stdio::null())
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    println!("Set GIT_SSH_COMMAND={win_ssh} (for Git Bash compatibility).");
-                }
-                _ => {
-                    eprintln!("warning: could not set GIT_SSH_COMMAND. Git Bash users should run:");
-                    eprintln!("  setx GIT_SSH_COMMAND \"{}\"", win_ssh);
-                }
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(r"C:\Users\Default"));
+        let sock_path = home.join(".sshenc").join("agent.sock");
+        let sock_str = sock_path.to_string_lossy();
+        let status = std::process::Command::new("setx")
+            .args(["SSH_AUTH_SOCK", &sock_str])
+            .stdout(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("Set SSH_AUTH_SOCK={sock_str} (for Git Bash and MINGW SSH).");
+            }
+            _ => {
+                eprintln!("warning: could not set SSH_AUTH_SOCK. Git Bash users should run:");
+                eprintln!("  setx SSH_AUTH_SOCK \"{}\"", sock_str);
             }
         }
+
+        // Remove GIT_SSH_COMMAND if it was set by an older sshenc version
+        let _ = std::process::Command::new("reg")
+            .args([
+                "delete",
+                "HKCU\\Environment",
+                "/v",
+                "GIT_SSH_COMMAND",
+                "/f",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 
     // On Windows, configure WSL distros if any are installed

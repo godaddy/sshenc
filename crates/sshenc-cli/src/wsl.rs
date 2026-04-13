@@ -23,7 +23,7 @@ if command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1
         mkdir -p "$HOME/.sshenc"
         rm -f "$SSH_AUTH_SOCK"
         socat UNIX-LISTEN:"$SSH_AUTH_SOCK",fork \
-            EXEC:"npiperelay.exe -ei -s //./pipe/sshenc-agent" &
+            EXEC:"npiperelay.exe -ei -s //./pipe/openssh-ssh-agent" &
         echo $! > "$_sshenc_pid"
         disown 2>/dev/null
     fi

@@ -82,7 +82,7 @@ impl Default for Config {
         #[cfg(unix)]
         let socket_path = home.join(".sshenc").join("agent.sock");
         #[cfg(windows)]
-        let socket_path = PathBuf::from(r"\\.\pipe\sshenc-agent");
+        let socket_path = PathBuf::from(r"\\.\pipe\openssh-ssh-agent");
         Config {
             socket_path,
             allowed_labels: Vec::new(),
@@ -166,7 +166,7 @@ mod tests {
         assert!(config
             .socket_path
             .to_string_lossy()
-            .contains("sshenc-agent"));
+            .contains("openssh-ssh-agent"));
         assert!(config.allowed_labels.is_empty());
         assert_eq!(config.prompt_policy, PromptPolicy::KeyDefault);
     }

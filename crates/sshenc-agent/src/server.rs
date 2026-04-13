@@ -432,4 +432,274 @@ mod tests {
             panic!("expected SignResponse");
         }
     }
+
+    #[test]
+    fn test_request_identities_default_key_sorted_first() {
+        let backend = MockKeyBackend::new();
+        // Generate a non-default key first
+        backend
+            .generate(&KeyGenOptions {
+                label: KeyLabel::new("other").unwrap(),
+                comment: Some("other".into()),
+                requires_user_presence: false,
+                write_pub_path: None,
+            })
+            .unwrap();
+        // Generate the "default" key second
+        backend
+            .generate(&KeyGenOptions {
+                label: KeyLabel::new("default").unwrap(),
+                comment: Some("default".into()),
+                requires_user_presence: false,
+                write_pub_path: None,
+            })
+            .unwrap();
+
+        let resp =
+            handle_request(AgentRequest::RequestIdentities, &backend, &empty_labels()).unwrap();
+        match resp {
+            AgentResponse::IdentitiesAnswer(ids) => {
+                assert_eq!(ids.len(), 2);
+                // "default" key should be first due to sorting
+                assert_eq!(ids[0].comment, "default");
+            }
+            _ => panic!("expected IdentitiesAnswer"),
+        }
+    }
+
+    #[test]
+    fn test_request_identities_comment_fallback_to_label() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate(&KeyGenOptions {
+                label: KeyLabel::new("no-comment").unwrap(),
+                comment: None,
+                requires_user_presence: false,
+                write_pub_path: None,
+            })
+            .unwrap();
+
+        let resp =
+            handle_request(AgentRequest::RequestIdentities, &backend, &empty_labels()).unwrap();
+        match resp {
+            AgentResponse::IdentitiesAnswer(ids) => {
+                assert_eq!(ids.len(), 1);
+                // When comment is None, the label should be used as comment
+                assert_eq!(ids[0].comment, "no-comment");
+            }
+            _ => panic!("expected IdentitiesAnswer"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_connection_request_identities() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let backend = setup_backend();
+        let allowed = empty_labels();
+
+        // Build a framed RequestIdentities message
+        let payload = message::serialize_request(&AgentRequest::RequestIdentities);
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        let (client, server) = tokio::io::duplex(8192);
+        let (server_read, server_write) = tokio::io::split(server);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        // Spawn writer that sends request then closes
+        let writer = tokio::spawn(async move {
+            client_write.write_all(&frame).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        // Run handle_connection with the server side
+        let server_stream = tokio::io::join(server_read, server_write);
+        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        assert!(conn_result.is_ok());
+
+        writer.await.unwrap();
+
+        // Read the response from client side
+        let mut response_data = Vec::new();
+        client_read.read_to_end(&mut response_data).await.unwrap();
+
+        // Parse the response: u32 length + payload
+        assert!(response_data.len() >= 4, "response too short");
+        let resp_len = u32::from_be_bytes([
+            response_data[0],
+            response_data[1],
+            response_data[2],
+            response_data[3],
+        ]) as usize;
+        assert_eq!(response_data.len(), 4 + resp_len);
+
+        let resp_payload = &response_data[4..];
+        let response = message::parse_response(resp_payload).unwrap();
+        match response {
+            AgentResponse::IdentitiesAnswer(ids) => {
+                assert_eq!(ids.len(), 1);
+                assert!(!ids[0].key_blob.is_empty());
+            }
+            other => panic!("expected IdentitiesAnswer, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_connection_unknown_message() {
+        let backend = setup_backend();
+        let allowed = empty_labels();
+
+        // Build a framed unknown message
+        let payload = message::serialize_request(&AgentRequest::Unknown(255));
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        let (client, server) = tokio::io::duplex(8192);
+        let (server_read, server_write) = tokio::io::split(server);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let writer = tokio::spawn(async move {
+            client_write.write_all(&frame).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        let server_stream = tokio::io::join(server_read, server_write);
+        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        assert!(conn_result.is_ok());
+
+        writer.await.unwrap();
+
+        let mut response_data = Vec::new();
+        client_read.read_to_end(&mut response_data).await.unwrap();
+
+        assert!(response_data.len() >= 4);
+        let resp_payload = &response_data[4..];
+        let response = message::parse_response(resp_payload).unwrap();
+        assert!(matches!(response, AgentResponse::Failure));
+    }
+
+    #[tokio::test]
+    async fn test_handle_connection_empty_stream() {
+        let backend = setup_backend();
+        let allowed = empty_labels();
+
+        // Empty stream (client disconnects immediately)
+        let (client, server) = tokio::io::duplex(8192);
+        let (server_read, server_write) = tokio::io::split(server);
+
+        // Drop client immediately to close the connection
+        drop(client);
+
+        let server_stream = tokio::io::join(server_read, server_write);
+        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        // Should return Ok(()) on client disconnect (UnexpectedEof)
+        assert!(conn_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_connection_invalid_message_length() {
+        let backend = setup_backend();
+        let allowed = empty_labels();
+
+        // Send a message with length 0
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&0_u32.to_be_bytes());
+
+        let (client, server) = tokio::io::duplex(8192);
+        let (server_read, server_write) = tokio::io::split(server);
+        let (_client_read, mut client_write) = tokio::io::split(client);
+
+        use tokio::io::AsyncWriteExt as _;
+
+        let writer = tokio::spawn(async move {
+            client_write.write_all(&frame).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        let server_stream = tokio::io::join(server_read, server_write);
+        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        // Zero length should cause early return with Ok(())
+        assert!(conn_result.is_ok());
+
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handle_connection_oversized_message_length() {
+        let backend = setup_backend();
+        let allowed = empty_labels();
+
+        // Send a message with length > 256KB
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(512 * 1024_u32).to_be_bytes());
+
+        let (client, server) = tokio::io::duplex(8192);
+        let (server_read, server_write) = tokio::io::split(server);
+        let (_client_read, mut client_write) = tokio::io::split(client);
+
+        use tokio::io::AsyncWriteExt as _;
+
+        let writer = tokio::spawn(async move {
+            client_write.write_all(&frame).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        let server_stream = tokio::io::join(server_read, server_write);
+        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        // Oversized length should cause early return with Ok(())
+        assert!(conn_result.is_ok());
+
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handle_connection_sign_request() {
+        let backend = setup_backend();
+        let key_blob = get_key_blob(&backend);
+        let allowed = empty_labels();
+
+        let payload = message::serialize_request(&AgentRequest::SignRequest {
+            key_blob,
+            data: b"sign this data".to_vec(),
+            flags: 0,
+        });
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        let (client, server) = tokio::io::duplex(8192);
+        let (server_read, server_write) = tokio::io::split(server);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let writer = tokio::spawn(async move {
+            client_write.write_all(&frame).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        let server_stream = tokio::io::join(server_read, server_write);
+        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        assert!(conn_result.is_ok());
+
+        writer.await.unwrap();
+
+        let mut response_data = Vec::new();
+        client_read.read_to_end(&mut response_data).await.unwrap();
+
+        assert!(response_data.len() >= 4);
+        let resp_payload = &response_data[4..];
+        let response = message::parse_response(resp_payload).unwrap();
+        match response {
+            AgentResponse::SignResponse { signature_blob } => {
+                assert!(!signature_blob.is_empty());
+            }
+            other => panic!("expected SignResponse, got {other:?}"),
+        }
+    }
 }

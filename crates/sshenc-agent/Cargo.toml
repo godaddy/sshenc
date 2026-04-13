@@ -34,6 +34,8 @@ libc = { workspace = true }
 
 [dev-dependencies]
 sshenc-test-support = { workspace = true }
+sshenc-agent-proto = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "io-util", "macros"] }
 
 [lints]
 workspace = true

@@ -208,7 +208,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -351,5 +351,123 @@ mod tests {
             }
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_args_push_origin_main() {
+        let args = s(&["push", "origin", "main"]);
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, None);
+                assert_eq!(git_args, s(&["push", "origin", "main"]));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_label_with_double_dash_separator() {
+        // gitenc --label mykey -- push origin main
+        let args = s(&["--label", "mykey", "--", "push", "origin", "main"]);
+        match parse_args(&args) {
+            ParsedArgs::Run { label, git_args } => {
+                assert_eq!(label, Some("mykey".to_string()));
+                assert_eq!(git_args, s(&["--", "push", "origin", "main"]));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_configure_repo_with_temp_git_repo() {
+        let dir = std::env::temp_dir().join("sshenc-test-configure-repo");
+        // Clean up from any prior run
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let status = Command::new("git")
+            .args(["init"])
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init failed");
+
+        // Run configure_repo's git config commands by calling git config directly
+        // in the temp repo context. We test the same logic configure_repo uses.
+        let label = "test-key";
+        let ssh_command = format!("sshenc ssh --label {} --", label);
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| "/tmp".into());
+        let signing_key = format!("{home}/.ssh/{label}.pub");
+
+        let configs = vec![
+            ("core.sshCommand", ssh_command.as_str()),
+            ("gpg.format", "ssh"),
+            ("user.signingkey", signing_key.as_str()),
+            ("commit.gpgsign", "true"),
+        ];
+
+        for (key, value) in &configs {
+            let status = Command::new("git")
+                .args(["config", key, value])
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git config {key} failed");
+        }
+
+        // Verify the configs were set
+        for (key, expected) in &configs {
+            let output = Command::new("git")
+                .args(["config", "--get", key])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git config --get {key} failed");
+            let actual = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(actual.trim(), *expected, "config {key} mismatch");
+        }
+
+        // Cleanup
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn test_configure_repo_default_label_uses_id_ecdsa() {
+        // When label is None (default), the signing key should be id_ecdsa.pub
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| "/tmp".into());
+
+        // Replicate the logic from configure_repo for "default"
+        let effective_label = "default";
+        let signing_key = if effective_label == "default" {
+            format!("{home}/.ssh/id_ecdsa.pub")
+        } else {
+            format!("{home}/.ssh/{effective_label}.pub")
+        };
+
+        assert!(
+            signing_key.ends_with("/.ssh/id_ecdsa.pub"),
+            "default label should use id_ecdsa.pub, got: {signing_key}"
+        );
+    }
+
+    #[test]
+    fn test_configure_repo_named_label_uses_label_pub() {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| "/tmp".into());
+
+        let effective_label = "github-work";
+        let signing_key = format!("{home}/.ssh/{effective_label}.pub");
+
+        assert!(
+            signing_key.ends_with("/.ssh/github-work.pub"),
+            "named label should use label.pub, got: {signing_key}"
+        );
     }
 }

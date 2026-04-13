@@ -1285,6 +1285,7 @@ dependencies = [
  "sshenc-agent-proto",
  "sshenc-core",
  "sshenc-se",
+ "sshenc-test-support",
  "tokio",
  "toml",
  "tracing",

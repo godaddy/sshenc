@@ -41,5 +41,8 @@ enclaveapp-wsl = { workspace = true }
 enclaveapp-software = { workspace = true }
 enclaveapp-linux-tpm = { workspace = true }
 
+[dev-dependencies]
+sshenc-test-support = { workspace = true }
+
 [lints]
 workspace = true

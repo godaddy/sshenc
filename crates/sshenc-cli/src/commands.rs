@@ -964,3 +964,647 @@ fn base64_wrap(data: &[u8], width: usize) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use sshenc_test_support::MockKeyBackend;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn mock_backend() -> MockKeyBackend {
+        MockKeyBackend::new()
+    }
+
+    /// Create a unique temporary directory for a test.
+    fn test_dir(prefix: &str) -> PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("sshenc-cli-test-{prefix}-{pid}-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Helper: generate a key in the mock backend and return the backend.
+    fn backend_with_key(label: &str, comment: Option<String>) -> MockKeyBackend {
+        let backend = mock_backend();
+        let opts = KeyGenOptions {
+            label: KeyLabel::new(label).unwrap(),
+            comment,
+            requires_user_presence: false,
+            write_pub_path: None,
+        };
+        backend.generate(&opts).unwrap();
+        backend
+    }
+
+    // -----------------------------------------------------------------------
+    // keygen tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn keygen_creates_key() {
+        let backend = mock_backend();
+        let result = keygen(
+            &backend,
+            "test-key",
+            Some("comment".into()),
+            None,
+            false,
+            false,
+            false,
+        );
+        assert!(result.is_ok());
+        let keys = backend.list().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].metadata.label.as_str(), "test-key");
+    }
+
+    #[test]
+    fn keygen_with_comment() {
+        let backend = mock_backend();
+        keygen(
+            &backend,
+            "commented",
+            Some("user@host".into()),
+            None,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let info = backend.get("commented").unwrap();
+        assert_eq!(info.metadata.comment.as_deref(), Some("user@host"));
+    }
+
+    #[test]
+    fn keygen_with_write_pub_path_creates_file() {
+        let dir = test_dir("keygen-pub");
+        let pub_path = dir.join("my-key.pub");
+        let backend = mock_backend();
+        keygen(
+            &backend,
+            "pub-key",
+            Some("test@host".into()),
+            Some(pub_path.clone()),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(pub_path.exists(), "pub file should exist");
+        let contents = std::fs::read_to_string(&pub_path).unwrap();
+        assert!(contents.contains("ecdsa-sha2-nistp256"));
+        assert!(contents.contains("test@host"));
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn keygen_without_write_pub_path_no_file() {
+        let backend = mock_backend();
+        keygen(&backend, "no-pub", None, None, false, false, false).unwrap();
+        let info = backend.get("no-pub").unwrap();
+        assert!(info.pub_file_path.is_none());
+    }
+
+    #[test]
+    fn keygen_duplicate_label_returns_error() {
+        let backend = mock_backend();
+        keygen(&backend, "dup-key", None, None, false, false, false).unwrap();
+        let result = keygen(&backend, "dup-key", None, None, false, false, false);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("duplicate") || err_msg.contains("dup-key"),
+            "error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn keygen_with_user_presence() {
+        let backend = mock_backend();
+        keygen(&backend, "up-key", None, None, false, true, false).unwrap();
+        let info = backend.get("up-key").unwrap();
+        assert!(info.metadata.requires_user_presence);
+    }
+
+    #[test]
+    fn keygen_json_output_succeeds() {
+        let backend = mock_backend();
+        // Just verify it doesn't error; stdout capture is out of scope.
+        let result = keygen(
+            &backend,
+            "json-key",
+            Some("c".into()),
+            None,
+            false,
+            false,
+            true,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn keygen_print_pub_succeeds() {
+        let backend = mock_backend();
+        let result = keygen(
+            &backend,
+            "print-pub-key",
+            Some("c".into()),
+            None,
+            true,
+            false,
+            false,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn keygen_invalid_label_returns_error() {
+        let backend = mock_backend();
+        let result = keygen(&backend, "bad label!", None, None, false, false, false);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // list tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_empty_backend() {
+        let backend = mock_backend();
+        let result = list(&backend, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_after_generating_keys() {
+        let backend = mock_backend();
+        keygen(&backend, "key-a", None, None, false, false, false).unwrap();
+        keygen(&backend, "key-b", None, None, false, false, false).unwrap();
+        let result = list(&backend, false);
+        assert!(result.is_ok());
+        // Verify keys actually exist
+        let keys = backend.list().unwrap();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn list_json_empty() {
+        let backend = mock_backend();
+        let result = list(&backend, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_json_with_keys() {
+        let backend = mock_backend();
+        keygen(&backend, "jk-1", None, None, false, false, false).unwrap();
+        keygen(
+            &backend,
+            "jk-2",
+            Some("comment".into()),
+            None,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let result = list(&backend, true);
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // inspect tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn inspect_existing_key() {
+        let backend = backend_with_key("ins-key", Some("test@host".into()));
+        let result = inspect(&backend, "ins-key", false, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inspect_nonexistent_key() {
+        let backend = mock_backend();
+        let result = inspect(&backend, "no-such-key", false, false);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("no-such-key") || err_msg.contains("not found"),
+            "error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn inspect_json() {
+        let backend = backend_with_key("ins-json", None);
+        let result = inspect(&backend, "ins-json", true, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inspect_show_pub() {
+        let backend = backend_with_key("ins-pub", Some("c@h".into()));
+        let result = inspect(&backend, "ins-pub", false, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inspect_json_and_show_pub() {
+        // When json=true, show_pub is ignored (json branch returns early)
+        let backend = backend_with_key("ins-both", None);
+        let result = inspect(&backend, "ins-both", true, true);
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // delete tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delete_existing_key_with_yes() {
+        let backend = backend_with_key("del-key", None);
+        assert_eq!(backend.key_count(), 1);
+        let labels = vec!["del-key".to_string()];
+        let result = delete(&backend, &labels, false, true);
+        assert!(result.is_ok());
+        assert_eq!(backend.key_count(), 0);
+    }
+
+    #[test]
+    fn delete_nonexistent_key() {
+        let backend = mock_backend();
+        let labels = vec!["ghost".to_string()];
+        let result = delete(&backend, &labels, false, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_empty_labels() {
+        let backend = mock_backend();
+        let labels: Vec<String> = vec![];
+        let result = delete(&backend, &labels, false, true);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("no key labels"), "error: {err_msg}");
+    }
+
+    #[test]
+    fn delete_multiple_keys_with_yes() {
+        let backend = mock_backend();
+        keygen(&backend, "mk-1", None, None, false, false, false).unwrap();
+        keygen(&backend, "mk-2", None, None, false, false, false).unwrap();
+        keygen(&backend, "mk-3", None, None, false, false, false).unwrap();
+        assert_eq!(backend.key_count(), 3);
+
+        let labels = vec!["mk-1".to_string(), "mk-2".to_string()];
+        delete(&backend, &labels, false, true).unwrap();
+        assert_eq!(backend.key_count(), 1);
+        // The remaining key should be mk-3
+        let remaining = backend.list().unwrap();
+        assert_eq!(remaining[0].metadata.label.as_str(), "mk-3");
+    }
+
+    #[test]
+    fn delete_with_pub_file_cleanup() {
+        let dir = test_dir("del-pub");
+        let pub_path = dir.join("cleanup-key.pub");
+        let backend = mock_backend();
+        keygen(
+            &backend,
+            "cleanup-key",
+            None,
+            Some(pub_path.clone()),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(pub_path.exists());
+        let labels = vec!["cleanup-key".to_string()];
+        delete(&backend, &labels, true, true).unwrap();
+        assert!(!pub_path.exists(), "pub file should be deleted");
+        assert_eq!(backend.key_count(), 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_one_of_several_leaves_others() {
+        let backend = mock_backend();
+        keygen(&backend, "keep-a", None, None, false, false, false).unwrap();
+        keygen(&backend, "remove-b", None, None, false, false, false).unwrap();
+        keygen(&backend, "keep-c", None, None, false, false, false).unwrap();
+
+        let labels = vec!["remove-b".to_string()];
+        delete(&backend, &labels, false, true).unwrap();
+
+        assert_eq!(backend.key_count(), 2);
+        assert!(backend.get("keep-a").is_ok());
+        assert!(backend.get("remove-b").is_err());
+        assert!(backend.get("keep-c").is_ok());
+    }
+
+    #[test]
+    fn delete_second_of_same_label_fails() {
+        // If we pass the same label twice, the first delete succeeds and the
+        // second will fail because the key was already verified to exist but
+        // actually the verification loop checks them all first.
+        // Actually delete() checks all keys exist upfront, so duplication
+        // will get the same KeyInfo twice. Then the second backend.delete()
+        // call will fail.
+        let backend = backend_with_key("dupe-del", None);
+        let labels = vec!["dupe-del".to_string(), "dupe-del".to_string()];
+        let result = delete(&backend, &labels, false, true);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // export_pub tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn export_pub_existing_key() {
+        let backend = backend_with_key("exp-key", Some("test@host".into()));
+        let result = export_pub(&backend, "exp-key", None, false, false, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_pub_nonexistent_key() {
+        let backend = mock_backend();
+        let result = export_pub(&backend, "missing-key", None, false, false, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn export_pub_with_output_file() {
+        let dir = test_dir("export-pub");
+        let out_path = dir.join("exported.pub");
+        let backend = backend_with_key("exp-file", Some("comment".into()));
+
+        export_pub(
+            &backend,
+            "exp-file",
+            Some(out_path.clone()),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(out_path.exists());
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        assert!(contents.contains("ecdsa-sha2-nistp256"));
+        assert!(contents.contains("comment"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_pub_output_to_nested_dir() {
+        let dir = test_dir("export-nested");
+        let out_path = dir.join("sub").join("dir").join("key.pub");
+        let backend = backend_with_key("exp-nested", None);
+
+        export_pub(
+            &backend,
+            "exp-nested",
+            Some(out_path.clone()),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(out_path.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_pub_fingerprint_only() {
+        let backend = backend_with_key("exp-fp", None);
+        let result = export_pub(&backend, "exp-fp", None, false, true, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_pub_fingerprint_only_json() {
+        let backend = backend_with_key("exp-fp-json", None);
+        let result = export_pub(&backend, "exp-fp-json", None, false, true, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_pub_json() {
+        let backend = backend_with_key("exp-json", Some("c".into()));
+        let result = export_pub(&backend, "exp-json", None, false, false, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_pub_authorized_keys_format() {
+        let backend = backend_with_key("exp-authkeys", None);
+        let result = export_pub(&backend, "exp-authkeys", None, true, false, false);
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // config_path test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_path_succeeds() {
+        let result = config_path();
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // config_show test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_show_succeeds() {
+        // This loads from default path. If no config exists, Config::load
+        // returns defaults, which is fine.
+        let result = config_show();
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // promote_to_default tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn promote_to_default_already_default_is_error() {
+        let result = promote_to_default("default");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already named 'default'"),
+            "error: {err_msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // openssh_print_config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn openssh_print_config_existing_key() {
+        let backend = backend_with_key("ssh-cfg", None);
+        let result = openssh_print_config(&backend, "ssh-cfg", "github.com", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn openssh_print_config_nonexistent_key() {
+        let backend = mock_backend();
+        let result = openssh_print_config(&backend, "ghost", "example.com", false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn openssh_print_config_pkcs11_mode() {
+        let backend = backend_with_key("pkcs-cfg", None);
+        let result = openssh_print_config(&backend, "pkcs-cfg", "*.example.com", true);
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // base64_wrap tests (private helper)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn base64_wrap_short_data() {
+        let result = base64_wrap(b"hello", 70);
+        assert!(!result.contains('\n'));
+        // Should be valid base64
+        assert_eq!(result, "aGVsbG8=");
+    }
+
+    #[test]
+    fn base64_wrap_wraps_at_width() {
+        // Generate enough data to produce multiple lines
+        let data = vec![0xAA; 100];
+        let result = base64_wrap(&data, 20);
+        for line in result.lines() {
+            assert!(line.len() <= 20, "line too long: {}", line.len());
+        }
+    }
+
+    #[test]
+    fn base64_wrap_empty_data() {
+        let result = base64_wrap(b"", 70);
+        assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // keygen end-to-end: verify key metadata after generation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn keygen_verifies_key_properties() {
+        let backend = mock_backend();
+        keygen(
+            &backend,
+            "verify-props",
+            Some("user@machine".into()),
+            None,
+            false,
+            true,
+            false,
+        )
+        .unwrap();
+
+        let info = backend.get("verify-props").unwrap();
+        assert_eq!(info.metadata.label.as_str(), "verify-props");
+        assert_eq!(info.metadata.comment.as_deref(), Some("user@machine"));
+        assert!(info.metadata.requires_user_presence);
+        assert_eq!(
+            info.metadata.algorithm.ssh_key_type(),
+            "ecdsa-sha2-nistp256"
+        );
+        assert!(!info.fingerprint_sha256.is_empty());
+        assert!(!info.fingerprint_md5.is_empty());
+        assert_eq!(info.public_key_bytes.len(), 65);
+        assert_eq!(info.public_key_bytes[0], 0x04); // Uncompressed EC point
+    }
+
+    // -----------------------------------------------------------------------
+    // delete verifies keys exist before deleting any
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delete_verifies_all_labels_exist_before_deleting() {
+        // If one label doesn't exist, no keys should be deleted
+        let backend = mock_backend();
+        keygen(&backend, "real-key", None, None, false, false, false).unwrap();
+        assert_eq!(backend.key_count(), 1);
+
+        let labels = vec!["real-key".to_string(), "fake-key".to_string()];
+        let result = delete(&backend, &labels, false, true);
+        assert!(result.is_err());
+        // The real key should still exist because the function checks all first
+        // Actually, looking at the code: it iterates labels calling backend.get()
+        // and fails on the second one. The first key is NOT yet deleted.
+        assert_eq!(backend.key_count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // export_pub authorized_keys with output file
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn export_pub_authorized_keys_to_file() {
+        let dir = test_dir("export-authkeys");
+        let out_path = dir.join("authorized_keys");
+        let backend = backend_with_key("authkeys-key", Some("test".into()));
+
+        export_pub(
+            &backend,
+            "authkeys-key",
+            Some(out_path.clone()),
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(out_path.exists());
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        assert!(contents.contains("ecdsa-sha2-nistp256"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Multiple keygen calls produce unique keys
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn keygen_multiple_keys_have_unique_fingerprints() {
+        let backend = mock_backend();
+        keygen(&backend, "uniq-1", None, None, false, false, false).unwrap();
+        keygen(&backend, "uniq-2", None, None, false, false, false).unwrap();
+        keygen(&backend, "uniq-3", None, None, false, false, false).unwrap();
+
+        let k1 = backend.get("uniq-1").unwrap();
+        let k2 = backend.get("uniq-2").unwrap();
+        let k3 = backend.get("uniq-3").unwrap();
+
+        assert_ne!(k1.fingerprint_sha256, k2.fingerprint_sha256);
+        assert_ne!(k2.fingerprint_sha256, k3.fingerprint_sha256);
+        assert_ne!(k1.fingerprint_sha256, k3.fingerprint_sha256);
+
+        assert_ne!(k1.public_key_bytes, k2.public_key_bytes);
+    }
+}

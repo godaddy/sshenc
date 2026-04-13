@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    uses: jgowdy/libenclaveapp/.github/workflows/reusable-release.yml@main
+    uses: godaddy/libenclaveapp/.github/workflows/reusable-release.yml@main
     with:
       app_name: sshenc
       targets: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]'
@@ -18,8 +18,8 @@ jobs:
       windows_binaries: "sshenc.exe sshenc-keygen.exe sshenc-agent.exe gitenc.exe"
       wix_file: "installer/sshenc.wxs"
       extra_packaging: '{"unix_libs":"libsshenc_pkcs11.dylib libsshenc_pkcs11.so","windows_dlls":"sshenc_pkcs11.dll"}'
-      homebrew: '{"tap_repo":"jgowdy/homebrew-sshenc","formula_class":"Sshenc","description":"Hardware-backed SSH key management"}'
-      scoop: '{"bucket_repo":"jgowdy/scoop-sshenc","description":"Hardware-backed SSH key management (Windows TPM 2.0)","has_winget":true}'
+      homebrew: '{"tap_repo":"godaddy/homebrew-sshenc","formula_class":"Sshenc","description":"Hardware-backed SSH key management"}'
+      scoop: '{"bucket_repo":"godaddy/scoop-sshenc","description":"Hardware-backed SSH key management (Windows TPM 2.0)","has_winget":true}'
     secrets:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}

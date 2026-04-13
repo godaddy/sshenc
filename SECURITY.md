@@ -7,7 +7,7 @@ If you discover a security vulnerability in sshenc, report it privately.
 **Do not open a public GitHub issue for security vulnerabilities.**
 
 Email: Report via GitHub's private vulnerability reporting feature on the
-[sshenc repository](https://github.com/jgowdy/sshenc/security/advisories/new),
+[sshenc repository](https://github.com/godaddy/sshenc/security/advisories/new),
 or contact the maintainer directly.
 
 Include:

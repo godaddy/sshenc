@@ -3,11 +3,11 @@ PackageIdentifier: JGowdy.sshenc
 PackageVersion: 0.3.6
 PackageLocale: en-US
 Publisher: Jay Gowdy
-PublisherUrl: https://github.com/jgowdy
+PublisherUrl: https://github.com/godaddy
 PackageName: sshenc
-PackageUrl: https://github.com/jgowdy/sshenc
+PackageUrl: https://github.com/godaddy/sshenc
 License: MIT
-LicenseUrl: https://github.com/jgowdy/sshenc/blob/main/LICENSE
+LicenseUrl: https://github.com/godaddy/sshenc/blob/main/LICENSE
 ShortDescription: Hardware-backed SSH key management using Windows TPM 2.0
 Description: |-
   sshenc creates, manages, and uses hardware-backed SSH keys for OpenSSH and git+ssh workflows.
@@ -22,6 +22,6 @@ Tags:
   - cryptography
   - ssh-agent
   - ssh-keys
-ReleaseNotesUrl: https://github.com/jgowdy/sshenc/releases/tag/v0.3.6
+ReleaseNotesUrl: https://github.com/godaddy/sshenc/releases/tag/v0.3.6
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

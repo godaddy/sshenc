@@ -5,7 +5,7 @@
 1. Install Rust 1.75+ via [rustup](https://rustup.rs/).
 2. Clone the repository:
    ```sh
-   git clone https://github.com/jgowdy/sshenc.git
+   git clone https://github.com/godaddy/sshenc.git
    cd sshenc
    ```
 3. Build and run tests:

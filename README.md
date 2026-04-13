@@ -12,12 +12,12 @@ keys. Nothing breaks when you install sshenc.
 
 ## Installation
 
-**[Download latest release](https://github.com/jgowdy/sshenc/releases/latest)** — pre-built binaries for macOS and Windows.
+**[Download latest release](https://github.com/godaddy/sshenc/releases/latest)** — pre-built binaries for macOS and Windows.
 
 ### Homebrew (macOS)
 
 ```sh
-brew tap jgowdy/sshenc
+brew tap godaddy/sshenc
 brew install sshenc
 ```
 
@@ -27,14 +27,14 @@ Developer account needed.
 ### Windows — MSI installer
 
 Download `sshenc-x86_64-pc-windows-msvc.msi` from the
-[latest release](https://github.com/jgowdy/sshenc/releases). Double-click
+[latest release](https://github.com/godaddy/sshenc/releases). Double-click
 to install. The installer adds sshenc to your PATH and runs `sshenc install`
 automatically. Uninstalling via Windows Settings runs `sshenc uninstall`.
 
 ### Windows — Scoop
 
 ```powershell
-scoop bucket add sshenc https://github.com/jgowdy/scoop-sshenc
+scoop bucket add sshenc https://github.com/godaddy/scoop-sshenc
 scoop install sshenc
 sshenc install
 ```
@@ -42,7 +42,7 @@ sshenc install
 ### Linux -- tarball
 
 Download `sshenc-x86_64-unknown-linux-gnu.tar.gz` from the
-[latest release](https://github.com/jgowdy/sshenc/releases). Extract and
+[latest release](https://github.com/godaddy/sshenc/releases). Extract and
 copy the binaries to a directory in your PATH:
 
 ```sh
@@ -57,7 +57,7 @@ Requires Rust 1.75+, Xcode command line tools, and macOS (Apple Silicon or
 T2 Mac).
 
 ```sh
-git clone https://github.com/jgowdy/sshenc.git
+git clone https://github.com/godaddy/sshenc.git
 cd sshenc
 make install
 ```
@@ -70,7 +70,7 @@ that macOS trusts for CryptoKit Secure Enclave access out of the box.
 Requires Rust 1.75+ and Visual Studio Build Tools.
 
 ```powershell
-git clone https://github.com/jgowdy/sshenc.git
+git clone https://github.com/godaddy/sshenc.git
 cd sshenc
 cargo build --workspace --release
 # Copy binaries to a directory in your PATH
@@ -82,7 +82,7 @@ Requires Rust 1.75+. For TPM support, install `tpm2-tss` development
 libraries (`libtss2-dev` on Debian/Ubuntu, `tpm2-tss-devel` on Fedora).
 
 ```sh
-git clone https://github.com/jgowdy/sshenc.git
+git clone https://github.com/godaddy/sshenc.git
 cd sshenc
 cargo build --workspace --release
 sudo cp target/release/sshenc target/release/sshenc-agent target/release/sshenc-keygen target/release/gitenc /usr/local/bin/
@@ -390,7 +390,7 @@ Config file: `~/Library/Application Support/sshenc/config.toml`
 | Linux (no TPM) | Software P-256 | Fallback, one-time warning |
 
 All platform-specific crypto is provided by
-[libenclaveapp](https://github.com/jgowdy/libenclaveapp).
+[libenclaveapp](https://github.com/godaddy/libenclaveapp).
 
 ## Security model
 

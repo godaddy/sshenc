@@ -16,7 +16,7 @@ Commands:
   - gitenc
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/jgowdy/sshenc/releases/download/v0.3.6/sshenc-x86_64-pc-windows-msvc.msi
+    InstallerUrl: https://github.com/godaddy/sshenc/releases/download/v0.3.6/sshenc-x86_64-pc-windows-msvc.msi
     InstallerSha256: 21293ED6DAC7D0EF44A8EC5292CB4EF6E79D444400317E71FB5E0C43756F2C5F
 ManifestType: installer
 ManifestVersion: 1.6.0

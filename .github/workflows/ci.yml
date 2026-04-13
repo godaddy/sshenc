@@ -7,7 +7,7 @@ on:
 
 jobs:
   ci:
-    uses: jgowdy/libenclaveapp/.github/workflows/reusable-ci.yml@main
+    uses: godaddy/libenclaveapp/.github/workflows/reusable-ci.yml@main
     with:
       platforms: '["macos-latest", "windows-latest", "ubuntu-latest"]'
       linux_deps: "libdbus-1-dev pkg-config libtss2-dev"

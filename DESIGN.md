@@ -25,7 +25,7 @@ Rust workspace with 9 crates under `crates/`:
 ### Platform Backends
 
 All platform-specific crypto is delegated to
-[libenclaveapp](https://github.com/jgowdy/libenclaveapp). sshenc depends on
+[libenclaveapp](https://github.com/godaddy/libenclaveapp). sshenc depends on
 the `signing` feature of each platform crate:
 
 | Platform | Backend | Hardware |

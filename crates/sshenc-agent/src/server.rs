@@ -51,11 +51,10 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".ssh");
 
-    #[cfg(target_os = "macos")]
-    let backend: Arc<dyn KeyBackend> =
-        Arc::new(sshenc_se::SecureEnclaveBackend::new(ssh_dir.clone()));
-    #[cfg(target_os = "linux")]
-    let backend: Arc<dyn KeyBackend> = Arc::new(sshenc_se::LinuxBackend::new(ssh_dir.clone()));
+    let backend: Arc<dyn KeyBackend> = Arc::new(
+        sshenc_se::SshencBackend::new(ssh_dir.clone())
+            .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
+    );
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
 
@@ -92,7 +91,10 @@ pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result
         .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
         .join(".ssh");
 
-    let backend: Arc<dyn KeyBackend> = Arc::new(sshenc_se::TpmBackend::new(ssh_dir.clone()));
+    let backend: Arc<dyn KeyBackend> = Arc::new(
+        sshenc_se::SshencBackend::new(ssh_dir.clone())
+            .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
+    );
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
 

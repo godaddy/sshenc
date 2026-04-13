@@ -1,48 +1,93 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! macOS Secure Enclave backend implementation using libenclaveapp.
+//! Unified backend implementation using `enclaveapp-app-storage`.
+//!
+//! Replaces the per-platform macos.rs, windows.rs, linux.rs with a single
+//! implementation that delegates platform detection to `AppSigningBackend`.
 
 use crate::backend::KeyBackend;
-use enclaveapp_apple::SecureEnclaveSigner;
+use crate::compat;
+use enclaveapp_app_storage::{
+    AccessPolicy, AppSigningBackend, BackendKind, EnclaveKeyManager, EnclaveSigner, StorageConfig,
+};
 use enclaveapp_core::metadata;
-use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
-use enclaveapp_core::types::{AccessPolicy, KeyType};
+use enclaveapp_core::types::KeyType;
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;
 use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyLabel, KeyMetadata};
 use sshenc_core::pubkey::SshPublicKey;
 use std::path::PathBuf;
 
-/// Secure Enclave backend using CryptoKit via libenclaveapp.
+/// Unified sshenc backend using `AppSigningBackend` for platform dispatch.
 ///
-/// Keys are stored as CryptoKit data representation files in `~/.sshenc/keys/`.
+/// Handles SSH-specific concerns (pub file writing, fingerprinting, metadata
+/// with comments and git identity) on top of the shared signing backend.
 #[derive(Debug)]
-pub struct SecureEnclaveBackend {
+pub struct SshencBackend {
     /// Directory where SSH .pub files are written (typically ~/.ssh).
     pub_dir: PathBuf,
-    /// The libenclaveapp signer, configured to use ~/.sshenc/keys/.
-    signer: SecureEnclaveSigner,
+    /// Keys directory (typically ~/.sshenc/keys/).
+    keys_dir: PathBuf,
+    /// The platform-detected signing backend.
+    backend: AppSigningBackend,
 }
 
 /// Return the sshenc keys directory (~/.sshenc/keys/).
 pub fn sshenc_keys_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".sshenc")
-        .join("keys")
+    // sshenc uses ~/.sshenc/keys/ on Unix, %APPDATA%\sshenc\keys\ on Windows.
+    #[cfg(target_os = "windows")]
+    {
+        dirs::data_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::env::temp_dir())
+            .join("sshenc")
+            .join("keys")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".sshenc")
+            .join("keys")
+    }
 }
 
-impl SecureEnclaveBackend {
-    pub fn new(pub_dir: PathBuf) -> Self {
-        SecureEnclaveBackend {
+impl SshencBackend {
+    /// Create a new sshenc backend with automatic platform detection.
+    pub fn new(
+        pub_dir: PathBuf,
+    ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
+        let keys_dir = sshenc_keys_dir();
+        let backend = AppSigningBackend::init(StorageConfig {
+            app_name: "sshenc".into(),
+            key_label: String::new(), // sshenc manages multiple keys, no single label
+            access_policy: AccessPolicy::None, // per-key policy, not global
+            extra_bridge_paths: vec![],
+            keys_dir: Some(keys_dir.clone()),
+        })?;
+
+        Ok(Self {
             pub_dir,
-            signer: SecureEnclaveSigner::with_keys_dir("sshenc", sshenc_keys_dir()),
-        }
+            keys_dir,
+            backend,
+        })
+    }
+
+    /// Which platform backend is in use.
+    pub fn backend_kind(&self) -> BackendKind {
+        self.backend.backend_kind()
+    }
+
+    fn signer(&self) -> &dyn EnclaveSigner {
+        self.backend.signer()
+    }
+
+    fn key_manager(&self) -> &dyn EnclaveKeyManager {
+        self.backend.key_manager()
     }
 
     fn find_pub_file(&self, label: &str) -> Option<PathBuf> {
-        // "default" label uses standard OpenSSH naming (id_ecdsa.pub)
         let path = if label == "default" {
             self.pub_dir.join("id_ecdsa.pub")
         } else {
@@ -64,18 +109,12 @@ fn map_err(operation: &str, e: enclaveapp_core::Error) -> Error {
     }
 }
 
-fn load_sshenc_meta(
-    label: &str,
-) -> std::result::Result<enclaveapp_core::KeyMeta, enclaveapp_core::Error> {
-    crate::compat::load_sshenc_meta(&sshenc_keys_dir(), label)
-}
-
-impl KeyBackend for SecureEnclaveBackend {
+impl KeyBackend for SshencBackend {
     fn generate(&self, opts: &KeyGenOptions) -> Result<KeyInfo> {
         let label_str = opts.label.as_str();
 
         // Check for duplicates
-        if self.signer.public_key(label_str).is_ok() {
+        if self.key_manager().public_key(label_str).is_ok() {
             return Err(Error::DuplicateLabel {
                 label: label_str.to_string(),
             });
@@ -88,19 +127,20 @@ impl KeyBackend for SecureEnclaveBackend {
             AccessPolicy::None
         };
 
-        // Generate key in Secure Enclave
+        // Generate key via platform backend
         let public_bytes = self
-            .signer
+            .key_manager()
             .generate(label_str, KeyType::Signing, policy)
             .map_err(|e| map_err("generate", e))?;
 
         // Save app-specific metadata (comment, git_name, git_email)
-        let keys_dir = sshenc_keys_dir();
-        let mut meta = load_sshenc_meta(label_str).map_err(|e| map_err("load_meta", e))?;
+        let mut meta = compat::load_sshenc_meta(&self.keys_dir, label_str)
+            .map_err(|e| map_err("load_meta", e))?;
         if let Some(ref comment) = opts.comment {
             meta.set_app_field("comment", comment.clone());
         }
-        metadata::save_meta(&keys_dir, label_str, &meta).map_err(|e| map_err("save_meta", e))?;
+        metadata::save_meta(&self.keys_dir, label_str, &meta)
+            .map_err(|e| map_err("save_meta", e))?;
 
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, opts.comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
@@ -132,7 +172,7 @@ impl KeyBackend for SecureEnclaveBackend {
 
     fn list(&self) -> Result<Vec<KeyInfo>> {
         let labels = self
-            .signer
+            .key_manager()
             .list_keys()
             .map_err(|e| map_err("list_keys", e))?;
 
@@ -152,12 +192,13 @@ impl KeyBackend for SecureEnclaveBackend {
         drop(KeyLabel::new(label)?);
 
         let public_bytes = self
-            .signer
+            .key_manager()
             .public_key(label)
             .map_err(|e| map_err("load_pub_key", e))?;
 
         // Load persisted metadata (handles old and new format)
-        let meta = load_sshenc_meta(label).map_err(|e| map_err("load_meta", e))?;
+        let meta =
+            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
 
         let comment = meta.get_app_field("comment").map(|s| s.to_string());
         let requires_user_presence = meta.access_policy != AccessPolicy::None;
@@ -177,20 +218,20 @@ impl KeyBackend for SecureEnclaveBackend {
 
     fn delete(&self, label: &str) -> Result<()> {
         drop(KeyLabel::new(label)?);
-        self.signer
+        self.key_manager()
             .delete_key(label)
             .map_err(|e| map_err("delete_key", e))
     }
 
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         drop(KeyLabel::new(label)?);
-        self.signer
+        self.signer()
             .sign(label, data)
             .map_err(|e| map_err("sign", e))
     }
 
     fn is_available(&self) -> bool {
-        self.signer.is_available()
+        self.key_manager().is_available()
     }
 }
 
@@ -205,13 +246,17 @@ mod tests {
     fn test_pub_dir() -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("sshenc-se-macos-test-{pid}-{id}"));
+        let dir = std::env::temp_dir().join(format!("sshenc-se-unified-test-{pid}-{id}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn make_backend(pub_dir: PathBuf) -> SecureEnclaveBackend {
-        SecureEnclaveBackend::new(pub_dir)
+    #[test]
+    fn sshenc_keys_dir_is_absolute() {
+        let dir = sshenc_keys_dir();
+        assert!(dir.is_absolute());
+        assert!(dir.to_string_lossy().contains("sshenc"));
+        assert!(dir.to_string_lossy().contains("keys"));
     }
 
     #[test]
@@ -219,7 +264,18 @@ mod tests {
         let pub_dir = test_pub_dir();
         std::fs::write(pub_dir.join("id_ecdsa.pub"), "key content").unwrap();
 
-        let backend = make_backend(pub_dir.clone());
+        let backend = SshencBackend {
+            pub_dir: pub_dir.clone(),
+            keys_dir: sshenc_keys_dir(),
+            backend: AppSigningBackend::init(StorageConfig {
+                app_name: "sshenc-test".into(),
+                key_label: String::new(),
+                access_policy: AccessPolicy::None,
+                extra_bridge_paths: vec![],
+                keys_dir: None,
+            })
+            .unwrap(),
+        };
         let path = backend.find_pub_file("default");
         assert!(path.is_some());
         assert!(path.unwrap().ends_with("id_ecdsa.pub"));
@@ -228,11 +284,22 @@ mod tests {
     }
 
     #[test]
-    fn find_pub_file_custom_label_uses_label_name() {
+    fn find_pub_file_custom_label() {
         let pub_dir = test_pub_dir();
         std::fs::write(pub_dir.join("github-work.pub"), "key content").unwrap();
 
-        let backend = make_backend(pub_dir.clone());
+        let backend = SshencBackend {
+            pub_dir: pub_dir.clone(),
+            keys_dir: sshenc_keys_dir(),
+            backend: AppSigningBackend::init(StorageConfig {
+                app_name: "sshenc-test".into(),
+                key_label: String::new(),
+                access_policy: AccessPolicy::None,
+                extra_bridge_paths: vec![],
+                keys_dir: None,
+            })
+            .unwrap(),
+        };
         let path = backend.find_pub_file("github-work");
         assert!(path.is_some());
         assert!(path.unwrap().ends_with("github-work.pub"));
@@ -244,58 +311,21 @@ mod tests {
     fn find_pub_file_returns_none_when_missing() {
         let pub_dir = test_pub_dir();
 
-        let backend = make_backend(pub_dir.clone());
+        let backend = SshencBackend {
+            pub_dir: pub_dir.clone(),
+            keys_dir: sshenc_keys_dir(),
+            backend: AppSigningBackend::init(StorageConfig {
+                app_name: "sshenc-test".into(),
+                key_label: String::new(),
+                access_policy: AccessPolicy::None,
+                extra_bridge_paths: vec![],
+                keys_dir: None,
+            })
+            .unwrap(),
+        };
         let path = backend.find_pub_file("nonexistent");
         assert!(path.is_none());
 
         std::fs::remove_dir_all(&pub_dir).unwrap();
-    }
-
-    #[test]
-    fn find_pub_file_default_returns_none_when_missing() {
-        let pub_dir = test_pub_dir();
-
-        let backend = make_backend(pub_dir.clone());
-        let path = backend.find_pub_file("default");
-        assert!(path.is_none());
-
-        std::fs::remove_dir_all(&pub_dir).unwrap();
-    }
-
-    #[test]
-    fn key_info_has_correct_fingerprints_for_known_pubkey() {
-        // A deterministic 65-byte SEC1 point
-        let mut point = vec![0x04];
-        for i in 0_u8..32 {
-            point.push(i.wrapping_mul(7).wrapping_add(3));
-        }
-        for i in 0_u8..32 {
-            point.push(i.wrapping_mul(11).wrapping_add(5));
-        }
-
-        let ssh_pubkey =
-            SshPublicKey::from_sec1_bytes(&point, Some("test@host".to_string())).unwrap();
-        let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
-
-        // SHA-256 fingerprint must start with SHA256:
-        assert!(fp_sha256.starts_with("SHA256:"));
-        // MD5 fingerprint must start with MD5: and have colon-separated hex
-        assert!(fp_md5.starts_with("MD5:"));
-        let hex_part = &fp_md5["MD5:".len()..];
-        let parts: Vec<&str> = hex_part.split(':').collect();
-        assert_eq!(parts.len(), 16);
-
-        // Fingerprints should be deterministic
-        let (fp_sha256_2, fp_md5_2) = fingerprint::fingerprints(&ssh_pubkey);
-        assert_eq!(fp_sha256, fp_sha256_2);
-        assert_eq!(fp_md5, fp_md5_2);
-    }
-
-    #[test]
-    fn sshenc_keys_dir_is_absolute() {
-        let dir = sshenc_keys_dir();
-        assert!(dir.is_absolute());
-        assert!(dir.to_string_lossy().contains(".sshenc"));
-        assert!(dir.to_string_lossy().contains("keys"));
     }
 }

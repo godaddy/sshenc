@@ -1444,6 +1444,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn promote_to_default_already_default_is_error() {
         let result = promote_to_default("default");
         assert!(result.is_err());

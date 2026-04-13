@@ -70,8 +70,13 @@ pub fn install_block(
         return Ok(InstallResult::AlreadyPresent);
     }
 
-    // Quote paths in case they contain spaces
+    // Quote paths in case they contain spaces.
+    // On Windows, use forward slashes for the pipe path — OpenSSH's config
+    // parser treats backslashes as escape characters, mangling \\.\pipe\...
+    // into \.\pipe\... which fails to connect.
     let socket_str = socket_path.display().to_string();
+    #[cfg(target_os = "windows")]
+    let socket_str = socket_str.replace('\\', "/");
     let socket_quoted = if socket_str.contains(' ') {
         format!("\"{socket_str}\"")
     } else {

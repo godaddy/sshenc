@@ -40,7 +40,7 @@ pub fn sshenc_keys_dir() -> PathBuf {
     {
         dirs::data_dir()
             .or_else(dirs::home_dir)
-            .unwrap_or_else(|| std::env::temp_dir())
+            .unwrap_or_else(std::env::temp_dir)
             .join("sshenc")
             .join("keys")
     }

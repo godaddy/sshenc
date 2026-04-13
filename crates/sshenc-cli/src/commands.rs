@@ -414,7 +414,8 @@ pub fn install() -> Result<()> {
     // SSH client) to connect to the sshenc agent.
     #[cfg(target_os = "windows")]
     {
-        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(r"C:\Users\Default"));
+        let home =
+            dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(r"C:\Users\Default"));
         let sock_path = home.join(".sshenc").join("agent.sock");
         let sock_str = sock_path.to_string_lossy();
         let status = std::process::Command::new("setx")
@@ -433,13 +434,7 @@ pub fn install() -> Result<()> {
 
         // Remove GIT_SSH_COMMAND if it was set by an older sshenc version
         let _ = std::process::Command::new("reg")
-            .args([
-                "delete",
-                "HKCU\\Environment",
-                "/v",
-                "GIT_SSH_COMMAND",
-                "/f",
-            ])
+            .args(["delete", "HKCU\\Environment", "/v", "GIT_SSH_COMMAND", "/f"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();

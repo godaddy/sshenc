@@ -167,6 +167,7 @@ fn find_agent_binary() -> Result<PathBuf, String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

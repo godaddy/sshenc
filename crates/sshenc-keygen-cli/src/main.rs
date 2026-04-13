@@ -55,14 +55,8 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".ssh");
 
-    #[cfg(target_os = "macos")]
-    let backend = sshenc_se::SecureEnclaveBackend::new(pub_dir.clone());
-    #[cfg(target_os = "windows")]
-    let backend = sshenc_se::TpmBackend::new(pub_dir.clone());
-    #[cfg(target_os = "linux")]
-    let backend = sshenc_se::LinuxBackend::new(pub_dir.clone());
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    anyhow::bail!("sshenc requires macOS, Windows, or Linux");
+    let backend = sshenc_se::SshencBackend::new(pub_dir.clone())
+        .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?;
 
     let write_pub = if cli.no_pub_file {
         None

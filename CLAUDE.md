@@ -27,7 +27,7 @@ Rust workspace under `crates/`:
 
 - **sshenc-core** — Domain models, SSH public key encoding (ecdsa-sha2-nistp256), fingerprints (SHA-256/MD5), config model, shared error types. No platform-specific code.
 - **sshenc-ffi-apple** — Apple Security.framework bridge. All raw Apple API calls isolated here. Defines `kSecAttrApplicationTag` via extern link since it's missing from `security-framework-sys`. Keys tagged with `sshenc:<label>` Keychain label and `com.sshenc.key.<label>` application tag.
-- **sshenc-se** — High-level key operations via `KeyBackend` trait. Platform backends: `macos.rs` (Secure Enclave via `sshenc-ffi-apple`), `windows.rs` (TPM via `enclaveapp-windows`), `linux.rs` (software-backed via `enclaveapp-software`). The trait enables mock backends for testing.
+- **sshenc-se** — High-level key operations via `KeyBackend` trait. Unified `SshencBackend` uses `enclaveapp-app-storage::AppSigningBackend` for automatic platform detection (Secure Enclave, TPM, software). SSH-specific logic (pub file management, fingerprinting, metadata) stays in this crate. The trait enables mock backends for testing.
 - **sshenc-agent-proto** — SSH agent protocol: message parsing/serialization, DER-to-SSH signature conversion. Implements identity enumeration and sign request/response.
 - **sshenc-agent** — SSH agent daemon (tokio async). Unix socket server, key selection by label allowlist. Both a library (`sshenc_agent::server`) and binary (`sshenc-agent`).
 - **sshenc-cli** — Main CLI (`sshenc`). Subcommands: keygen, list, inspect, delete, export-pub, agent, config, openssh. Uses sshenc-agent library for embedded agent mode.

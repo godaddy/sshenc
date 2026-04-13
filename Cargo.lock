@@ -410,6 +410,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-app-storage"
+version = "0.1.0"
+dependencies = [
+ "enclaveapp-apple",
+ "enclaveapp-bridge",
+ "enclaveapp-core",
+ "enclaveapp-linux-tpm",
+ "enclaveapp-software",
+ "enclaveapp-windows",
+ "enclaveapp-wsl",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "enclaveapp-apple"
 version = "0.1.0"
 dependencies = [
@@ -417,6 +432,16 @@ dependencies = [
  "dirs",
  "enclaveapp-core",
  "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "enclaveapp-bridge"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "enclaveapp-core",
  "serde",
  "serde_json",
 ]
@@ -1340,11 +1365,8 @@ name = "sshenc-se"
 version = "0.6.1"
 dependencies = [
  "dirs",
- "enclaveapp-apple",
+ "enclaveapp-app-storage",
  "enclaveapp-core",
- "enclaveapp-linux-tpm",
- "enclaveapp-software",
- "enclaveapp-windows",
  "serde_json",
  "sshenc-core",
  "thiserror",

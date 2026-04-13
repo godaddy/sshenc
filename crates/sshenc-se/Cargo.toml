@@ -10,20 +10,11 @@ repository.workspace = true
 [dependencies]
 sshenc-core = { workspace = true }
 enclaveapp-core = { workspace = true }
+enclaveapp-app-storage = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-enclaveapp-apple = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-enclaveapp-windows = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-enclaveapp-software = { workspace = true }
-enclaveapp-linux-tpm = { workspace = true }
 
 [lints]
 workspace = true

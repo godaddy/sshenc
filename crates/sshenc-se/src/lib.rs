@@ -3,29 +3,14 @@
 
 //! Hardware-backed key management operations for sshenc.
 //!
-//! Provides a trait-based abstraction over key operations, with platform-specific
-//! implementations for macOS (Secure Enclave), Windows (TPM 2.0), and Linux
-//! (software-backed ECDSA P-256).
+//! Uses `enclaveapp-app-storage` for platform detection and backend
+//! initialization. The `SshencBackend` wraps the platform-specific signer
+//! and adds SSH-specific logic (pub file management, fingerprinting,
+//! metadata with comments and git identity).
 
 pub mod backend;
 pub mod compat;
-
-#[cfg(target_os = "macos")]
-pub mod macos;
-
-#[cfg(target_os = "windows")]
-pub mod windows;
-
-#[cfg(target_os = "linux")]
-pub mod linux;
+mod unified;
 
 pub use backend::KeyBackend;
-
-#[cfg(target_os = "macos")]
-pub use macos::SecureEnclaveBackend;
-
-#[cfg(target_os = "windows")]
-pub use windows::TpmBackend;
-
-#[cfg(target_os = "linux")]
-pub use linux::LinuxBackend;
+pub use unified::SshencBackend;

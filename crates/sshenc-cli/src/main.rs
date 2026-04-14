@@ -305,14 +305,15 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 let has_private = private_path.exists() && private_path != *path;
 
                 if has_private {
-                    // Back up the existing key pair before overwriting
-                    let priv_bak = private_path.with_extension("bak");
-                    let pub_bak = PathBuf::from(format!("{}.bak", path.display()));
+                    let backups = sshenc_core::backup::backup_existing_key_material(path)?;
                     eprintln!("Backing up existing key pair:");
-                    eprintln!("  {} → {}", private_path.display(), priv_bak.display());
-                    eprintln!("  {} → {}", path.display(), pub_bak.display());
-                    std::fs::rename(&private_path, &priv_bak)?;
-                    std::fs::rename(path, &pub_bak)?;
+                    for entry in backups.entries() {
+                        eprintln!(
+                            "  {} → {}",
+                            entry.original().display(),
+                            entry.backup().display()
+                        );
+                    }
                 } else if path.exists() {
                     eprintln!("{} already exists.", path.display());
                     eprint!("Overwrite (y/n)? ");

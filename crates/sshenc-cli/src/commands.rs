@@ -1646,6 +1646,7 @@ fn base64_wrap(data: &[u8], width: usize) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "windows"))]
     use enclaveapp_core::{AccessPolicy, KeyType};
     use sshenc_test_support::MockKeyBackend;
     use std::sync::atomic::{AtomicU64, Ordering};

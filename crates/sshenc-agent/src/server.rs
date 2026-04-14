@@ -114,11 +114,11 @@ pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result
     {
         use socket2::{Domain, SockAddr, Socket, Type};
 
-        let sock_path = dirs::home_dir()
+        let sock_dir = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
-            .join(".sshenc")
-            .join("agent.sock");
-        let _unused = std::fs::create_dir_all(sock_path.parent().unwrap());
+            .join(".sshenc");
+        let sock_path = sock_dir.join("agent.sock");
+        let _unused = std::fs::create_dir_all(&sock_dir);
         let _unused = std::fs::remove_file(&sock_path);
 
         let backend_for_unix = Arc::clone(&backend);

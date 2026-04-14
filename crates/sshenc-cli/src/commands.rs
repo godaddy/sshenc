@@ -424,11 +424,7 @@ pub fn install() -> Result<()> {
         // This lets ssh-add and other tools that don't read IdentityAgent
         // from the config find the agent. Forward slashes avoid escape
         // processing issues in various shells.
-        let pipe_path = config
-            .socket_path
-            .display()
-            .to_string()
-            .replace('\\', "/");
+        let pipe_path = config.socket_path.display().to_string().replace('\\', "/");
         let status = std::process::Command::new("setx")
             .args(["SSH_AUTH_SOCK", &pipe_path])
             .stdout(std::process::Stdio::null())

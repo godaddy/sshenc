@@ -24,7 +24,7 @@ and released as quickly as possible, with credit given to the reporter
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes |
+| 0.6.x | Yes |
 
 Only the latest release receives security fixes.
 

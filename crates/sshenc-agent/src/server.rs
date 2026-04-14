@@ -383,6 +383,24 @@ fn handle_request(
                 return Ok(AgentResponse::Failure);
             }
 
+            // Verify user presence if required
+            if key.metadata.requires_user_presence {
+                #[cfg(target_os = "windows")]
+                {
+                    let msg = format!(
+                        "sshenc: Verify your identity to sign with key '{}'",
+                        key.metadata.label
+                    );
+                    if let Err(e) = enclaveapp_windows::ui_policy::verify_user_presence(&msg) {
+                        tracing::warn!(
+                            label = key.metadata.label.as_str(),
+                            "user presence verification failed: {e}"
+                        );
+                        return Ok(AgentResponse::Failure);
+                    }
+                }
+            }
+
             // Sign with Secure Enclave
             let der_sig = backend.sign(key.metadata.label.as_str(), &data)?;
             let ssh_sig = signature::der_to_ssh_signature(&der_sig)?;

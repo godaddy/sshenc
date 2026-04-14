@@ -76,24 +76,18 @@ fn configure_repo(label: Option<&str>) {
         signing_key_path(&home, effective_label).unwrap_or_else(|err| exit_invalid_label(&err));
 
     // Find sshenc binary (same directory as gitenc, or in PATH)
-    let sshenc_bin = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("sshenc")))
-        .filter(|p| p.exists())
-        .or_else(|| {
-            Command::new("which")
-                .arg("sshenc")
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| {
-                    String::from_utf8(o.stdout)
-                        .ok()
-                        .map(|s| std::path::PathBuf::from(s.trim()))
-                })
-        })
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "sshenc".to_string());
+    let sshenc_bin = {
+        #[cfg(windows)]
+        let binary_name = "sshenc.exe";
+        #[cfg(not(windows))]
+        let binary_name = "sshenc";
+        sshenc_core::bin_discovery::find_trusted_binary(binary_name)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| {
+                eprintln!("gitenc: trusted sshenc binary not found");
+                std::process::exit(1);
+            })
+    };
 
     // Try to load identity from key metadata
     let meta_dir = dirs::home_dir()

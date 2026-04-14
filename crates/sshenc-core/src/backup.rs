@@ -35,14 +35,54 @@ impl BackupPlan {
     pub fn entries(&self) -> &[FileBackup] {
         &self.entries
     }
+
+    pub fn restore(&self) -> Result<()> {
+        rollback_backups(&self.entries)
+    }
 }
 
-pub fn backup_existing_key_material(public_path: &Path) -> Result<BackupPlan> {
-    let private_path = public_path.with_extension("");
+#[derive(Debug)]
+pub enum BackupExecutionError<E> {
+    Backup(crate::error::Error),
+    Operation(E),
+    Rollback {
+        operation: E,
+        rollback: crate::error::Error,
+    },
+}
+
+pub fn with_existing_key_material_backup<T, E, F>(
+    public_path: &Path,
+    paired_private_path: Option<&Path>,
+    operation: F,
+) -> std::result::Result<T, BackupExecutionError<E>>
+where
+    F: FnOnce() -> std::result::Result<T, E>,
+{
+    let plan = backup_existing_key_material(public_path, paired_private_path)
+        .map_err(BackupExecutionError::Backup)?;
+    match operation() {
+        Ok(value) => Ok(value),
+        Err(operation) => match plan.restore() {
+            Ok(()) => Err(BackupExecutionError::Operation(operation)),
+            Err(rollback) => Err(BackupExecutionError::Rollback {
+                operation,
+                rollback,
+            }),
+        },
+    }
+}
+
+pub fn backup_existing_key_material(
+    public_path: &Path,
+    paired_private_path: Option<&Path>,
+) -> Result<BackupPlan> {
     let mut paths = Vec::new();
 
-    if private_path != public_path && private_path.exists() {
-        paths.push(private_path);
+    if let Some(private_path) = paired_private_path.filter(|path| *path != public_path) {
+        if private_path.exists() {
+            paths.push(private_path.to_path_buf());
+        }
     }
     if public_path.exists() {
         paths.push(public_path.to_path_buf());
@@ -124,7 +164,7 @@ mod tests {
         std::fs::write(&private_path, "private").unwrap();
         std::fs::write(&public_path, "public").unwrap();
 
-        let plan = backup_existing_key_material(&public_path).unwrap();
+        let plan = backup_existing_key_material(&public_path, Some(&private_path)).unwrap();
         assert_eq!(plan.entries.len(), 2);
         assert!(!private_path.exists());
         assert!(!public_path.exists());
@@ -147,7 +187,7 @@ mod tests {
         let private_path = dir.join("id_ecdsa");
         std::fs::write(&private_path, "private").unwrap();
 
-        let plan = backup_existing_key_material(&public_path).unwrap();
+        let plan = backup_existing_key_material(&public_path, Some(&private_path)).unwrap();
         assert_eq!(plan.entries.len(), 1);
         assert!(!private_path.exists());
         assert!(!public_path.exists());
@@ -175,6 +215,88 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&existing).unwrap(), "private");
         assert!(
             err.to_string().contains("No such file") || err.to_string().contains("cannot find")
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn with_existing_key_material_backup_restores_files_after_operation_failure() {
+        let dir = test_dir("operation-failure");
+        let public_path = dir.join("id_ecdsa.pub");
+        let private_path = dir.join("id_ecdsa");
+        std::fs::write(&private_path, "private").unwrap();
+        std::fs::write(&public_path, "public").unwrap();
+
+        let error = with_existing_key_material_backup::<(), _, _>(
+            &public_path,
+            Some(&private_path),
+            || Err::<(), _>("generation failed"),
+        )
+        .unwrap_err();
+
+        match error {
+            BackupExecutionError::Operation(message) => {
+                assert_eq!(message, "generation failed");
+            }
+            other => panic!("expected operation failure, got {other:?}"),
+        }
+
+        assert_eq!(std::fs::read_to_string(&private_path).unwrap(), "private");
+        assert_eq!(std::fs::read_to_string(&public_path).unwrap(), "public");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn with_existing_key_material_backup_reports_rollback_failure() {
+        let dir = test_dir("rollback-failure");
+        let public_path = dir.join("id_ecdsa.pub");
+        let private_path = dir.join("id_ecdsa");
+        std::fs::write(&private_path, "private").unwrap();
+        std::fs::write(&public_path, "public").unwrap();
+
+        let error = with_existing_key_material_backup::<(), _, _>(
+            &public_path,
+            Some(&private_path),
+            || {
+                std::fs::create_dir(&private_path).unwrap();
+                Err::<(), _>("generation failed")
+            },
+        )
+        .unwrap_err();
+
+        match error {
+            BackupExecutionError::Rollback {
+                operation,
+                rollback,
+            } => {
+                assert_eq!(operation, "generation failed");
+                assert!(!rollback.to_string().is_empty());
+            }
+            other => panic!("expected rollback failure, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn backup_existing_key_material_only_moves_explicit_paths() {
+        let dir = test_dir("explicit-paths");
+        let public_path = dir.join("custom-output.pub");
+        let sibling_path = dir.join("custom-output");
+        std::fs::write(&public_path, "public").unwrap();
+        std::fs::write(&sibling_path, "not-a-private-key").unwrap();
+
+        let plan = backup_existing_key_material(&public_path, None).unwrap();
+        assert_eq!(plan.entries.len(), 1);
+        assert!(
+            sibling_path.exists(),
+            "unrelated sibling file should not be moved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sibling_path).unwrap(),
+            "not-a-private-key"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

@@ -5,12 +5,42 @@
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
+use sshenc_core::backup::{self, BackupExecutionError};
 use std::path::PathBuf;
 
 mod commands;
 #[cfg(target_os = "windows")]
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 mod wsl;
+
+fn run_with_existing_key_backup<T, F>(
+    public_path: Option<&PathBuf>,
+    paired_private_path: Option<&PathBuf>,
+    operation: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let Some(public_path) = public_path else {
+        return operation();
+    };
+
+    match backup::with_existing_key_material_backup(
+        public_path,
+        paired_private_path.map(PathBuf::as_path),
+        operation,
+    ) {
+        Ok(value) => Ok(value),
+        Err(BackupExecutionError::Backup(error)) => Err(error.into()),
+        Err(BackupExecutionError::Operation(error)) => Err(error),
+        Err(BackupExecutionError::Rollback {
+            operation,
+            rollback,
+        }) => Err(anyhow::anyhow!(
+            "{operation}; failed to restore backed up SSH key material: {rollback}"
+        )),
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -286,8 +316,8 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
         } => {
             let pub_path = if no_pub_file {
                 None
-            } else if let Some(path) = write_pub {
-                Some(path)
+            } else if let Some(path) = write_pub.as_ref() {
+                Some(path.clone())
             } else {
                 let ssh_dir = dirs::home_dir()
                     .expect("could not determine home directory")
@@ -299,21 +329,19 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                     Some(ssh_dir.join(format!("{label}.pub")))
                 }
             };
+            let paired_private_path = if write_pub.is_none() && !no_pub_file && label == "default" {
+                pub_path.as_ref().map(|path| path.with_extension(""))
+            } else {
+                None
+            };
             // Check for existing files before overwriting (like ssh-keygen)
             if let Some(ref path) = pub_path {
-                let private_path = path.with_extension("");
-                let has_private = private_path.exists() && private_path != *path;
+                let has_private = paired_private_path
+                    .as_ref()
+                    .is_some_and(|private_path| private_path.exists() && private_path != path);
 
                 if has_private {
-                    let backups = sshenc_core::backup::backup_existing_key_material(path)?;
-                    eprintln!("Backing up existing key pair:");
-                    for entry in backups.entries() {
-                        eprintln!(
-                            "  {} → {}",
-                            entry.original().display(),
-                            entry.backup().display()
-                        );
-                    }
+                    eprintln!("Existing SSH key pair will be backed up before generation.");
                 } else if path.exists() {
                     eprintln!("{} already exists.", path.display());
                     eprint!("Overwrite (y/n)? ");
@@ -332,15 +360,17 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 .as_deref()
                 .map(|p| p != "none")
                 .unwrap_or(require_user_presence);
-            commands::keygen(
-                backend,
-                &label,
-                comment,
-                pub_path,
-                print_pub,
-                user_presence,
-                json,
-            )
+            run_with_existing_key_backup(pub_path.as_ref(), paired_private_path.as_ref(), || {
+                commands::keygen(
+                    backend,
+                    &label,
+                    comment,
+                    pub_path.clone(),
+                    print_pub,
+                    user_presence,
+                    json,
+                )
+            })
         }
         Commands::List { json } => commands::list(backend, json),
         Commands::Inspect {

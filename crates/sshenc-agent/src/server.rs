@@ -12,11 +12,10 @@ use sshenc_agent_proto::signature;
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_se::KeyBackend;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::signal;
 
-#[cfg(unix)]
-use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -25,21 +24,12 @@ use tokio::net::UnixListener;
 /// Run the SSH agent server on a Unix socket.
 #[cfg(unix)]
 #[allow(clippy::print_stdout)]
-pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Result<()> {
+pub async fn run_agent(
+    socket_path: PathBuf,
+    allowed_labels: Vec<String>,
+    ready_file: Option<&Path>,
+) -> Result<()> {
     prepare_socket_path(&socket_path)?;
-
-    let listener = UnixListener::bind(&socket_path)?;
-
-    // Set restrictive permissions on the socket
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    tracing::info!(socket = %socket_path.display(), "agent listening");
-
-    // Print SSH_AUTH_SOCK hint
-    println!("SSH_AUTH_SOCK={}", socket_path.display());
 
     let ssh_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -49,6 +39,20 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
         sshenc_se::SshencBackend::new(ssh_dir.clone())
             .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
+
+    let listener = UnixListener::bind(&socket_path)?;
+
+    // Set restrictive permissions on the socket
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    signal_ready(ready_file)?;
+    tracing::info!(socket = %socket_path.display(), "agent listening");
+
+    // Print SSH_AUTH_SOCK hint
+    println!("SSH_AUTH_SOCK={}", socket_path.display());
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
 
@@ -118,7 +122,11 @@ fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 /// Git for Windows' MINGW SSH (which cannot use named pipes) can connect
 /// via `SSH_AUTH_SOCK`.
 #[cfg(windows)]
-pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result<()> {
+pub async fn run_agent(
+    pipe_name: String,
+    allowed_labels: Vec<String>,
+    ready_file: Option<&Path>,
+) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let ssh_dir = dirs::home_dir()
@@ -136,6 +144,7 @@ pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result
         .first_pipe_instance(true)
         .create(&pipe_name)?;
 
+    signal_ready(ready_file)?;
     tracing::info!(pipe = %pipe_name, "agent listening on named pipe");
 
     // Also listen on a Unix domain socket (AF_UNIX) for Git Bash / MINGW SSH
@@ -226,6 +235,17 @@ pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result
         .join("agent.sock");
     let _unused = std::fs::remove_file(&sock_path);
 
+    Ok(())
+}
+
+fn signal_ready(path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, b"ready\n")?;
     Ok(())
 }
 

@@ -1280,6 +1280,13 @@ fn restore_backup(original: &Path, backup: &Path) {
 }
 
 #[cfg(not(target_os = "windows"))]
+fn key_files_exist(keys_dir: &Path, label: &str) -> bool {
+    ["meta", "pub", "handle", "ssh.pub"]
+        .into_iter()
+        .any(|ext| keys_dir.join(format!("{label}.{ext}")).exists())
+}
+
+#[cfg(not(target_os = "windows"))]
 fn promote_to_default_with_dirs<F>(
     keys_dir: &Path,
     ssh_dir: &Path,
@@ -1324,7 +1331,7 @@ where
             public_backup = Some(backup);
         }
 
-        if metadata::key_files_exist(keys_dir, "default") {
+        if key_files_exist(keys_dir, "default") {
             let renamed_default = format!("default-backup-{}", std::process::id());
             metadata::rename_key_files(keys_dir, "default", &renamed_default)
                 .map_err(|e| anyhow!("failed to rename default key: {e}"))?;
@@ -1366,11 +1373,11 @@ where
             Ok(Some(promotion))
         }
         Err(error) => {
-            if source_renamed && metadata::key_files_exist(keys_dir, "default") {
+            if source_renamed && key_files_exist(keys_dir, "default") {
                 drop(metadata::rename_key_files(keys_dir, "default", label));
             }
             if let Some(ref backup_label) = backup_label {
-                if metadata::key_files_exist(keys_dir, backup_label) {
+                if key_files_exist(keys_dir, backup_label) {
                     drop(metadata::rename_key_files(
                         keys_dir,
                         backup_label,
@@ -2476,12 +2483,8 @@ HKEY_CURRENT_USER\Environment
             .unwrap_err();
         assert!(error.to_string().contains("disk full"));
 
-        assert!(enclaveapp_core::metadata::key_files_exist(
-            &keys_dir, "work"
-        ));
-        assert!(enclaveapp_core::metadata::key_files_exist(
-            &keys_dir, "default"
-        ));
+        assert!(key_files_exist(&keys_dir, "work"));
+        assert!(key_files_exist(&keys_dir, "default"));
         assert_eq!(
             std::fs::read_to_string(ssh_dir.join("id_ecdsa")).unwrap(),
             "old private"

@@ -83,6 +83,10 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
 }
 
 /// Run the SSH agent server on a Windows named pipe.
+///
+/// Also listens on a Unix domain socket (`~/.sshenc/agent.sock`) so that
+/// Git for Windows' MINGW SSH (which cannot use named pipes) can connect
+/// via `SSH_AUTH_SOCK`.
 #[cfg(windows)]
 pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -102,21 +106,79 @@ pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result
         .first_pipe_instance(true)
         .create(&pipe_name)?;
 
-    tracing::info!(pipe = %pipe_name, "agent listening");
+    tracing::info!(pipe = %pipe_name, "agent listening on named pipe");
+
+    // Also listen on a Unix domain socket (AF_UNIX) for Git Bash / MINGW SSH
+    // compatibility. MINGW SSH doesn't support named pipes but does support
+    // AF_UNIX sockets via SSH_AUTH_SOCK.
+    {
+        use socket2::{Domain, SockAddr, Socket, Type};
+
+        let sock_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
+            .join(".sshenc");
+        let sock_path = sock_dir.join("agent.sock");
+        let _unused = std::fs::create_dir_all(&sock_dir);
+        let _unused = std::fs::remove_file(&sock_path);
+
+        let backend_for_unix = Arc::clone(&backend);
+        let allowed_for_unix = Arc::clone(&allowed);
+
+        std::thread::spawn(move || {
+            let socket = match Socket::new(Domain::UNIX, Type::STREAM, None) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(path = %sock_path.display(), "AF_UNIX not available: {e}");
+                    return;
+                }
+            };
+            let addr = match SockAddr::unix(&sock_path) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("invalid socket path: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = socket.bind(&addr) {
+                tracing::warn!(path = %sock_path.display(), "Unix socket bind failed: {e}");
+                return;
+            }
+            if let Err(e) = socket.listen(8) {
+                tracing::warn!("Unix socket listen failed: {e}");
+                return;
+            }
+            tracing::info!(path = %sock_path.display(), "agent listening on Unix socket");
+
+            loop {
+                match socket.accept() {
+                    Ok((conn, _)) => {
+                        let backend = Arc::clone(&backend_for_unix);
+                        let allowed = Arc::clone(&allowed_for_unix);
+                        std::thread::spawn(move || {
+                            handle_blocking_connection(conn, &*backend, &allowed);
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("Unix socket accept error: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
 
     loop {
         tokio::select! {
             connect_result = server.connect() => {
                 connect_result?;
                 let stream = server;
-                // Create a new pipe instance for the next connection
                 server = ServerOptions::new().create(&pipe_name)?;
 
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, &*backend, &allowed).await {
-                        tracing::warn!("connection error: {e}");
+                        tracing::warn!("pipe connection error: {e}");
                     }
                 });
             }
@@ -126,6 +188,13 @@ pub async fn run_agent(pipe_name: String, allowed_labels: Vec<String>) -> Result
             }
         }
     }
+
+    // Clean up Unix socket on exit
+    let sock_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
+        .join(".sshenc")
+        .join("agent.sock");
+    let _unused = std::fs::remove_file(&sock_path);
 
     Ok(())
 }
@@ -165,6 +234,80 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
         // Write response
         stream.write_u32(response_payload.len() as u32).await?;
         stream.write_all(&response_payload).await?;
+    }
+}
+
+/// Synchronous connection handler for the Windows AF_UNIX socket bridge.
+/// Uses `socket2::Socket` with blocking I/O on a dedicated thread.
+#[cfg(windows)]
+fn handle_blocking_connection(
+    conn: socket2::Socket,
+    backend: &dyn KeyBackend,
+    allowed_labels: &HashSet<String>,
+) {
+    use std::io::{Read, Write};
+
+    // Wrap socket2::Socket in a helper that implements Read/Write.
+    let mut stream = SocketReadWriter(conn);
+
+    loop {
+        // Read 4-byte message length (big-endian)
+        let mut len_buf = [0_u8; 4];
+        match stream.read_exact(&mut len_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return,
+            Err(_) => return,
+        }
+        let len = u32::from_be_bytes(len_buf);
+
+        if len == 0 || len > 256 * 1024 {
+            return;
+        }
+
+        // Read message body
+        let mut payload = vec![0_u8; len as usize];
+        if stream.read_exact(&mut payload).is_err() {
+            return;
+        }
+
+        // Parse and handle
+        let request = match message::parse_request(&payload) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let response = match handle_request(request, backend, allowed_labels) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let response_payload = message::serialize_response(&response);
+
+        // Write response
+        let resp_len = (response_payload.len() as u32).to_be_bytes();
+        if stream.write_all(&resp_len).is_err() || stream.write_all(&response_payload).is_err() {
+            return;
+        }
+    }
+}
+
+/// Wrapper to implement `Read` and `Write` on `socket2::Socket`.
+#[cfg(windows)]
+struct SocketReadWriter(socket2::Socket);
+
+#[cfg(windows)]
+impl std::io::Read for SocketReadWriter {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+#[cfg(windows)]
+impl std::io::Write for SocketReadWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
     }
 }
 

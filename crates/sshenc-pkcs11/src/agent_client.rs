@@ -23,7 +23,7 @@ fn default_socket_path() -> PathBuf {
 
 #[cfg(windows)]
 fn default_pipe_name() -> String {
-    r"\\.\pipe\sshenc-agent".to_string()
+    r"\\.\pipe\openssh-ssh-agent".to_string()
 }
 
 /// Check whether the agent is reachable.

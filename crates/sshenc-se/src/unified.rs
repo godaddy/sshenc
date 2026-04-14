@@ -99,6 +99,14 @@ impl SshencBackend {
             None
         }
     }
+
+    fn persisted_pub_file_path(&self, meta: &metadata::KeyMeta, label: &str) -> Option<PathBuf> {
+        meta.app_specific
+            .get("pub_file_path")
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+            .or_else(|| self.find_pub_file(label))
+    }
 }
 
 /// Map an enclaveapp_core error to an sshenc_core error.
@@ -120,17 +128,10 @@ impl KeyBackend for SshencBackend {
             });
         }
 
-        // Map requires_user_presence to access policy
-        let policy = if opts.requires_user_presence {
-            AccessPolicy::Any
-        } else {
-            AccessPolicy::None
-        };
-
         // Generate key via platform backend
         let public_bytes = self
             .key_manager()
-            .generate(label_str, KeyType::Signing, policy)
+            .generate(label_str, KeyType::Signing, opts.access_policy)
             .map_err(|e| map_err("generate", e))?;
 
         // Save app-specific metadata (comment, git_name, git_email)
@@ -138,6 +139,13 @@ impl KeyBackend for SshencBackend {
             .map_err(|e| map_err("load_meta", e))?;
         if let Some(ref comment) = opts.comment {
             meta.set_app_field("comment", comment.clone());
+        }
+        match opts.write_pub_path.as_ref() {
+            Some(path) => meta.set_app_field(
+                "pub_file_path",
+                path.as_os_str().to_string_lossy().to_string(),
+            ),
+            None => meta.set_app_field("pub_file_path", serde_json::Value::Null),
         }
         metadata::save_meta(&self.keys_dir, label_str, &meta)
             .map_err(|e| map_err("save_meta", e))?;
@@ -160,7 +168,7 @@ impl KeyBackend for SshencBackend {
         Ok(KeyInfo {
             metadata: KeyMetadata::new(
                 opts.label.clone(),
-                opts.requires_user_presence,
+                opts.access_policy,
                 opts.comment.clone(),
             ),
             public_key_bytes: public_bytes,
@@ -201,14 +209,12 @@ impl KeyBackend for SshencBackend {
             compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
 
         let comment = meta.get_app_field("comment").map(|s| s.to_string());
-        let requires_user_presence = meta.access_policy != AccessPolicy::None;
-
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
-        let pub_file = self.find_pub_file(label);
+        let pub_file = self.persisted_pub_file_path(&meta, label);
 
         Ok(KeyInfo {
-            metadata: KeyMetadata::new(KeyLabel::new(label)?, requires_user_presence, comment),
+            metadata: KeyMetadata::new(KeyLabel::new(label)?, meta.access_policy, comment),
             public_key_bytes: public_bytes,
             fingerprint_sha256: fp_sha256,
             fingerprint_md5: fp_md5,

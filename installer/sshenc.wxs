@@ -72,7 +72,7 @@
             ExeCommand="install"
             Execute="deferred"
             Impersonate="yes"
-            Return="ignore" />
+            Return="check" />
 
         <CustomAction
             Id="SshencUninstall"
@@ -80,7 +80,7 @@
             ExeCommand="uninstall"
             Execute="deferred"
             Impersonate="yes"
-            Return="ignore" />
+            Return="check" />
 
         <InstallExecuteSequence>
             <Custom Action="SshencInstall" After="InstallFiles" Condition="NOT REMOVE" />

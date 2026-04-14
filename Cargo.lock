@@ -1363,6 +1363,7 @@ version = "0.6.1"
 dependencies = [
  "dirs",
  "enclaveapp-core",
+ "serde_json",
  "sshenc-core",
 ]
 

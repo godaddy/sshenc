@@ -248,12 +248,12 @@ Host myserver.com
 ## Commit signing
 
 Git supports signing commits with SSH keys, and GitHub shows them as
-"Verified." `gitenc --config` sets this up automatically — every commit
+"Verified." `gitenc --config NAME` sets this up automatically — every commit
 in that repo is signed with your Secure Enclave key.
 
 To enable it:
 
-1. Run `gitenc --config` (or `gitenc --config NAME`) in your repo
+1. Run `gitenc --config NAME` in your repo
 2. Add the same public key to GitHub as a **Signing Key**:
    GitHub → Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**
 
@@ -264,7 +264,7 @@ git commit -m "hardware-signed commit"
 git log --show-signature                # verify locally
 ```
 
-`gitenc --config` sets these git config values locally on the repo:
+`gitenc --config NAME` sets these git config values locally on the repo:
 
 ```
 core.sshCommand = sshenc ssh --label NAME --
@@ -272,6 +272,11 @@ gpg.format = ssh
 user.signingkey = ~/.ssh/NAME.pub
 commit.gpgsign = true
 ```
+
+`gitenc --config` without a label keeps agent-default SSH authentication via
+`core.sshCommand = sshenc ssh --` and configures commit signing to use the
+default public key (`~/.ssh/id_ecdsa.pub`, or the default key's recorded
+public-key path when available).
 
 ## How it works
 
@@ -339,7 +344,7 @@ sshenc ssh [ssh args...]                 # ssh with default agent keys
 gitenc --label NAME [git args...]        # git with a specific SE key
 gitenc [git args...]                     # git with default agent keys
 gitenc --config NAME                     # set current repo to always use NAME
-gitenc --config                          # set current repo to use default
+gitenc --config                          # set current repo to use agent-default SSH auth and default commit signing key
 ```
 
 ### Setup
@@ -436,12 +441,12 @@ PC) via the CNG `Microsoft Platform Crypto Provider`. The security model is
 the same as macOS Secure Enclave — keys are generated inside the TPM hardware
 and never leave it.
 
-The agent communicates via a Windows named pipe (`\\.\pipe\sshenc-agent`)
+The agent communicates via a Windows named pipe (`\\.\pipe\openssh-ssh-agent`)
 instead of a Unix socket. `sshenc install` configures everything automatically.
 
 ### What `sshenc install` does on Windows
 
-1. Adds `IdentityAgent \\.\pipe\sshenc-agent` to `~/.ssh/config`
+1. Adds `IdentityAgent \\.\pipe\openssh-ssh-agent` to `~/.ssh/config`
 2. Sets `GIT_SSH_COMMAND=C:\Windows\System32\OpenSSH\ssh.exe` as a
    persistent user environment variable
 3. Starts the agent as a detached background process

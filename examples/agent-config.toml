@@ -16,9 +16,9 @@ allowed_labels = []
 # allowed_labels = ["github-personal", "work"]
 
 # User-presence prompt policy.
-#   "always"     - always require biometric/password for signing
-#   "never"      - never prompt (keys must be created without user-presence flag)
-#   "keydefault" - use whatever the key's access control requires
+#   "always"     - request sshenc-managed verification on signing paths where supported
+#   "never"      - skip sshenc-managed extra verification and rely on key/backend policy only
+#   "keydefault" - mirror the key's access-control policy
 prompt_policy = "keydefault"
 
 # Default directory for .pub file export.
@@ -28,7 +28,9 @@ pub_dir = "~/.ssh"
 log_level = "info"
 
 # Host-specific identity preferences.
-# The agent will prefer the specified key label when signing for a given host.
+# Used by generated OpenSSH config snippets; the SSH agent protocol itself
+# does not include the target host, so the live agent cannot switch keys by
+# hostname.
 [[host_identities]]
 host = "github.com"
 label = "github-personal"

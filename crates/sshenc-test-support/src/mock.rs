@@ -84,7 +84,7 @@ impl KeyBackend for MockKeyBackend {
         let info = KeyInfo {
             metadata: KeyMetadata::new(
                 opts.label.clone(),
-                opts.requires_user_presence,
+                opts.access_policy,
                 opts.comment.clone(),
             ),
             public_key_bytes,
@@ -146,12 +146,13 @@ impl KeyBackend for MockKeyBackend {
 mod tests {
     use super::*;
     use sshenc_core::key::KeyLabel;
+    use sshenc_core::AccessPolicy;
 
     fn make_opts(label: &str) -> KeyGenOptions {
         KeyGenOptions {
             label: KeyLabel::new(label).unwrap(),
             comment: Some("test".into()),
-            requires_user_presence: false,
+            access_policy: AccessPolicy::None,
             write_pub_path: None,
         }
     }
@@ -232,7 +233,7 @@ mod tests {
         let opts = KeyGenOptions {
             label: KeyLabel::new("no-comment").unwrap(),
             comment: None,
-            requires_user_presence: false,
+            access_policy: AccessPolicy::None,
             write_pub_path: None,
         };
         let info = backend.generate(&opts).unwrap();
@@ -251,7 +252,7 @@ mod tests {
         let opts = KeyGenOptions {
             label: KeyLabel::new("pub-write-key").unwrap(),
             comment: Some("test@host".into()),
-            requires_user_presence: false,
+            access_policy: AccessPolicy::None,
             write_pub_path: Some(pub_path.clone()),
         };
         let info = backend.generate(&opts).unwrap();

@@ -18,6 +18,7 @@
 use enclaveapp_core::types::validate_label;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 
 fn main() {
@@ -64,16 +65,13 @@ fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
 
 #[allow(clippy::print_stdout, clippy::print_stderr, clippy::exit)]
 fn configure_repo(label: Option<&str>) {
-    let effective_label = label.unwrap_or("default");
-    let ssh_command =
-        build_ssh_command(Some(effective_label)).unwrap_or_else(|err| exit_invalid_label(&err));
+    if let Err(err) = build_ssh_command(label) {
+        exit_invalid_label(&err);
+    }
 
-    // Determine the signing key path
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| "/tmp".into());
-    let signing_key =
-        signing_key_path(&home, effective_label).unwrap_or_else(|err| exit_invalid_label(&err));
 
     // Find sshenc binary (same directory as gitenc, or in PATH)
     let sshenc_bin = {
@@ -89,49 +87,10 @@ fn configure_repo(label: Option<&str>) {
             })
     };
 
-    // Try to load identity from key metadata
-    let meta_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join(".sshenc")
-        .join("keys");
-    let meta_path = meta_dir.join(format!("{effective_label}.meta"));
-    let (git_name, git_email) = if let Ok(content) = std::fs::read_to_string(&meta_path) {
-        // Parse just the fields we need (avoid pulling in the full FFI crate)
-        let name = content
-            .lines()
-            .find(|l| l.contains("\"git_name\""))
-            .and_then(|l| l.split('"').nth(3))
-            .map(String::from);
-        let email = content
-            .lines()
-            .find(|l| l.contains("\"git_email\""))
-            .and_then(|l| l.split('"').nth(3))
-            .map(String::from);
-        (name, email)
-    } else {
-        (None, None)
-    };
-
-    // Set SSH command for push/pull and commit signing
-    let mut configs: Vec<(&str, &str)> = vec![
-        ("core.sshCommand", &ssh_command),
-        ("gpg.format", "ssh"),
-        ("gpg.ssh.program", &sshenc_bin),
-        ("user.signingkey", &signing_key),
-        ("commit.gpgsign", "true"),
-    ];
-
-    // Set identity if configured on the key
-    let name_ref;
-    let email_ref;
-    if let Some(ref name) = git_name {
-        name_ref = name.clone();
-        configs.push(("user.name", &name_ref));
-    }
-    if let Some(ref email) = git_email {
-        email_ref = email.clone();
-        configs.push(("user.email", &email_ref));
-    }
+    let signing_label = label.unwrap_or("default");
+    let metadata = load_git_key_metadata(signing_label);
+    let configs = configure_repo_entries(label, &home, &sshenc_bin, metadata.as_ref())
+        .unwrap_or_else(|err| exit_invalid_label(&err));
 
     for (key, value) in &configs {
         let status = Command::new("git").args(["config", key, value]).status();
@@ -151,17 +110,48 @@ fn configure_repo(label: Option<&str>) {
         }
     }
 
-    println!("Configured this repo to use sshenc key: {effective_label}");
-    println!("  SSH auth:       sshenc ssh --label {effective_label}");
-    println!("  Commit signing: {signing_key}");
-    if let Some(ref name) = git_name {
-        println!("  Author:         {name}");
-    }
-    if let Some(ref email) = git_email {
-        println!("  Email:          {email}");
-    }
-    if git_name.is_none() && git_email.is_none() {
-        println!("  (no git identity set — use 'sshenc identity {effective_label} --name \"...\" --email \"...\"' to configure)");
+    match label {
+        Some(effective_label) => {
+            let signing_key = configs
+                .iter()
+                .find(|(key, _)| key == "user.signingkey")
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("");
+            println!("Configured this repo to use sshenc key: {effective_label}");
+            println!("  SSH auth:       sshenc ssh --label {effective_label}");
+            println!("  Commit signing: {signing_key}");
+            if let Some(ref meta) = metadata {
+                if let Some(ref name) = meta.git_name {
+                    println!("  Author:         {name}");
+                }
+                if let Some(ref email) = meta.git_email {
+                    println!("  Email:          {email}");
+                }
+                if meta.git_name.is_none() && meta.git_email.is_none() {
+                    println!("  (no git identity set — use 'sshenc identity {effective_label} --name \"...\" --email \"...\"' to configure)");
+                }
+            } else {
+                println!("  (no git identity set — use 'sshenc identity {effective_label} --name \"...\" --email \"...\"' to configure)");
+            }
+        }
+        None => {
+            let signing_key = configs
+                .iter()
+                .find(|(key, _)| key == "user.signingkey")
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("");
+            println!("Configured this repo to use sshenc agent-default SSH authentication.");
+            println!("  SSH auth: sshenc ssh --");
+            println!("  Commit signing: {signing_key}");
+            if let Some(ref meta) = metadata {
+                if let Some(ref name) = meta.git_name {
+                    println!("  Author:         {name}");
+                }
+                if let Some(ref email) = meta.git_email {
+                    println!("  Email:          {email}");
+                }
+            }
+        }
     }
 }
 
@@ -172,6 +162,14 @@ enum ParsedArgs {
         label: Option<String>,
         git_args: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct GitKeyMetadata {
+    git_name: Option<String>,
+    git_email: Option<String>,
+    pub_file_path: Option<String>,
+    pub_file_path_recorded: bool,
 }
 
 fn build_ssh_command(label: Option<&str>) -> Result<String, String> {
@@ -191,6 +189,85 @@ fn signing_key_path(home: &str, label: &str) -> Result<String, String> {
 
     validate_label(label).map_err(|e| e.to_string())?;
     Ok(format!("{home}/.ssh/{label}.pub"))
+}
+
+fn load_git_key_metadata(label: &str) -> Option<GitKeyMetadata> {
+    let meta_dir = dirs::home_dir()?.join(".sshenc").join("keys");
+    let meta_path = meta_dir.join(format!("{label}.meta"));
+    let content = std::fs::read_to_string(meta_path).ok()?;
+    parse_git_key_metadata(&content)
+}
+
+fn parse_git_key_metadata(content: &str) -> Option<GitKeyMetadata> {
+    let raw: serde_json::Value = serde_json::from_str(content).ok()?;
+    let app_specific = raw.get("app_specific").unwrap_or(&raw);
+    let git_name = app_specific
+        .get("git_name")
+        .or_else(|| raw.get("git_name"))
+        .and_then(|value| value.as_str())
+        .map(String::from);
+    let git_email = app_specific
+        .get("git_email")
+        .or_else(|| raw.get("git_email"))
+        .and_then(|value| value.as_str())
+        .map(String::from);
+    let pub_path_value = app_specific
+        .get("pub_file_path")
+        .or_else(|| raw.get("pub_file_path"));
+    let pub_file_path = pub_path_value
+        .and_then(|value| value.as_str())
+        .map(String::from);
+
+    Some(GitKeyMetadata {
+        git_name,
+        git_email,
+        pub_file_path,
+        pub_file_path_recorded: pub_path_value.is_some(),
+    })
+}
+
+fn configure_repo_entries(
+    label: Option<&str>,
+    home: &str,
+    sshenc_bin: &str,
+    metadata: Option<&GitKeyMetadata>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut configs = vec![("core.sshCommand".to_string(), build_ssh_command(label)?)];
+    let label = label.unwrap_or("default");
+
+    let signing_key = match metadata.and_then(|meta| meta.pub_file_path.as_deref()) {
+        Some(path) => {
+            if Path::new(path).exists() {
+                path.to_string()
+            } else {
+                return Err(format!("recorded public key file does not exist: {path}"));
+            }
+        }
+        None if metadata.is_some_and(|meta| meta.pub_file_path_recorded) => {
+            return Err(format!(
+                "key '{label}' does not have a recorded public key file; export one before running gitenc --config"
+            ));
+        }
+        None => signing_key_path(home, label)?,
+    };
+
+    configs.extend([
+        ("gpg.format".to_string(), "ssh".to_string()),
+        ("gpg.ssh.program".to_string(), sshenc_bin.to_string()),
+        ("user.signingkey".to_string(), signing_key),
+        ("commit.gpgsign".to_string(), "true".to_string()),
+    ]);
+
+    if let Some(metadata) = metadata {
+        if let Some(name) = metadata.git_name.as_ref() {
+            configs.push(("user.name".to_string(), name.clone()));
+        }
+        if let Some(email) = metadata.git_email.as_ref() {
+            configs.push(("user.email".to_string(), email.clone()));
+        }
+    }
+
+    Ok(configs)
 }
 
 #[allow(clippy::print_stderr, clippy::exit)]
@@ -431,10 +508,10 @@ mod tests {
         let signing_key = signing_key_path(&home, label).unwrap();
 
         let configs = vec![
-            ("core.sshCommand", ssh_command.as_str()),
-            ("gpg.format", "ssh"),
-            ("user.signingkey", signing_key.as_str()),
-            ("commit.gpgsign", "true"),
+            ("core.sshCommand".to_string(), ssh_command),
+            ("gpg.format".to_string(), "ssh".to_string()),
+            ("user.signingkey".to_string(), signing_key),
+            ("commit.gpgsign".to_string(), "true".to_string()),
         ];
 
         for (key, value) in &configs {
@@ -455,7 +532,7 @@ mod tests {
                 .unwrap();
             assert!(output.status.success(), "git config --get {key} failed");
             let actual = String::from_utf8(output.stdout).unwrap();
-            assert_eq!(actual.trim(), *expected, "config {key} mismatch");
+            assert_eq!(actual.trim(), expected, "config {key} mismatch");
         }
 
         // Cleanup
@@ -463,40 +540,109 @@ mod tests {
     }
 
     #[test]
-    fn test_configure_repo_default_label_uses_id_ecdsa() {
-        // When label is None (default), the signing key should be id_ecdsa.pub
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| "/tmp".into());
-
-        // Replicate the logic from configure_repo for "default"
-        let effective_label = "default";
-        let signing_key = signing_key_path(&home, effective_label).unwrap();
-
-        assert!(
-            signing_key.ends_with("/.ssh/id_ecdsa.pub"),
-            "default label should use id_ecdsa.pub, got: {signing_key}"
-        );
+    fn test_configure_repo_entries_without_label_sets_default_signing_key() {
+        let entries = configure_repo_entries(None, "/tmp/home", "/tmp/sshenc", None).unwrap();
+        assert!(entries
+            .iter()
+            .any(|(key, value)| { key == "core.sshCommand" && value == "sshenc ssh --" }));
+        assert!(entries.iter().any(|(key, value)| {
+            key == "user.signingkey" && value == "/tmp/home/.ssh/id_ecdsa.pub"
+        }));
+        assert!(entries
+            .iter()
+            .any(|(key, value)| key == "commit.gpgsign" && value == "true"));
     }
 
     #[test]
     fn test_configure_repo_named_label_uses_label_pub() {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| "/tmp".into());
+        let entries =
+            configure_repo_entries(Some("github-work"), "/tmp/home", "/tmp/sshenc", None).unwrap();
 
-        let effective_label = "github-work";
-        let signing_key = signing_key_path(&home, effective_label).unwrap();
-
-        assert!(
-            signing_key.ends_with("/.ssh/github-work.pub"),
-            "named label should use label.pub, got: {signing_key}"
-        );
+        assert!(entries.iter().any(|(key, value)| {
+            key == "user.signingkey" && value == "/tmp/home/.ssh/github-work.pub"
+        }));
     }
 
     #[test]
     fn test_signing_key_path_rejects_invalid_label() {
         let err = signing_key_path("/tmp/home", "../escape").unwrap_err();
         assert!(err.to_lowercase().contains("label"));
+    }
+
+    #[test]
+    fn test_parse_git_key_metadata_reads_app_specific_fields() {
+        let parsed = parse_git_key_metadata(
+            r#"{
+                "label":"work",
+                "key_type":"signing",
+                "app_specific":{
+                    "git_name":"Alice",
+                    "git_email":"alice@example.com",
+                    "pub_file_path":"/tmp/work.pub"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.git_name.as_deref(), Some("Alice"));
+        assert_eq!(parsed.git_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(parsed.pub_file_path.as_deref(), Some("/tmp/work.pub"));
+        assert!(parsed.pub_file_path_recorded);
+    }
+
+    #[test]
+    fn test_parse_git_key_metadata_reads_legacy_top_level_fields() {
+        let parsed = parse_git_key_metadata(
+            r#"{
+                "label":"work",
+                "git_name":"Alice",
+                "git_email":"alice@example.com"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.git_name.as_deref(), Some("Alice"));
+        assert_eq!(parsed.git_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(parsed.pub_file_path, None);
+        assert!(!parsed.pub_file_path_recorded);
+    }
+
+    #[test]
+    fn test_configure_repo_entries_uses_recorded_pub_file_path() {
+        let dir = std::env::temp_dir().join("sshenc-test-gitenc-pub");
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pub_path = dir.join("custom.pub");
+        std::fs::write(&pub_path, "ssh-ed25519 AAAATEST test\n").unwrap();
+
+        let metadata = GitKeyMetadata {
+            git_name: None,
+            git_email: None,
+            pub_file_path: Some(pub_path.display().to_string()),
+            pub_file_path_recorded: true,
+        };
+        let entries =
+            configure_repo_entries(Some("work"), "/tmp/home", "/tmp/sshenc", Some(&metadata))
+                .unwrap();
+
+        assert!(entries.iter().any(|(key, value)| {
+            key == "user.signingkey" && value == &pub_path.display().to_string()
+        }));
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn test_configure_repo_entries_rejects_missing_recorded_pub_file_path() {
+        let metadata = GitKeyMetadata {
+            git_name: None,
+            git_email: None,
+            pub_file_path: None,
+            pub_file_path_recorded: true,
+        };
+
+        let err = configure_repo_entries(Some("work"), "/tmp/home", "/tmp/sshenc", Some(&metadata))
+            .unwrap_err();
+        assert!(err.contains("does not have a recorded public key file"));
     }
 }

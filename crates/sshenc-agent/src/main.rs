@@ -188,15 +188,6 @@ fn main() -> Result<()> {
     }
 
     let ready_file = take_ready_file_from_env();
-
-    let level = if cli.debug { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
-        )
-        .init();
-
     let config = match &cli.config {
         Some(path) => sshenc_core::Config::load(path),
         None => sshenc_core::Config::load_default(),
@@ -209,6 +200,18 @@ fn main() -> Result<()> {
             return Err(error);
         }
     };
+
+    let level = if cli.debug {
+        "debug"
+    } else {
+        config.log_level.as_tracing_str()
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
+        )
+        .init();
 
     let allowed_labels = if cli.labels.is_empty() {
         config.allowed_labels.clone()
@@ -236,7 +239,9 @@ fn main() -> Result<()> {
         let socket_path = PathBuf::from(&cli.socket);
         let result = rt.block_on(server::run_agent(
             socket_path,
+            config.pub_dir.clone(),
             allowed_labels,
+            config.prompt_policy,
             ready_file.as_deref(),
         ));
         if let Err(ref error) = result {
@@ -249,7 +254,9 @@ fn main() -> Result<()> {
     {
         let result = rt.block_on(server::run_agent(
             cli.socket,
+            config.pub_dir.clone(),
             allowed_labels,
+            config.prompt_policy,
             ready_file.as_deref(),
         ));
         if let Err(ref error) = result {

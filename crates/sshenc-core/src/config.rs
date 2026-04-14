@@ -117,7 +117,8 @@ impl Config {
             return Ok(Config::default());
         }
         let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+        config.expand_paths();
         Ok(config)
     }
 
@@ -151,6 +152,25 @@ impl Config {
         config.save(&path)?;
         Ok(path)
     }
+
+    fn expand_paths(&mut self) {
+        self.socket_path = expand_tilde_path(&self.socket_path);
+        self.pub_dir = expand_tilde_path(&self.pub_dir);
+    }
+}
+
+fn expand_tilde_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    }
+
+    if let Some(suffix) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        return home.join(suffix);
+    }
+
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -243,6 +263,30 @@ mod tests {
     fn test_config_load_missing_returns_default() {
         let config = Config::load(Path::new("/nonexistent/path/config.toml")).unwrap();
         assert!(config.allowed_labels.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // dirs::home_dir() -> FFI
+    fn test_config_load_expands_tilde_paths() {
+        let dir = std::env::temp_dir().join("sshenc-test-config-tilde");
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+socket_path = "~/.sshenc/agent.sock"
+pub_dir = "~/.ssh"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&path).unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(config.socket_path, home.join(".sshenc").join("agent.sock"));
+        assert_eq!(config.pub_dir, home.join(".ssh"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

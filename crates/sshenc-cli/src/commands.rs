@@ -4,6 +4,7 @@
 //! CLI command implementations.
 
 use anyhow::{anyhow, bail, Result};
+use serde::{Deserialize, Serialize};
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::Config;
@@ -48,14 +49,66 @@ impl AgentLauncher for RealAgentLauncher {
     }
 }
 
-fn ensure_agent_running(launcher: &impl AgentLauncher, socket_path: &Path) -> Result<AgentStartStatus> {
+fn preflight_agent_start(
+    launcher: &impl AgentLauncher,
+    socket_path: &Path,
+) -> Result<Option<PathBuf>> {
     if launcher.is_running(socket_path) {
-        return Ok(AgentStartStatus::AlreadyRunning);
+        return Ok(None);
     }
 
-    let agent_bin = launcher.find_agent_binary()?;
-    launcher.spawn_agent(&agent_bin, socket_path)?;
-    Ok(AgentStartStatus::Started)
+    Ok(Some(launcher.find_agent_binary()?))
+}
+
+fn start_agent_with_binary(
+    launcher: &impl AgentLauncher,
+    socket_path: &Path,
+    agent_bin: Option<&Path>,
+) -> Result<AgentStartStatus> {
+    match agent_bin {
+        Some(agent_bin) => {
+            launcher.spawn_agent(agent_bin, socket_path)?;
+            Ok(AgentStartStatus::Started)
+        }
+        None => Ok(AgentStartStatus::AlreadyRunning),
+    }
+}
+
+fn ensure_agent_running(
+    launcher: &impl AgentLauncher,
+    socket_path: &Path,
+) -> Result<AgentStartStatus> {
+    let agent_bin = preflight_agent_start(launcher, socket_path)?;
+    start_agent_with_binary(launcher, socket_path, agent_bin.as_deref())
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum WindowsServiceStartMode {
+    Auto,
+    Demand,
+    Disabled,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl WindowsServiceStartMode {
+    fn as_sc_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Demand => "demand",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WindowsInstallState {
+    previous_ssh_auth_sock: Option<String>,
+    previous_git_ssh_command: Option<String>,
+    ssh_agent_start_mode: Option<WindowsServiceStartMode>,
+    ssh_agent_was_running: Option<bool>,
+    managed_git_ssh_command: bool,
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -64,7 +117,7 @@ enum WindowsAction {
     StopService(&'static str),
     SetServiceStart {
         service: &'static str,
-        mode: &'static str,
+        mode: WindowsServiceStartMode,
     },
     StartService(&'static str),
     SetUserEnv {
@@ -75,21 +128,25 @@ enum WindowsAction {
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn windows_install_actions(
-    socket_path: &Path,
-    git_ssh_command: Option<String>,
-) -> Vec<WindowsAction> {
-    let mut actions = vec![
+fn windows_prepare_install_actions() -> Vec<WindowsAction> {
+    vec![
         WindowsAction::StopService("ssh-agent"),
         WindowsAction::SetServiceStart {
             service: "ssh-agent",
-            mode: "disabled",
+            mode: WindowsServiceStartMode::Disabled,
         },
-        WindowsAction::SetUserEnv {
-            key: "SSH_AUTH_SOCK",
-            value: socket_path.display().to_string().replace('\\', "/"),
-        },
-    ];
+    ]
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_finalize_install_actions(
+    socket_path: &Path,
+    git_ssh_command: Option<String>,
+) -> Vec<WindowsAction> {
+    let mut actions = vec![WindowsAction::SetUserEnv {
+        key: "SSH_AUTH_SOCK",
+        value: socket_path.display().to_string().replace('\\', "/"),
+    }];
     if let Some(git_ssh_command) = git_ssh_command {
         actions.push(WindowsAction::SetUserEnv {
             key: "GIT_SSH_COMMAND",
@@ -100,16 +157,39 @@ fn windows_install_actions(
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn windows_uninstall_actions() -> Vec<WindowsAction> {
-    vec![
-        WindowsAction::DeleteUserEnv("SSH_AUTH_SOCK"),
-        WindowsAction::DeleteUserEnv("GIT_SSH_COMMAND"),
-        WindowsAction::SetServiceStart {
+fn windows_restore_actions(state: &WindowsInstallState) -> Vec<WindowsAction> {
+    let mut actions = Vec::new();
+
+    match state.previous_ssh_auth_sock.as_ref() {
+        Some(value) => actions.push(WindowsAction::SetUserEnv {
+            key: "SSH_AUTH_SOCK",
+            value: value.clone(),
+        }),
+        None => actions.push(WindowsAction::DeleteUserEnv("SSH_AUTH_SOCK")),
+    }
+
+    if state.managed_git_ssh_command {
+        match state.previous_git_ssh_command.as_ref() {
+            Some(value) => actions.push(WindowsAction::SetUserEnv {
+                key: "GIT_SSH_COMMAND",
+                value: value.clone(),
+            }),
+            None => actions.push(WindowsAction::DeleteUserEnv("GIT_SSH_COMMAND")),
+        }
+    }
+
+    if let Some(mode) = state.ssh_agent_start_mode {
+        actions.push(WindowsAction::SetServiceStart {
             service: "ssh-agent",
-            mode: "demand",
-        },
-        WindowsAction::StartService("ssh-agent"),
-    ]
+            mode,
+        });
+    }
+
+    if state.ssh_agent_was_running == Some(true) {
+        actions.push(WindowsAction::StartService("ssh-agent"));
+    }
+
+    actions
 }
 
 #[cfg(target_os = "windows")]
@@ -125,7 +205,7 @@ fn apply_windows_actions(actions: &[WindowsAction]) {
             }
             WindowsAction::SetServiceStart { service, mode } => {
                 let _unused = std::process::Command::new("sc")
-                    .args(["config", service, "start=", mode])
+                    .args(["config", service, "start=", mode.as_sc_value()])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
@@ -157,6 +237,130 @@ fn apply_windows_actions(actions: &[WindowsAction]) {
             }
         }
     }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_install_state_path() -> Result<PathBuf> {
+    let config_path = Config::default_path();
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| anyhow!("could not determine sshenc config directory"))?;
+    Ok(parent.join("install-state.json"))
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_sc_start_mode(text: &str) -> Option<WindowsServiceStartMode> {
+    text.lines().find_map(|line| {
+        let normalized = line.trim();
+        if !normalized.contains("START_TYPE") {
+            return None;
+        }
+        if normalized.contains("AUTO_START") {
+            Some(WindowsServiceStartMode::Auto)
+        } else if normalized.contains("DEMAND_START") {
+            Some(WindowsServiceStartMode::Demand)
+        } else if normalized.contains("DISABLED") {
+            Some(WindowsServiceStartMode::Disabled)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_sc_running_state(text: &str) -> Option<bool> {
+    text.lines().find_map(|line| {
+        let normalized = line.trim();
+        if !normalized.contains("STATE") {
+            return None;
+        }
+        if normalized.contains("RUNNING") {
+            Some(true)
+        } else if normalized.contains("STOPPED") {
+            Some(false)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_reg_query_value(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        ["REG_SZ", "REG_EXPAND_SZ", "REG_MULTI_SZ"]
+            .into_iter()
+            .find_map(|kind| trimmed.split_once(kind).map(|(_, value)| value.trim().to_string()))
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn query_windows_user_env_var(key: &str) -> Result<Option<String>> {
+    let output = std::process::Command::new("reg")
+        .args(["query", "HKCU\\Environment", "/v", key])
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(parse_reg_query_value(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg(target_os = "windows")]
+fn query_windows_service_start_mode(service: &str) -> Result<Option<WindowsServiceStartMode>> {
+    let output = std::process::Command::new("sc").args(["qc", service]).output()?;
+    if !output.status.success() {
+        bail!("failed to query Windows service configuration for {service}");
+    }
+    Ok(parse_sc_start_mode(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg(target_os = "windows")]
+fn query_windows_service_running(service: &str) -> Result<Option<bool>> {
+    let output = std::process::Command::new("sc").args(["query", service]).output()?;
+    if !output.status.success() {
+        bail!("failed to query Windows service state for {service}");
+    }
+    Ok(parse_sc_running_state(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg(target_os = "windows")]
+fn save_windows_install_state(state: &WindowsInstallState) -> Result<()> {
+    let path = windows_install_state_path()?;
+    let contents = serde_json::to_vec_pretty(state)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    enclaveapp_core::metadata::atomic_write(&path, &contents).map_err(|e| anyhow!(e.to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn load_windows_install_state() -> Result<Option<WindowsInstallState>> {
+    let path = windows_install_state_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = std::fs::read(&path)?;
+    Ok(Some(serde_json::from_slice(&contents)?))
+}
+
+#[cfg(target_os = "windows")]
+fn remove_windows_install_state() -> Result<()> {
+    let path = windows_install_state_path()?;
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn capture_windows_install_state(managed_git_ssh_command: bool) -> Result<WindowsInstallState> {
+    Ok(WindowsInstallState {
+        previous_ssh_auth_sock: query_windows_user_env_var("SSH_AUTH_SOCK")?,
+        previous_git_ssh_command: query_windows_user_env_var("GIT_SSH_COMMAND")?,
+        ssh_agent_start_mode: query_windows_service_start_mode("ssh-agent")?,
+        ssh_agent_was_running: query_windows_service_running("ssh-agent")?,
+        managed_git_ssh_command,
+    })
 }
 
 #[allow(clippy::print_stdout)]
@@ -476,6 +680,7 @@ pub fn install() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
         .join(".ssh")
         .join("config");
+    let agent_bin = preflight_agent_start(&RealAgentLauncher, &config.socket_path)?;
 
     // Find the launcher dylib if available.
     // On Windows, skip PKCS#11 — the agent listens on the default OpenSSH pipe
@@ -485,12 +690,54 @@ pub fn install() -> Result<()> {
     let dylib_path: Option<PathBuf> = None;
     #[cfg(not(target_os = "windows"))]
     let dylib_path = find_launcher_dylib();
+    #[cfg(target_os = "windows")]
+    let git_ssh_command = windows_git_ssh_command();
 
-    match sshenc_core::ssh_config::install_block(
+    let install_result = sshenc_core::ssh_config::install_block(
         &ssh_config_path,
         &config.socket_path,
         dylib_path.as_deref(),
-    )? {
+    )?;
+
+    #[cfg(target_os = "windows")]
+    let install_state = match capture_windows_install_state(git_ssh_command.is_some())
+        .and_then(|state| {
+            save_windows_install_state(&state)?;
+            Ok(state)
+        }) {
+        Ok(state) => {
+            apply_windows_actions(&windows_prepare_install_actions());
+            println!("Configured Windows ssh-agent service for sshenc.");
+            Some(state)
+        }
+        Err(error) => {
+            if matches!(install_result, sshenc_core::ssh_config::InstallResult::Installed) {
+                let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
+            }
+            return Err(error);
+        }
+    };
+
+    let agent_status = match start_agent_with_binary(&RealAgentLauncher, &config.socket_path, agent_bin.as_deref()) {
+        Ok(status) => status,
+        Err(error) => {
+            if matches!(install_result, sshenc_core::ssh_config::InstallResult::Installed) {
+                let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(ref state) = install_state {
+                    apply_windows_actions(&windows_restore_actions(state));
+                }
+                let _unused = remove_windows_install_state();
+            }
+
+            return Err(error);
+        }
+    };
+
+    match install_result {
         sshenc_core::ssh_config::InstallResult::Installed => {
             println!("Installed sshenc in {}", ssh_config_path.display());
             println!("  IdentityAgent {}", config.socket_path.display());
@@ -503,27 +750,14 @@ pub fn install() -> Result<()> {
         }
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        apply_windows_actions(&[
-            WindowsAction::StopService("ssh-agent"),
-            WindowsAction::SetServiceStart {
-                service: "ssh-agent",
-                mode: "disabled",
-            },
-        ]);
-        println!("Configured Windows ssh-agent service for sshenc.");
-    }
-
-    match ensure_agent_running(&RealAgentLauncher, &config.socket_path)? {
+    match agent_status {
         AgentStartStatus::Started => println!("Started sshenc agent."),
         AgentStartStatus::AlreadyRunning => println!("Agent already running."),
     }
 
     #[cfg(target_os = "windows")]
     {
-        let git_ssh_command = windows_git_ssh_command();
-        apply_windows_actions(&windows_install_actions(
+        apply_windows_actions(&windows_finalize_install_actions(
             &config.socket_path,
             git_ssh_command.clone(),
         ));
@@ -678,9 +912,15 @@ pub fn uninstall() -> Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        apply_windows_actions(&windows_uninstall_actions());
-        println!("Removed SSH_AUTH_SOCK and GIT_SSH_COMMAND environment variables.");
-        println!("Restored the Windows ssh-agent service.");
+        if let Some(state) = load_windows_install_state()? {
+            apply_windows_actions(&windows_restore_actions(&state));
+            remove_windows_install_state()?;
+            println!("Restored the previous Windows SSH environment and ssh-agent service state.");
+        } else {
+            println!(
+                "No saved Windows integration state found; left SSH_AUTH_SOCK, GIT_SSH_COMMAND, and ssh-agent service unchanged."
+            );
+        }
 
         // Clean up WSL distros
         crate::wsl::unconfigure_wsl_distros();
@@ -1274,7 +1514,9 @@ mod tests {
     #[derive(Debug)]
     struct FakeLauncher {
         running: bool,
+        find_result: Result<PathBuf>,
         spawn_result: Result<()>,
+        find_count: Mutex<usize>,
         spawn_count: Mutex<usize>,
     }
 
@@ -1284,7 +1526,11 @@ mod tests {
         }
 
         fn find_agent_binary(&self) -> Result<PathBuf> {
-            Ok(PathBuf::from("/tmp/sshenc-agent"))
+            *self.find_count.lock().unwrap() += 1;
+            self.find_result
+                .as_ref()
+                .cloned()
+                .map_err(|error| anyhow!(error.to_string()))
         }
 
         fn spawn_agent(&self, _agent_bin: &Path, _socket_path: &Path) -> Result<()> {
@@ -1752,7 +1998,9 @@ mod tests {
     fn ensure_agent_running_propagates_spawn_errors() {
         let launcher = FakeLauncher {
             running: false,
+            find_result: Ok(PathBuf::from("/tmp/sshenc-agent")),
             spawn_result: Err(anyhow!("spawn failed")),
+            find_count: Mutex::new(0),
             spawn_count: Mutex::new(0),
         };
 
@@ -1765,27 +2013,52 @@ mod tests {
     fn ensure_agent_running_skips_spawn_when_already_running() {
         let launcher = FakeLauncher {
             running: true,
+            find_result: Ok(PathBuf::from("/tmp/sshenc-agent")),
             spawn_result: Ok(()),
+            find_count: Mutex::new(0),
             spawn_count: Mutex::new(0),
         };
 
         let status = ensure_agent_running(&launcher, Path::new("/tmp/agent.sock")).unwrap();
         assert_eq!(status, AgentStartStatus::AlreadyRunning);
+        assert_eq!(*launcher.find_count.lock().unwrap(), 0);
         assert_eq!(*launcher.spawn_count.lock().unwrap(), 0);
     }
 
     #[test]
-    fn windows_install_actions_disable_service_and_set_socket_env() {
-        let actions = windows_install_actions(
-            Path::new(r"\\.\pipe\openssh-ssh-agent"),
-            Some("C:/Windows/System32/OpenSSH/ssh.exe".to_string()),
-        );
+    fn preflight_agent_start_propagates_lookup_errors_without_spawning() {
+        let launcher = FakeLauncher {
+            running: false,
+            find_result: Err(anyhow!("missing sshenc-agent")),
+            spawn_result: Ok(()),
+            find_count: Mutex::new(0),
+            spawn_count: Mutex::new(0),
+        };
+
+        let error = preflight_agent_start(&launcher, Path::new("/tmp/agent.sock")).unwrap_err();
+        assert!(error.to_string().contains("missing sshenc-agent"));
+        assert_eq!(*launcher.find_count.lock().unwrap(), 1);
+        assert_eq!(*launcher.spawn_count.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn windows_prepare_install_actions_disable_service() {
+        let actions = windows_prepare_install_actions();
 
         assert!(actions.contains(&WindowsAction::StopService("ssh-agent")));
         assert!(actions.contains(&WindowsAction::SetServiceStart {
             service: "ssh-agent",
-            mode: "disabled",
+            mode: WindowsServiceStartMode::Disabled,
         }));
+    }
+
+    #[test]
+    fn windows_finalize_install_actions_set_socket_env() {
+        let actions = windows_finalize_install_actions(
+            Path::new(r"\\.\pipe\openssh-ssh-agent"),
+            Some("C:/Windows/System32/OpenSSH/ssh.exe".to_string()),
+        );
+
         assert!(actions.contains(&WindowsAction::SetUserEnv {
             key: "SSH_AUTH_SOCK",
             value: "//./pipe/openssh-ssh-agent".to_string(),
@@ -1797,16 +2070,79 @@ mod tests {
     }
 
     #[test]
-    fn windows_uninstall_actions_restore_service_and_remove_env_vars() {
-        let actions = windows_uninstall_actions();
+    fn windows_restore_actions_restore_service_and_previous_env() {
+        let state = WindowsInstallState {
+            previous_ssh_auth_sock: Some("C:/custom/agent.sock".to_string()),
+            previous_git_ssh_command: Some("C:/custom/ssh.exe".to_string()),
+            ssh_agent_start_mode: Some(WindowsServiceStartMode::Demand),
+            ssh_agent_was_running: Some(true),
+            managed_git_ssh_command: true,
+        };
+        let actions = windows_restore_actions(&state);
 
-        assert!(actions.contains(&WindowsAction::DeleteUserEnv("SSH_AUTH_SOCK")));
-        assert!(actions.contains(&WindowsAction::DeleteUserEnv("GIT_SSH_COMMAND")));
+        assert!(actions.contains(&WindowsAction::SetUserEnv {
+            key: "SSH_AUTH_SOCK",
+            value: "C:/custom/agent.sock".to_string(),
+        }));
+        assert!(actions.contains(&WindowsAction::SetUserEnv {
+            key: "GIT_SSH_COMMAND",
+            value: "C:/custom/ssh.exe".to_string(),
+        }));
         assert!(actions.contains(&WindowsAction::SetServiceStart {
             service: "ssh-agent",
-            mode: "demand",
+            mode: WindowsServiceStartMode::Demand,
         }));
         assert!(actions.contains(&WindowsAction::StartService("ssh-agent")));
+    }
+
+    #[test]
+    fn windows_restore_actions_skip_git_env_when_not_managed() {
+        let state = WindowsInstallState {
+            previous_ssh_auth_sock: None,
+            previous_git_ssh_command: Some("C:/custom/ssh.exe".to_string()),
+            ssh_agent_start_mode: Some(WindowsServiceStartMode::Disabled),
+            ssh_agent_was_running: Some(false),
+            managed_git_ssh_command: false,
+        };
+        let actions = windows_restore_actions(&state);
+
+        assert!(actions.contains(&WindowsAction::DeleteUserEnv("SSH_AUTH_SOCK")));
+        assert!(!actions.iter().any(|action| {
+            matches!(
+                action,
+                WindowsAction::SetUserEnv {
+                    key: "GIT_SSH_COMMAND",
+                    ..
+                } | WindowsAction::DeleteUserEnv("GIT_SSH_COMMAND")
+            )
+        }));
+        assert!(actions.contains(&WindowsAction::SetServiceStart {
+            service: "ssh-agent",
+            mode: WindowsServiceStartMode::Disabled,
+        }));
+        assert!(!actions.contains(&WindowsAction::StartService("ssh-agent")));
+    }
+
+    #[test]
+    fn parse_sc_helpers_extract_service_state() {
+        let qc = "START_TYPE         : 3   DEMAND_START";
+        let query = "STATE              : 4  RUNNING";
+
+        assert_eq!(parse_sc_start_mode(qc), Some(WindowsServiceStartMode::Demand));
+        assert_eq!(parse_sc_running_state(query), Some(true));
+    }
+
+    #[test]
+    fn parse_reg_query_value_extracts_existing_env() {
+        let output = r"
+HKEY_CURRENT_USER\Environment
+    SSH_AUTH_SOCK    REG_SZ    //./pipe/openssh-ssh-agent
+";
+
+        assert_eq!(
+            parse_reg_query_value(output).as_deref(),
+            Some("//./pipe/openssh-ssh-agent")
+        );
     }
 
     // -----------------------------------------------------------------------

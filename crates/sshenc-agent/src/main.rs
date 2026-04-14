@@ -5,11 +5,8 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::path::Path;
 
 use sshenc_agent::server;
 

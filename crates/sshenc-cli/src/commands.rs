@@ -353,7 +353,13 @@ pub fn install() -> Result<()> {
         .join(".ssh")
         .join("config");
 
-    // Find the launcher dylib if available
+    // Find the launcher dylib if available.
+    // On Windows, skip PKCS#11 — the agent listens on the default OpenSSH pipe
+    // so auto-launching via PKCS#11 is unnecessary, and the stub PKCS#11 module
+    // crashes some OpenSSH builds during key exchange.
+    #[cfg(target_os = "windows")]
+    let dylib_path: Option<PathBuf> = None;
+    #[cfg(not(target_os = "windows"))]
     let dylib_path = find_launcher_dylib();
 
     match sshenc_core::ssh_config::install_block(
@@ -432,12 +438,19 @@ pub fn install() -> Result<()> {
             }
         }
 
-        // Remove GIT_SSH_COMMAND if it was set by an older sshenc version
-        let _unused = std::process::Command::new("reg")
-            .args(["delete", "HKCU\\Environment", "/v", "GIT_SSH_COMMAND", "/f"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        // Set GIT_SSH_COMMAND to the Windows system SSH with forward slashes
+        // so git uses Windows SSH (which can access the agent pipe) instead of
+        // MINGW SSH (which cannot). Forward slashes survive Git Bash's path
+        // translation.
+        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        if std::path::Path::new(win_ssh).exists() {
+            let git_ssh = win_ssh.replace('\\', "/");
+            let _unused = std::process::Command::new("setx")
+                .args(["GIT_SSH_COMMAND", &git_ssh])
+                .stdout(std::process::Stdio::null())
+                .status();
+            println!("Set GIT_SSH_COMMAND={git_ssh}");
+        }
     }
 
     // On Windows, configure WSL distros if any are installed

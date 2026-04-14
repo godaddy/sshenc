@@ -1716,6 +1716,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn seed_promote_key(keys_dir: &Path, label: &str, comment: Option<&str>) {
         let backend = backend_with_key(label, comment.map(str::to_owned));
         let info = backend.get(label).unwrap();

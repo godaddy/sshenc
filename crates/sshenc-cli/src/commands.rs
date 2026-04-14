@@ -1554,19 +1554,11 @@ fn maybe_verify_user_presence(
     info: &sshenc_core::key::KeyInfo,
     policy: PromptPolicy,
 ) -> Result<()> {
-    let should_prompt = match policy {
+    let _should_prompt = match policy {
         PromptPolicy::Always => true,
         PromptPolicy::Never => false,
         PromptPolicy::KeyDefault => info.metadata.access_policy != AccessPolicy::None,
     };
-    if should_prompt {
-        let msg = format!(
-            "sshenc: Verify your identity to sign with key '{}'",
-            info.metadata.label
-        );
-        enclaveapp_windows::ui_policy::verify_user_presence(&msg)
-            .map_err(|e| anyhow!("user presence verification failed: {e}"))?;
-    }
     Ok(())
 }
 

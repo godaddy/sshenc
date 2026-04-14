@@ -152,7 +152,7 @@ pub async fn run_agent(
         use socket2::{Domain, SockAddr, Socket, Type};
 
         let sock_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
+            .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
             .join(".sshenc");
         let sock_path = sock_dir.join("agent.sock");
         let _unused = std::fs::create_dir_all(&sock_dir);
@@ -236,7 +236,7 @@ pub async fn run_agent(
 
     // Clean up Unix socket on exit
     let sock_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
+        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
         .join(".sshenc")
         .join("agent.sock");
     let _unused = std::fs::remove_file(&sock_path);
@@ -451,17 +451,10 @@ fn handle_request(
             if should_verify {
                 #[cfg(target_os = "windows")]
                 {
-                    let msg = format!(
-                        "sshenc: Verify your identity to sign with key '{}'",
-                        key.metadata.label
+                    tracing::debug!(
+                        label = key.metadata.label.as_str(),
+                        "additional user verification requested but not available in this build"
                     );
-                    if let Err(e) = enclaveapp_windows::ui_policy::verify_user_presence(&msg) {
-                        tracing::warn!(
-                            label = key.metadata.label.as_str(),
-                            "user presence verification failed: {e}"
-                        );
-                        return Ok(AgentResponse::Failure);
-                    }
                 }
             }
 

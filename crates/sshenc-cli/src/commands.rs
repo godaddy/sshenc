@@ -444,7 +444,7 @@ pub fn install() -> Result<()> {
         // MINGW SSH (which cannot). Forward slashes survive Git Bash's path
         // translation.
         let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
-        if std::path::Path::new(win_ssh).exists() {
+        if Path::new(win_ssh).exists() {
             let git_ssh = win_ssh.replace('\\', "/");
             let _unused = std::process::Command::new("setx")
                 .args(["GIT_SSH_COMMAND", &git_ssh])
@@ -467,6 +467,7 @@ pub fn install() -> Result<()> {
 }
 
 /// Find the PKCS#11 launcher library, if installed.
+#[cfg(not(target_os = "windows"))]
 fn find_launcher_dylib() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let lib_name = "libsshenc_pkcs11.dylib";
@@ -682,7 +683,7 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     #[cfg(target_os = "windows")]
     let ssh_bin = {
         let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
-        if std::path::Path::new(win_ssh).exists() {
+        if Path::new(win_ssh).exists() {
             win_ssh.to_string()
         } else {
             "ssh".to_string()

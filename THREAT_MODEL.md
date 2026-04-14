@@ -131,8 +131,9 @@ is hardware-protected.
 approve signing requests without verifying the context.
 
 **Mitigations**:
-- The prompt policy is configurable (`always`, `never`, `key_default`).
-  Users can choose the appropriate trade-off for their threat model.
+- The prompt policy is configurable (`always`, `never`, `keydefault`).
+  It controls sshenc-managed pre-sign verification where supported, and
+  `keydefault` follows the key's own access policy.
 - Keys can be created with or without user-presence requirements.
   Different keys can have different policies (e.g., user-presence for
   production servers, none for personal GitHub).

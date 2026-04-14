@@ -7,9 +7,11 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
-use sshenc_core::Config;
+use sshenc_core::{AccessPolicy, Config, PromptPolicy};
 use sshenc_se::{sshenc_keys_dir, KeyBackend, SshencBackend};
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -469,7 +471,7 @@ pub fn keygen(
     comment: Option<String>,
     write_pub: Option<PathBuf>,
     print_pub: bool,
-    require_user_presence: bool,
+    access_policy: AccessPolicy,
     json: bool,
 ) -> Result<()> {
     let key_label = KeyLabel::new(label)?;
@@ -477,7 +479,7 @@ pub fn keygen(
     let opts = KeyGenOptions {
         label: key_label,
         comment,
-        requires_user_presence: require_user_presence,
+        access_policy,
         write_pub_path: write_pub.clone(),
     };
 
@@ -701,50 +703,49 @@ pub fn export_pub(
 #[allow(clippy::print_stdout)]
 pub fn agent(
     socket: Option<PathBuf>,
-    _foreground: bool,
+    foreground: bool,
     debug: bool,
     labels: Vec<String>,
 ) -> Result<()> {
     let config = Config::load_default()?;
     let socket_path = socket.unwrap_or(config.socket_path);
-
-    let level = if debug { "debug" } else { "info" };
-
-    // Re-initialize tracing for agent mode
-    // (the main CLI already initialized at warn level, but the agent needs more)
-    drop(
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new(level))
-            .try_init(),
-    );
-
     let allowed_labels = if labels.is_empty() {
         config.allowed_labels
     } else {
         labels
     };
+    let agent_bin = find_agent_binary()?;
 
-    println!("Starting sshenc agent...");
-    println!("SSH_AUTH_SOCK={}", socket_path.display());
-    println!();
-    println!("To use in your shell:");
-    println!("  export SSH_AUTH_SOCK={}", socket_path.display());
+    let mut command = std::process::Command::new(&agent_bin);
+    command.arg("--socket").arg(&socket_path);
+    if foreground {
+        command.arg("--foreground");
+    }
+    if debug {
+        command.arg("--debug");
+    }
+    if !allowed_labels.is_empty() {
+        command.arg("--labels").arg(allowed_labels.join(","));
+    }
 
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        // Import here to avoid the module path issue
-        #[cfg(unix)]
-        let server = sshenc_agent::server::run_agent(socket_path, allowed_labels, None);
-        #[cfg(windows)]
-        let server = sshenc_agent::server::run_agent(
-            socket_path.display().to_string(),
-            allowed_labels,
-            None,
-        );
-        server.await
-    })?;
+    #[cfg(unix)]
+    {
+        let error = command.exec();
+        Err(anyhow!("failed to exec {}: {error}", agent_bin.display()))
+    }
 
-    Ok(())
+    #[cfg(windows)]
+    {
+        let status = command.status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!(
+                "sshenc-agent exited with status {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+    }
 }
 
 #[allow(clippy::print_stdout)]
@@ -1065,14 +1066,19 @@ pub fn openssh_print_config(
     pkcs11: bool,
 ) -> Result<()> {
     let info = backend.get(label)?;
+    let config = Config::load_default()?;
 
     let pub_path = info
         .pub_file_path
         .as_ref()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| format!("~/.ssh/{label}.pub"));
-
-    let config = Config::load_default()?;
+        .unwrap_or_else(|| {
+            config
+                .pub_dir
+                .join(format!("{label}.pub"))
+                .display()
+                .to_string()
+        });
 
     if pkcs11 {
         println!("# sshenc PKCS#11 configuration for {label}");
@@ -1106,9 +1112,7 @@ struct SshInvocation {
 }
 
 fn default_ssh_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .ok_or_else(|| anyhow!("could not determine home directory"))
-        .map(|home| home.join(".ssh"))
+    Ok(Config::load_default()?.pub_dir)
 }
 
 fn ssh_binary() -> String {
@@ -1470,22 +1474,8 @@ pub fn forward_to_ssh_keygen(args: &[String]) -> Result<()> {
 #[derive(Debug, PartialEq, Eq)]
 struct SshSignArgs {
     namespace: String,
-    label: String,
+    key_file: PathBuf,
     data_file: PathBuf,
-}
-
-fn label_from_key_path(key_path: &Path) -> String {
-    let label = if key_path.file_name().map(|f| f.to_string_lossy()) == Some("id_ecdsa.pub".into())
-    {
-        "default".to_string()
-    } else {
-        key_path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string())
-            .unwrap_or_else(|| "default".to_string())
-    };
-
-    label.strip_suffix(".ssh").unwrap_or(&label).to_string()
 }
 
 fn parse_ssh_sign_args(args: &[String]) -> Result<SshSignArgs> {
@@ -1524,13 +1514,71 @@ fn parse_ssh_sign_args(args: &[String]) -> Result<SshSignArgs> {
 
     Ok(SshSignArgs {
         namespace,
-        label: label_from_key_path(&key_file),
+        key_file,
         data_file,
     })
 }
 
-fn ssh_sign_with_backend(backend: &dyn KeyBackend, args: &[String]) -> Result<()> {
+fn resolve_signing_label(backend: &dyn KeyBackend, key_file: &Path) -> Result<String> {
+    let key_file_contents = std::fs::read_to_string(key_file)?;
+    let key_line = key_file_contents
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("public key file is empty: {}", key_file.display()))?;
+    let requested = SshPublicKey::from_openssh_line(key_line)?;
+    let requested_blob = requested.wire_blob();
+
+    let mut matches = backend.list()?.into_iter().filter_map(|info| {
+        let pubkey =
+            SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())
+                .ok()?;
+        (pubkey.wire_blob() == requested_blob).then(|| info.metadata.label.to_string())
+    });
+
+    let first = matches
+        .next()
+        .ok_or_else(|| anyhow!("no sshenc key matches {}", key_file.display()))?;
+    if matches.next().is_some() {
+        bail!(
+            "multiple sshenc keys match {}; use a unique public key file",
+            key_file.display()
+        );
+    }
+
+    Ok(first)
+}
+
+#[cfg(target_os = "windows")]
+fn maybe_verify_user_presence(
+    info: &sshenc_core::key::KeyInfo,
+    policy: PromptPolicy,
+) -> Result<()> {
+    let _should_prompt = match policy {
+        PromptPolicy::Always => true,
+        PromptPolicy::Never => false,
+        PromptPolicy::KeyDefault => info.metadata.access_policy != AccessPolicy::None,
+    };
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn maybe_verify_user_presence(
+    _info: &sshenc_core::key::KeyInfo,
+    _policy: PromptPolicy,
+) -> Result<()> {
+    Ok(())
+}
+
+fn ssh_sign_with_backend(
+    backend: &dyn KeyBackend,
+    args: &[String],
+    prompt_policy: PromptPolicy,
+) -> Result<()> {
     let sign_args = parse_ssh_sign_args(args)?;
+    let label = resolve_signing_label(backend, &sign_args.key_file)?;
+    let info = backend.get(&label)?;
+    maybe_verify_user_presence(&info, prompt_policy)?;
 
     let file_data = std::fs::read(&sign_args.data_file)?;
     let message_hash = {
@@ -1549,9 +1597,8 @@ fn ssh_sign_with_backend(backend: &dyn KeyBackend, args: &[String]) -> Result<()
     };
 
     let der_sig = backend
-        .sign(&sign_args.label, &signed_data)
+        .sign(&label, &signed_data)
         .map_err(|e| anyhow!("signing failed: {e}"))?;
-    let info = backend.get(&sign_args.label)?;
     let ssh_pubkey =
         SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
     let sig_blob = build_ssh_signature(&ssh_pubkey, &sign_args.namespace, &der_sig)?;
@@ -1581,10 +1628,11 @@ fn ssh_sign_with_backend(backend: &dyn KeyBackend, args: &[String]) -> Result<()
 /// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
 /// We sign via the hardware backend and write an SSH signature to <data_file>.sig.
 pub fn ssh_sign(args: &[String]) -> Result<()> {
-    let ssh_dir = default_ssh_dir()?;
+    let config = Config::load_default()?;
+    let ssh_dir = config.pub_dir;
     let backend = SshencBackend::new(ssh_dir)
         .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
-    ssh_sign_with_backend(&backend, args)
+    ssh_sign_with_backend(&backend, args, config.prompt_policy)
 }
 
 /// Build an SSH signature blob per the SSH signature format spec.
@@ -1664,7 +1712,7 @@ mod tests {
         let opts = KeyGenOptions {
             label: KeyLabel::new(label).unwrap(),
             comment,
-            requires_user_presence: false,
+            access_policy: AccessPolicy::None,
             write_pub_path: None,
         };
         backend.generate(&opts).unwrap();
@@ -1736,7 +1784,7 @@ mod tests {
             Some("comment".into()),
             None,
             false,
-            false,
+            AccessPolicy::None,
             false,
         );
         assert!(result.is_ok());
@@ -1754,7 +1802,7 @@ mod tests {
             Some("user@host".into()),
             None,
             false,
-            false,
+            AccessPolicy::None,
             false,
         )
         .unwrap();
@@ -1773,7 +1821,7 @@ mod tests {
             Some("test@host".into()),
             Some(pub_path.clone()),
             false,
-            false,
+            AccessPolicy::None,
             false,
         )
         .unwrap();
@@ -1790,7 +1838,16 @@ mod tests {
     #[test]
     fn keygen_without_write_pub_path_no_file() {
         let backend = mock_backend();
-        keygen(&backend, "no-pub", None, None, false, false, false).unwrap();
+        keygen(
+            &backend,
+            "no-pub",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
         let info = backend.get("no-pub").unwrap();
         assert!(info.pub_file_path.is_none());
     }
@@ -1798,8 +1855,25 @@ mod tests {
     #[test]
     fn keygen_duplicate_label_returns_error() {
         let backend = mock_backend();
-        keygen(&backend, "dup-key", None, None, false, false, false).unwrap();
-        let result = keygen(&backend, "dup-key", None, None, false, false, false);
+        keygen(
+            &backend,
+            "dup-key",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
+        let result = keygen(
+            &backend,
+            "dup-key",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -1811,7 +1885,16 @@ mod tests {
     #[test]
     fn keygen_with_user_presence() {
         let backend = mock_backend();
-        keygen(&backend, "up-key", None, None, false, true, false).unwrap();
+        keygen(
+            &backend,
+            "up-key",
+            None,
+            None,
+            false,
+            AccessPolicy::Any,
+            false,
+        )
+        .unwrap();
         let info = backend.get("up-key").unwrap();
         assert!(info.metadata.requires_user_presence);
     }
@@ -1826,7 +1909,7 @@ mod tests {
             Some("c".into()),
             None,
             false,
-            false,
+            AccessPolicy::None,
             true,
         );
         assert!(result.is_ok());
@@ -1841,7 +1924,7 @@ mod tests {
             Some("c".into()),
             None,
             true,
-            false,
+            AccessPolicy::None,
             false,
         );
         assert!(result.is_ok());
@@ -1850,7 +1933,15 @@ mod tests {
     #[test]
     fn keygen_invalid_label_returns_error() {
         let backend = mock_backend();
-        let result = keygen(&backend, "bad label!", None, None, false, false, false);
+        let result = keygen(
+            &backend,
+            "bad label!",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        );
         assert!(result.is_err());
     }
 
@@ -1868,8 +1959,26 @@ mod tests {
     #[test]
     fn list_after_generating_keys() {
         let backend = mock_backend();
-        keygen(&backend, "key-a", None, None, false, false, false).unwrap();
-        keygen(&backend, "key-b", None, None, false, false, false).unwrap();
+        keygen(
+            &backend,
+            "key-a",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
+        keygen(
+            &backend,
+            "key-b",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
         let result = list(&backend, false);
         assert!(result.is_ok());
         // Verify keys actually exist
@@ -1887,14 +1996,23 @@ mod tests {
     #[test]
     fn list_json_with_keys() {
         let backend = mock_backend();
-        keygen(&backend, "jk-1", None, None, false, false, false).unwrap();
+        keygen(
+            &backend,
+            "jk-1",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
         keygen(
             &backend,
             "jk-2",
             Some("comment".into()),
             None,
             false,
-            false,
+            AccessPolicy::None,
             false,
         )
         .unwrap();
@@ -1982,9 +2100,36 @@ mod tests {
     #[test]
     fn delete_multiple_keys_with_yes() {
         let backend = mock_backend();
-        keygen(&backend, "mk-1", None, None, false, false, false).unwrap();
-        keygen(&backend, "mk-2", None, None, false, false, false).unwrap();
-        keygen(&backend, "mk-3", None, None, false, false, false).unwrap();
+        keygen(
+            &backend,
+            "mk-1",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
+        keygen(
+            &backend,
+            "mk-2",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
+        keygen(
+            &backend,
+            "mk-3",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
         assert_eq!(backend.key_count(), 3);
 
         let labels = vec!["mk-1".to_string(), "mk-2".to_string()];
@@ -2006,7 +2151,7 @@ mod tests {
             None,
             Some(pub_path.clone()),
             false,
-            false,
+            AccessPolicy::None,
             false,
         )
         .unwrap();
@@ -2023,9 +2168,36 @@ mod tests {
     #[test]
     fn delete_one_of_several_leaves_others() {
         let backend = mock_backend();
-        keygen(&backend, "keep-a", None, None, false, false, false).unwrap();
-        keygen(&backend, "remove-b", None, None, false, false, false).unwrap();
-        keygen(&backend, "keep-c", None, None, false, false, false).unwrap();
+        keygen(
+            &backend,
+            "keep-a",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
+        keygen(
+            &backend,
+            "remove-b",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
+        keygen(
+            &backend,
+            "keep-c",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
 
         let labels = vec!["remove-b".to_string()];
         delete(&backend, &labels, false, true).unwrap();
@@ -2519,7 +2691,7 @@ HKEY_CURRENT_USER\Environment
     }
 
     #[test]
-    fn parse_ssh_sign_args_preserves_namespace_and_normalizes_label() {
+    fn parse_ssh_sign_args_preserves_namespace_and_key_file() {
         let parsed = parse_ssh_sign_args(&[
             "-Y".to_string(),
             "sign".to_string(),
@@ -2532,7 +2704,7 @@ HKEY_CURRENT_USER\Environment
         .unwrap();
 
         assert_eq!(parsed.namespace, "git-namespace-with-extra-segments");
-        assert_eq!(parsed.label, "work");
+        assert_eq!(parsed.key_file, PathBuf::from("/tmp/work.ssh.pub"));
         assert_eq!(parsed.data_file, PathBuf::from("/tmp/payload"));
     }
 
@@ -2543,6 +2715,11 @@ HKEY_CURRENT_USER\Environment
         let pub_path = root.join("sig-key.pub");
         let backend = backend_with_key("sig-key", Some("sig@test".into()));
         std::fs::write(&data_path, "payload").unwrap();
+        let info = backend.get("sig-key").unwrap();
+        let pubkey =
+            SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())
+                .unwrap();
+        std::fs::write(&pub_path, format!("{}\n", pubkey.to_openssh_line())).unwrap();
 
         ssh_sign_with_backend(
             &backend,
@@ -2555,6 +2732,7 @@ HKEY_CURRENT_USER\Environment
                 pub_path.display().to_string(),
                 data_path.display().to_string(),
             ],
+            PromptPolicy::KeyDefault,
         )
         .unwrap();
 
@@ -2631,7 +2809,7 @@ HKEY_CURRENT_USER\Environment
             Some("user@machine".into()),
             None,
             false,
-            true,
+            AccessPolicy::Any,
             false,
         )
         .unwrap();
@@ -2658,7 +2836,16 @@ HKEY_CURRENT_USER\Environment
     fn delete_verifies_all_labels_exist_before_deleting() {
         // If one label doesn't exist, no keys should be deleted
         let backend = mock_backend();
-        keygen(&backend, "real-key", None, None, false, false, false).unwrap();
+        keygen(
+            &backend,
+            "real-key",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
         assert_eq!(backend.key_count(), 1);
 
         let labels = vec!["real-key".to_string(), "fake-key".to_string()];
@@ -2704,9 +2891,36 @@ HKEY_CURRENT_USER\Environment
     #[test]
     fn keygen_multiple_keys_have_unique_fingerprints() {
         let backend = mock_backend();
-        keygen(&backend, "uniq-1", None, None, false, false, false).unwrap();
-        keygen(&backend, "uniq-2", None, None, false, false, false).unwrap();
-        keygen(&backend, "uniq-3", None, None, false, false, false).unwrap();
+        keygen(
+            &backend,
+            "uniq-1",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
+        keygen(
+            &backend,
+            "uniq-2",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
+        keygen(
+            &backend,
+            "uniq-3",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            false,
+        )
+        .unwrap();
 
         let k1 = backend.get("uniq-1").unwrap();
         let k2 = backend.get("uniq-2").unwrap();

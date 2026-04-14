@@ -8,6 +8,7 @@ use clap::Parser;
 use sshenc_core::backup::{self, BackupExecutionError};
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
+use sshenc_core::{AccessPolicy, Config};
 use sshenc_se::KeyBackend;
 use std::path::PathBuf;
 
@@ -81,9 +82,7 @@ where
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let pub_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".ssh");
+    let pub_dir = Config::load_default()?.pub_dir;
 
     let backend = sshenc_se::SshencBackend::new(pub_dir.clone())
         .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?;
@@ -132,7 +131,11 @@ fn main() -> Result<()> {
     let opts = KeyGenOptions {
         label: key_label,
         comment,
-        requires_user_presence: cli.require_user_presence,
+        access_policy: if cli.require_user_presence {
+            AccessPolicy::Any
+        } else {
+            AccessPolicy::None
+        },
         write_pub_path: write_pub.clone(),
     };
 

@@ -9,15 +9,15 @@
 use anyhow::Result;
 use sshenc_agent_proto::message::{self, AgentRequest, AgentResponse, Identity};
 use sshenc_agent_proto::signature;
+use sshenc_core::config::PromptPolicy;
 use sshenc_core::pubkey::SshPublicKey;
+use sshenc_core::AccessPolicy;
 use sshenc_se::KeyBackend;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::signal;
 
-#[cfg(unix)]
-use std::path::PathBuf;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
@@ -26,17 +26,15 @@ use tokio::net::UnixListener;
 #[allow(clippy::print_stdout)]
 pub async fn run_agent(
     socket_path: PathBuf,
+    pub_dir: PathBuf,
     allowed_labels: Vec<String>,
+    prompt_policy: PromptPolicy,
     ready_file: Option<&Path>,
 ) -> Result<()> {
     prepare_socket_path(&socket_path)?;
 
-    let ssh_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".ssh");
-
     let backend: Arc<dyn KeyBackend> = Arc::new(
-        sshenc_se::SshencBackend::new(ssh_dir.clone())
+        sshenc_se::SshencBackend::new(pub_dir)
             .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 
@@ -63,7 +61,9 @@ pub async fn run_agent(
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, &*backend, &allowed).await {
+                    if let Err(e) =
+                        handle_connection(stream, &*backend, &allowed, prompt_policy).await
+                    {
                         tracing::warn!("connection error: {e}");
                     }
                 });
@@ -124,17 +124,15 @@ fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 #[cfg(windows)]
 pub async fn run_agent(
     pipe_name: String,
+    pub_dir: PathBuf,
     allowed_labels: Vec<String>,
+    prompt_policy: PromptPolicy,
     ready_file: Option<&Path>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
-    let ssh_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
-        .join(".ssh");
-
     let backend: Arc<dyn KeyBackend> = Arc::new(
-        sshenc_se::SshencBackend::new(ssh_dir.clone())
+        sshenc_se::SshencBackend::new(pub_dir)
             .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 
@@ -154,7 +152,7 @@ pub async fn run_agent(
         use socket2::{Domain, SockAddr, Socket, Type};
 
         let sock_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
+            .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
             .join(".sshenc");
         let sock_path = sock_dir.join("agent.sock");
         let _unused = std::fs::create_dir_all(&sock_dir);
@@ -162,6 +160,7 @@ pub async fn run_agent(
 
         let backend_for_unix = Arc::clone(&backend);
         let allowed_for_unix = Arc::clone(&allowed);
+        let prompt_policy_for_unix = prompt_policy;
 
         std::thread::spawn(move || {
             let socket = match Socket::new(Domain::UNIX, Type::STREAM, None) {
@@ -194,7 +193,12 @@ pub async fn run_agent(
                         let backend = Arc::clone(&backend_for_unix);
                         let allowed = Arc::clone(&allowed_for_unix);
                         std::thread::spawn(move || {
-                            handle_blocking_connection(conn, &*backend, &allowed);
+                            handle_blocking_connection(
+                                conn,
+                                &*backend,
+                                &allowed,
+                                prompt_policy_for_unix,
+                            );
                         });
                     }
                     Err(e) => {
@@ -216,7 +220,9 @@ pub async fn run_agent(
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, &*backend, &allowed).await {
+                    if let Err(e) =
+                        handle_connection(stream, &*backend, &allowed, prompt_policy).await
+                    {
                         tracing::warn!("pipe connection error: {e}");
                     }
                 });
@@ -230,7 +236,7 @@ pub async fn run_agent(
 
     // Clean up Unix socket on exit
     let sock_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\Default"))
+        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
         .join(".sshenc")
         .join("agent.sock");
     let _unused = std::fs::remove_file(&sock_path);
@@ -253,6 +259,7 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
     mut stream: S,
     backend: &dyn KeyBackend,
     allowed_labels: &HashSet<String>,
+    prompt_policy: PromptPolicy,
 ) -> Result<()> {
     tracing::debug!("new agent connection");
 
@@ -278,7 +285,7 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
 
         // Parse and handle
         let request = message::parse_request(&payload)?;
-        let response = handle_request(request, backend, allowed_labels)?;
+        let response = handle_request(request, backend, allowed_labels, prompt_policy)?;
         let response_payload = message::serialize_response(&response);
 
         // Write response
@@ -294,6 +301,7 @@ fn handle_blocking_connection(
     conn: socket2::Socket,
     backend: &dyn KeyBackend,
     allowed_labels: &HashSet<String>,
+    prompt_policy: PromptPolicy,
 ) {
     use std::io::{Read, Write};
 
@@ -325,7 +333,7 @@ fn handle_blocking_connection(
             Ok(r) => r,
             Err(_) => return,
         };
-        let response = match handle_request(request, backend, allowed_labels) {
+        let response = match handle_request(request, backend, allowed_labels, prompt_policy) {
             Ok(r) => r,
             Err(_) => return,
         };
@@ -365,6 +373,7 @@ fn handle_request(
     request: AgentRequest,
     backend: &dyn KeyBackend,
     allowed_labels: &HashSet<String>,
+    prompt_policy: PromptPolicy,
 ) -> Result<AgentResponse> {
     match request {
         AgentRequest::RequestIdentities => {
@@ -433,21 +442,19 @@ fn handle_request(
                 return Ok(AgentResponse::Failure);
             }
 
-            // Verify user presence if required
-            if key.metadata.requires_user_presence {
+            let should_verify = match prompt_policy {
+                PromptPolicy::Always => true,
+                PromptPolicy::Never => false,
+                PromptPolicy::KeyDefault => key.metadata.access_policy != AccessPolicy::None,
+            };
+
+            if should_verify {
                 #[cfg(target_os = "windows")]
                 {
-                    let msg = format!(
-                        "sshenc: Verify your identity to sign with key '{}'",
-                        key.metadata.label
+                    tracing::debug!(
+                        label = key.metadata.label.as_str(),
+                        "additional user verification requested but not available in this build"
                     );
-                    if let Err(e) = enclaveapp_windows::ui_policy::verify_user_presence(&msg) {
-                        tracing::warn!(
-                            label = key.metadata.label.as_str(),
-                            "user presence verification failed: {e}"
-                        );
-                        return Ok(AgentResponse::Failure);
-                    }
                 }
             }
 
@@ -477,6 +484,7 @@ fn handle_request(
 mod tests {
     use super::*;
     use sshenc_core::key::{KeyGenOptions, KeyLabel};
+    use sshenc_core::AccessPolicy;
     use sshenc_test_support::MockKeyBackend;
     use std::collections::HashSet;
 
@@ -500,7 +508,7 @@ mod tests {
         let opts = KeyGenOptions {
             label: KeyLabel::new("test-key").unwrap(),
             comment: Some("test".into()),
-            requires_user_presence: false,
+            access_policy: AccessPolicy::None,
             write_pub_path: None,
         };
         backend.generate(&opts).unwrap();
@@ -517,8 +525,13 @@ mod tests {
     #[test]
     fn test_request_identities_returns_keys() {
         let backend = setup_backend();
-        let resp =
-            handle_request(AgentRequest::RequestIdentities, &backend, &empty_labels()).unwrap();
+        let resp = handle_request(
+            AgentRequest::RequestIdentities,
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => {
                 assert_eq!(ids.len(), 1);
@@ -531,8 +544,13 @@ mod tests {
     #[test]
     fn test_request_identities_empty_backend() {
         let backend = MockKeyBackend::new();
-        let resp =
-            handle_request(AgentRequest::RequestIdentities, &backend, &empty_labels()).unwrap();
+        let resp = handle_request(
+            AgentRequest::RequestIdentities,
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => assert!(ids.is_empty()),
             _ => panic!("expected IdentitiesAnswer"),
@@ -546,7 +564,7 @@ mod tests {
             .generate(&KeyGenOptions {
                 label: KeyLabel::new("allowed").unwrap(),
                 comment: None,
-                requires_user_presence: false,
+                access_policy: AccessPolicy::None,
                 write_pub_path: None,
             })
             .unwrap();
@@ -554,13 +572,19 @@ mod tests {
             .generate(&KeyGenOptions {
                 label: KeyLabel::new("blocked").unwrap(),
                 comment: None,
-                requires_user_presence: false,
+                access_policy: AccessPolicy::None,
                 write_pub_path: None,
             })
             .unwrap();
 
         let allowed: HashSet<String> = ["allowed".to_string()].into_iter().collect();
-        let resp = handle_request(AgentRequest::RequestIdentities, &backend, &allowed).unwrap();
+        let resp = handle_request(
+            AgentRequest::RequestIdentities,
+            &backend,
+            &allowed,
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => assert_eq!(ids.len(), 1),
             _ => panic!("expected IdentitiesAnswer"),
@@ -580,6 +604,7 @@ mod tests {
             },
             &backend,
             &empty_labels(),
+            PromptPolicy::KeyDefault,
         )
         .unwrap();
         match resp {
@@ -601,6 +626,7 @@ mod tests {
             },
             &backend,
             &empty_labels(),
+            PromptPolicy::KeyDefault,
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -620,6 +646,7 @@ mod tests {
             },
             &backend,
             &allowed,
+            PromptPolicy::KeyDefault,
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -628,7 +655,13 @@ mod tests {
     #[test]
     fn test_unknown_message_type() {
         let backend = setup_backend();
-        let resp = handle_request(AgentRequest::Unknown(255), &backend, &empty_labels()).unwrap();
+        let resp = handle_request(
+            AgentRequest::Unknown(255),
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
     }
 
@@ -645,6 +678,7 @@ mod tests {
             },
             &backend,
             &empty_labels(),
+            PromptPolicy::KeyDefault,
         )
         .unwrap();
 
@@ -703,7 +737,7 @@ mod tests {
             .generate(&KeyGenOptions {
                 label: KeyLabel::new("other").unwrap(),
                 comment: Some("other".into()),
-                requires_user_presence: false,
+                access_policy: AccessPolicy::None,
                 write_pub_path: None,
             })
             .unwrap();
@@ -712,13 +746,18 @@ mod tests {
             .generate(&KeyGenOptions {
                 label: KeyLabel::new("default").unwrap(),
                 comment: Some("default".into()),
-                requires_user_presence: false,
+                access_policy: AccessPolicy::None,
                 write_pub_path: None,
             })
             .unwrap();
 
-        let resp =
-            handle_request(AgentRequest::RequestIdentities, &backend, &empty_labels()).unwrap();
+        let resp = handle_request(
+            AgentRequest::RequestIdentities,
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => {
                 assert_eq!(ids.len(), 2);
@@ -736,13 +775,18 @@ mod tests {
             .generate(&KeyGenOptions {
                 label: KeyLabel::new("no-comment").unwrap(),
                 comment: None,
-                requires_user_presence: false,
+                access_policy: AccessPolicy::None,
                 write_pub_path: None,
             })
             .unwrap();
 
-        let resp =
-            handle_request(AgentRequest::RequestIdentities, &backend, &empty_labels()).unwrap();
+        let resp = handle_request(
+            AgentRequest::RequestIdentities,
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => {
                 assert_eq!(ids.len(), 1);
@@ -778,7 +822,8 @@ mod tests {
 
         // Run handle_connection with the server side
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        let conn_result =
+            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
         assert!(conn_result.is_ok());
 
         writer.await.unwrap();
@@ -831,7 +876,8 @@ mod tests {
         });
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        let conn_result =
+            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
         assert!(conn_result.is_ok());
 
         writer.await.unwrap();
@@ -858,7 +904,8 @@ mod tests {
         drop(client);
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        let conn_result =
+            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
         // Should return Ok(()) on client disconnect (UnexpectedEof)
         assert!(conn_result.is_ok());
     }
@@ -884,7 +931,8 @@ mod tests {
         });
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        let conn_result =
+            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
         // Zero length should cause early return with Ok(())
         assert!(conn_result.is_ok());
 
@@ -912,7 +960,8 @@ mod tests {
         });
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        let conn_result =
+            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
         // Oversized length should cause early return with Ok(())
         assert!(conn_result.is_ok());
 
@@ -946,7 +995,8 @@ mod tests {
         });
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result = handle_connection(server_stream, &backend, &allowed).await;
+        let conn_result =
+            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
         assert!(conn_result.is_ok());
 
         writer.await.unwrap();

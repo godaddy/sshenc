@@ -6,6 +6,7 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use sshenc_core::backup::{self, BackupExecutionError};
+use sshenc_core::{AccessPolicy, Config};
 use std::path::PathBuf;
 
 mod commands;
@@ -290,10 +291,7 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-
-    let pub_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".ssh");
+    let pub_dir = Config::load_default()?.pub_dir;
 
     let backend = sshenc_se::SshencBackend::new(pub_dir)
         .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?;
@@ -355,11 +353,8 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 }
             }
             let comment = comment.or_else(default_comment);
-            // auth_policy overrides require_user_presence
-            let user_presence = auth_policy
-                .as_deref()
-                .map(|p| p != "none")
-                .unwrap_or(require_user_presence);
+            let access_policy =
+                selected_access_policy(auth_policy.as_deref(), require_user_presence);
             run_with_existing_key_backup(pub_path.as_ref(), paired_private_path.as_ref(), || {
                 commands::keygen(
                     backend,
@@ -367,7 +362,7 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                     comment,
                     pub_path.clone(),
                     print_pub,
-                    user_presence,
+                    access_policy,
                     json,
                 )
             })
@@ -417,6 +412,23 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
             clap_complete::generate(shell, &mut Cli::command(), "sshenc", &mut std::io::stdout());
             Ok(())
         }
+    }
+}
+
+fn selected_access_policy(auth_policy: Option<&str>, require_user_presence: bool) -> AccessPolicy {
+    if let Some(policy) = auth_policy {
+        return match policy {
+            "any" => AccessPolicy::Any,
+            "biometric" => AccessPolicy::BiometricOnly,
+            "password" => AccessPolicy::PasswordOnly,
+            _ => AccessPolicy::None,
+        };
+    }
+
+    if require_user_presence {
+        AccessPolicy::Any
+    } else {
+        AccessPolicy::None
     }
 }
 

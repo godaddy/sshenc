@@ -3,6 +3,7 @@
 
 //! Key domain models and metadata types.
 
+use enclaveapp_core::types::AccessPolicy;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
@@ -117,6 +118,8 @@ pub struct KeyMetadata {
     pub app_tag: String,
     /// Key algorithm.
     pub algorithm: KeyAlgorithm,
+    /// Persisted access policy for signing.
+    pub access_policy: AccessPolicy,
     /// Whether user presence (biometric/password) is required for signing.
     pub requires_user_presence: bool,
     /// Optional comment for the SSH public key line.
@@ -124,13 +127,14 @@ pub struct KeyMetadata {
 }
 
 impl KeyMetadata {
-    pub fn new(label: KeyLabel, requires_user_presence: bool, comment: Option<String>) -> Self {
+    pub fn new(label: KeyLabel, access_policy: AccessPolicy, comment: Option<String>) -> Self {
         let app_tag = label.app_tag();
         KeyMetadata {
             label,
             app_tag,
             algorithm: KeyAlgorithm::EcdsaP256,
-            requires_user_presence,
+            access_policy,
+            requires_user_presence: access_policy != AccessPolicy::None,
             comment,
         }
     }
@@ -173,7 +177,7 @@ mod base64_bytes {
 pub struct KeyGenOptions {
     pub label: KeyLabel,
     pub comment: Option<String>,
-    pub requires_user_presence: bool,
+    pub access_policy: AccessPolicy,
     /// If set, write the public key to this path.
     pub write_pub_path: Option<PathBuf>,
 }
@@ -288,20 +292,30 @@ mod tests {
     #[test]
     fn test_key_metadata_construction() {
         let label = KeyLabel::new("test").unwrap();
-        let meta = KeyMetadata::new(label.clone(), true, Some("comment".into()));
+        let meta = KeyMetadata::new(label.clone(), AccessPolicy::Any, Some("comment".into()));
         assert_eq!(meta.label, label);
         assert_eq!(meta.app_tag, "com.sshenc.key.test");
         assert!(matches!(meta.algorithm, KeyAlgorithm::EcdsaP256));
         assert!(meta.requires_user_presence);
+        assert_eq!(meta.access_policy, AccessPolicy::Any);
         assert_eq!(meta.comment.as_deref(), Some("comment"));
     }
 
     #[test]
     fn test_key_metadata_no_comment() {
         let label = KeyLabel::new("bare").unwrap();
-        let meta = KeyMetadata::new(label, false, None);
+        let meta = KeyMetadata::new(label, AccessPolicy::None, None);
         assert!(!meta.requires_user_presence);
+        assert_eq!(meta.access_policy, AccessPolicy::None);
         assert!(meta.comment.is_none());
+    }
+
+    #[test]
+    fn test_key_metadata_preserves_specific_access_policy() {
+        let label = KeyLabel::new("bio").unwrap();
+        let meta = KeyMetadata::new(label, AccessPolicy::BiometricOnly, None);
+        assert!(meta.requires_user_presence);
+        assert_eq!(meta.access_policy, AccessPolicy::BiometricOnly);
     }
 
     // --- KeyAlgorithm ---

@@ -7,9 +7,12 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 sshenc-agent-proto = { path = "../crates/sshenc-agent-proto" }
+sshenc-core = { path = "../crates/sshenc-core" }
 
 [[bin]]
 name = "fuzz_parse_request"

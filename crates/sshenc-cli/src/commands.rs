@@ -734,10 +734,13 @@ pub fn agent(
     rt.block_on(async {
         // Import here to avoid the module path issue
         #[cfg(unix)]
-        let server = sshenc_agent::server::run_agent(socket_path, allowed_labels);
+        let server = sshenc_agent::server::run_agent(socket_path, allowed_labels, None);
         #[cfg(windows)]
-        let server =
-            sshenc_agent::server::run_agent(socket_path.display().to_string(), allowed_labels);
+        let server = sshenc_agent::server::run_agent(
+            socket_path.display().to_string(),
+            allowed_labels,
+            None,
+        );
         server.await
     })?;
 
@@ -1006,44 +1009,8 @@ fn find_agent_binary() -> Result<PathBuf> {
     let agent_name = "sshenc-agent.exe";
     #[cfg(not(windows))]
     let agent_name = "sshenc-agent";
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(agent_name);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-    }
-    // Check PATH
-    #[cfg(unix)]
-    {
-        if let Ok(output) = std::process::Command::new("which").arg(agent_name).output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Ok(PathBuf::from(path));
-                }
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        if let Ok(output) = std::process::Command::new("where").arg(agent_name).output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if !path.is_empty() {
-                    return Ok(PathBuf::from(path));
-                }
-            }
-        }
-    }
-    bail!("sshenc-agent not found");
+    sshenc_core::bin_discovery::find_trusted_binary(agent_name)
+        .ok_or_else(|| anyhow!("sshenc-agent not found in trusted install locations"))
 }
 
 #[allow(clippy::print_stdout)]
@@ -1270,13 +1237,14 @@ fn load_label_public_key(keys_dir: &Path, label: &str) -> Result<SshPublicKey> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn restore_backup(original: &Path, backup: &Path) {
+fn restore_backup(original: &Path, backup: &Path) -> Result<()> {
     if backup.exists() {
         if original.exists() {
-            drop(std::fs::remove_file(original));
+            std::fs::remove_file(original)?;
         }
-        drop(std::fs::rename(backup, original));
+        std::fs::rename(backup, original)?;
     }
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1373,25 +1341,48 @@ where
             Ok(Some(promotion))
         }
         Err(error) => {
+            let mut rollback_failures = Vec::new();
+
             if source_renamed && key_files_exist(keys_dir, "default") {
-                drop(metadata::rename_key_files(keys_dir, "default", label));
+                if let Err(rollback_error) = metadata::rename_key_files(keys_dir, "default", label)
+                {
+                    rollback_failures.push(format!("restore source label: {rollback_error}"));
+                }
             }
             if let Some(ref backup_label) = backup_label {
                 if key_files_exist(keys_dir, backup_label) {
-                    drop(metadata::rename_key_files(
-                        keys_dir,
-                        backup_label,
-                        "default",
-                    ));
+                    if let Err(rollback_error) =
+                        metadata::rename_key_files(keys_dir, backup_label, "default")
+                    {
+                        rollback_failures.push(format!("restore default label: {rollback_error}"));
+                    }
                 }
             }
             if let Some(ref backup) = public_backup {
-                restore_backup(&id_ecdsa_pub, backup);
+                if let Err(rollback_error) = restore_backup(&id_ecdsa_pub, backup) {
+                    rollback_failures.push(format!(
+                        "restore {}: {rollback_error}",
+                        id_ecdsa_pub.display()
+                    ));
+                }
             }
             if let Some(ref backup) = private_backup {
-                restore_backup(&id_ecdsa_priv, backup);
+                if let Err(rollback_error) = restore_backup(&id_ecdsa_priv, backup) {
+                    rollback_failures.push(format!(
+                        "restore {}: {rollback_error}",
+                        id_ecdsa_priv.display()
+                    ));
+                }
             }
-            Err(error)
+
+            if rollback_failures.is_empty() {
+                Err(error)
+            } else {
+                Err(anyhow!(
+                    "{error}; rollback failed: {}",
+                    rollback_failures.join("; ")
+                ))
+            }
         }
     }
 }
@@ -2495,6 +2486,34 @@ HKEY_CURRENT_USER\Environment
             std::fs::read_to_string(ssh_dir.join("id_ecdsa.pub")).unwrap(),
             "old public"
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn promote_to_default_reports_restore_failure() {
+        let root = test_dir("promote-rollback-error");
+        let keys_dir = root.join("keys");
+        let ssh_dir = root.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+
+        seed_promote_key(&keys_dir, "work", Some("work@test"));
+        seed_promote_key(&keys_dir, "default", Some("default@test"));
+        std::fs::write(ssh_dir.join("id_ecdsa"), "old private").unwrap();
+        std::fs::write(ssh_dir.join("id_ecdsa.pub"), "old public").unwrap();
+
+        let error =
+            promote_to_default_with_dirs(&keys_dir, &ssh_dir, "work", true, |path, _data| {
+                std::fs::create_dir(path.with_extension("")).unwrap();
+                Err(anyhow!("disk full"))
+            })
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("disk full"));
+        assert!(message.contains("rollback failed"));
+        assert!(message.contains("id_ecdsa"));
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -3,14 +3,15 @@
 
 //! sshenc-agent: SSH agent daemon for Secure Enclave keys.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use std::path::PathBuf;
-
-#[cfg(unix)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use sshenc_agent::server;
+
+const READY_FILE_ENV: &str = "SSHENC_AGENT_READY_FILE";
+const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Parser)]
 #[command(
@@ -72,6 +73,104 @@ fn default_pid_path() -> PathBuf {
         .join("agent.pid")
 }
 
+fn write_pid_file(pid_path: &Path, pid: u32) -> Result<()> {
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create pid directory {}", parent.display()))?;
+    }
+    std::fs::write(pid_path, format!("{pid}\n"))
+        .with_context(|| format!("failed to write pid file {}", pid_path.display()))?;
+    Ok(())
+}
+
+fn remove_pid_file(pid_path: &Path) -> Result<()> {
+    match std::fs::remove_file(pid_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to remove pid file {}", pid_path.display()))
+        }
+    }
+}
+
+fn write_ready_file_contents(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create readiness directory {}", parent.display())
+        })?;
+    }
+
+    std::fs::write(path, content)
+        .with_context(|| format!("failed to write readiness file {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn write_ready_file(path: &Path) -> Result<()> {
+    write_ready_file_contents(path, "ready\n")
+}
+
+fn write_ready_error_file(path: &Path, message: &str) -> Result<()> {
+    write_ready_file_contents(path, &format!("error:{message}\n"))
+}
+
+fn wait_for_ready_file(path: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read readiness file {}", path.display()))?;
+            let trimmed = content.trim();
+            if trimmed == "ready" {
+                return Ok(());
+            }
+            if let Some(error) = trimmed.strip_prefix("error:") {
+                anyhow::bail!("{error}");
+            }
+            anyhow::bail!("invalid readiness marker in {}", path.display());
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!("sshenc-agent timed out waiting for readiness");
+        }
+
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn unique_ready_file_path() -> PathBuf {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("sshenc-agent-ready-{pid}-{nanos}.tmp"))
+}
+
+fn take_ready_file_from_env() -> Option<PathBuf> {
+    std::env::var_os(READY_FILE_ENV).map(PathBuf::from)
+}
+
+fn signal_ready_error(path: Option<&Path>, error: &anyhow::Error) {
+    if let Some(path) = path {
+        let _unused = write_ready_error_file(path, &error.to_string());
+    }
+}
+
+#[cfg(unix)]
+fn validate_setsid_result(result: libc::pid_t) -> Result<()> {
+    if result == -1 {
+        anyhow::bail!("setsid failed: {}", std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn start_new_session() -> Result<()> {
+    validate_setsid_result(unsafe { libc::setsid() })
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -88,6 +187,8 @@ fn main() -> Result<()> {
         daemonize(&cli.socket)?;
     }
 
+    let ready_file = take_ready_file_from_env();
+
     let level = if cli.debug { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -97,8 +198,16 @@ fn main() -> Result<()> {
         .init();
 
     let config = match &cli.config {
-        Some(path) => sshenc_core::Config::load(path)?,
-        None => sshenc_core::Config::load_default()?,
+        Some(path) => sshenc_core::Config::load(path),
+        None => sshenc_core::Config::load_default(),
+    };
+    let config = match config {
+        Ok(config) => config,
+        Err(error) => {
+            let error = anyhow::Error::from(error);
+            signal_ready_error(ready_file.as_deref(), &error);
+            return Err(error);
+        }
     };
 
     let allowed_labels = if cli.labels.is_empty() {
@@ -113,17 +222,40 @@ fn main() -> Result<()> {
         "starting sshenc-agent"
     );
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(error) => {
+            let error = anyhow::Error::from(error);
+            signal_ready_error(ready_file.as_deref(), &error);
+            return Err(error);
+        }
+    };
 
     #[cfg(unix)]
     {
         let socket_path = PathBuf::from(&cli.socket);
-        rt.block_on(server::run_agent(socket_path, allowed_labels))
+        let result = rt.block_on(server::run_agent(
+            socket_path,
+            allowed_labels,
+            ready_file.as_deref(),
+        ));
+        if let Err(ref error) = result {
+            signal_ready_error(ready_file.as_deref(), error);
+        }
+        result
     }
 
     #[cfg(windows)]
     {
-        rt.block_on(server::run_agent(cli.socket, allowed_labels))
+        let result = rt.block_on(server::run_agent(
+            cli.socket,
+            allowed_labels,
+            ready_file.as_deref(),
+        ));
+        if let Err(ref error) = result {
+            signal_ready_error(ready_file.as_deref(), error);
+        }
+        result
     }
 }
 
@@ -132,9 +264,8 @@ fn main() -> Result<()> {
 #[allow(unsafe_code, clippy::print_stdout, clippy::exit)]
 fn daemonize(socket_path: &str) -> Result<()> {
     let socket_display = Path::new(socket_path).display();
-    // Print connection info before forking (parent process)
-    println!("SSH_AUTH_SOCK={socket_display}");
-    println!("export SSH_AUTH_SOCK={socket_display}");
+    let ready_path = unique_ready_file_path();
+    let _unused = std::fs::remove_file(&ready_path);
 
     // Fork
     let pid = unsafe { libc::fork() };
@@ -144,17 +275,30 @@ fn daemonize(socket_path: &str) -> Result<()> {
     if pid > 0 {
         // Parent — write pidfile and exit
         let pid_path = default_pid_path();
-        if let Some(parent) = pid_path.parent() {
-            std::fs::create_dir_all(parent).ok();
+        if let Err(error) = write_pid_file(&pid_path, pid as u32) {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+            }
+            return Err(error);
         }
-        std::fs::write(&pid_path, format!("{pid}\n")).ok();
+        if let Err(error) = wait_for_ready_file(&ready_path, DAEMON_READY_TIMEOUT) {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+            }
+            let _unused = std::fs::remove_file(&ready_path);
+            let _unused = remove_pid_file(&pid_path);
+            return Err(error);
+        }
+        let _unused = std::fs::remove_file(&ready_path);
+        println!("SSH_AUTH_SOCK={socket_display}");
+        println!("export SSH_AUTH_SOCK={socket_display}");
         std::process::exit(0);
     }
 
     // Child — new session, close stdio
-    unsafe {
-        libc::setsid();
-    }
+    start_new_session()?;
 
     // Redirect stdin/stdout/stderr to /dev/null
     use std::os::unix::io::AsRawFd;
@@ -172,6 +316,12 @@ fn daemonize(socket_path: &str) -> Result<()> {
         }
     }
 
+    // SAFETY: setting process environment in the single-threaded post-fork child
+    // before any runtime threads are created is safe.
+    unsafe {
+        std::env::set_var(READY_FILE_ENV, &ready_path);
+    }
+
     Ok(())
 }
 
@@ -186,7 +336,9 @@ fn daemonize(pipe_name: &str) -> Result<()> {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
 
     let exe = std::env::current_exe()?;
-    let child = std::process::Command::new(&exe)
+    let ready_path = unique_ready_file_path();
+    let _unused = std::fs::remove_file(&ready_path);
+    let mut child = std::process::Command::new(&exe)
         .arg("--socket")
         .arg(pipe_name)
         .arg("--_internal-daemon")
@@ -194,15 +346,133 @@ fn daemonize(pipe_name: &str) -> Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .env(READY_FILE_ENV, &ready_path)
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to spawn daemon: {e}"))?;
 
     // Write pidfile
     let pid_path = default_pid_path();
-    if let Some(parent) = pid_path.parent() {
-        std::fs::create_dir_all(parent).ok();
+    if let Err(error) = write_pid_file(&pid_path, child.id()) {
+        let _unused = child.kill();
+        let _unused = child.wait();
+        return Err(error);
     }
-    std::fs::write(&pid_path, format!("{}\n", child.id())).ok();
+    if let Err(error) = wait_for_ready_file(&ready_path, DAEMON_READY_TIMEOUT) {
+        let _unused = child.kill();
+        let _unused = child.wait();
+        let _unused = std::fs::remove_file(&ready_path);
+        let _unused = remove_pid_file(&pid_path);
+        return Err(error);
+    }
+    let _unused = std::fs::remove_file(&ready_path);
 
     std::process::exit(0);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    fn test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("sshenc-agent-test-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn write_pid_file_creates_parent_and_persists_pid() {
+        let path = test_path("pid").join("subdir").join("agent.pid");
+        if let Some(parent) = path.parent() {
+            let _unused = std::fs::remove_dir_all(parent);
+        }
+
+        write_pid_file(&path, 4242).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "4242\n");
+
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir_all(parent.parent().unwrap_or(parent)).unwrap();
+        }
+    }
+
+    #[test]
+    fn write_pid_file_errors_when_parent_is_not_a_directory() {
+        let root = test_path("bad-parent");
+        let _unused = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("not-a-dir");
+        std::fs::write(&blocker, b"blocker").unwrap();
+        let pid_path = blocker.join("agent.pid");
+
+        let err = write_pid_file(&pid_path, 7).unwrap_err();
+        assert!(err.to_string().contains("failed to create pid directory"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn remove_pid_file_removes_existing_file() {
+        let path = test_path("remove-pid");
+        let _unused = std::fs::remove_file(&path);
+        std::fs::write(&path, b"4242\n").unwrap();
+
+        remove_pid_file(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_pid_file_ignores_missing_file() {
+        let path = test_path("remove-missing-pid");
+        let _unused = std::fs::remove_file(&path);
+        remove_pid_file(&path).unwrap();
+    }
+
+    #[test]
+    fn wait_for_ready_file_observes_ready_marker() {
+        let path = test_path("ready-marker");
+        let _unused = std::fs::remove_file(&path);
+        let writer_path = path.clone();
+
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            write_ready_file(&writer_path).unwrap();
+        });
+
+        wait_for_ready_file(&path, Duration::from_secs(1)).unwrap();
+        writer.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn wait_for_ready_file_reports_child_error() {
+        let path = test_path("ready-error");
+        let _unused = std::fs::remove_file(&path);
+        write_ready_error_file(&path, "backend init failed").unwrap();
+
+        let error = wait_for_ready_file(&path, Duration::from_secs(1)).unwrap_err();
+        assert!(error.to_string().contains("backend init failed"));
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn wait_for_ready_file_times_out() {
+        let path = test_path("ready-timeout");
+        let _unused = std::fs::remove_file(&path);
+
+        let error = wait_for_ready_file(&path, Duration::from_millis(50)).unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_setsid_result_rejects_failure() {
+        let error = validate_setsid_result(-1).unwrap_err();
+        assert!(error.to_string().contains("setsid failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_setsid_result_accepts_success() {
+        validate_setsid_result(1).unwrap();
+    }
 }

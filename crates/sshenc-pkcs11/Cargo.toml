@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 dirs = { workspace = true }
+sshenc-core = { workspace = true }
 
 [lints]
 workspace = true

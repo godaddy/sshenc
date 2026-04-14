@@ -108,60 +108,14 @@ pub fn ensure_agent_running() -> Result<(), String> {
 
 #[cfg(unix)]
 fn find_agent_binary() -> Result<PathBuf, String> {
-    let common = ["/opt/homebrew/bin", "/usr/local/bin"];
-    for dir in &common {
-        let candidate = PathBuf::from(dir).join("sshenc-agent");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    if let Ok(output) = std::process::Command::new("which")
-        .arg("sshenc-agent")
-        .output()
-    {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(PathBuf::from(path));
-            }
-        }
-    }
-
-    Err("sshenc-agent not found".into())
+    sshenc_core::bin_discovery::find_trusted_binary("sshenc-agent")
+        .ok_or_else(|| "sshenc-agent not found in trusted install locations".into())
 }
 
 #[cfg(windows)]
 fn find_agent_binary() -> Result<PathBuf, String> {
-    // Check common install locations
-    if let Ok(program_files) = std::env::var("ProgramFiles") {
-        let candidate = PathBuf::from(&program_files)
-            .join("sshenc")
-            .join("sshenc-agent.exe");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    // Search PATH using `where`
-    if let Ok(output) = std::process::Command::new("where")
-        .arg("sshenc-agent.exe")
-        .output()
-    {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if !path.is_empty() {
-                return Ok(PathBuf::from(path));
-            }
-        }
-    }
-
-    Err("sshenc-agent.exe not found".into())
+    sshenc_core::bin_discovery::find_trusted_binary("sshenc-agent.exe")
+        .ok_or_else(|| "sshenc-agent.exe not found in trusted install locations".into())
 }
 
 #[cfg(test)]

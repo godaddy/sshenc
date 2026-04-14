@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use clap::Parser;
+use sshenc_core::backup::{self, BackupExecutionError};
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_se::KeyBackend;
@@ -47,6 +48,35 @@ struct Cli {
     quiet: bool,
 }
 
+fn run_with_existing_key_backup<T, F>(
+    public_path: Option<&PathBuf>,
+    paired_private_path: Option<&PathBuf>,
+    operation: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let Some(public_path) = public_path else {
+        return operation();
+    };
+
+    match backup::with_existing_key_material_backup(
+        public_path,
+        paired_private_path.map(PathBuf::as_path),
+        operation,
+    ) {
+        Ok(value) => Ok(value),
+        Err(BackupExecutionError::Backup(error)) => Err(error.into()),
+        Err(BackupExecutionError::Operation(error)) => Err(error),
+        Err(BackupExecutionError::Rollback {
+            operation,
+            rollback,
+        }) => Err(anyhow::anyhow!(
+            "{operation}; failed to restore backed up SSH key material: {rollback}"
+        )),
+    }
+}
+
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -60,29 +90,28 @@ fn main() -> Result<()> {
 
     let write_pub = if cli.no_pub_file {
         None
-    } else if let Some(path) = cli.write_pub {
-        Some(path)
+    } else if let Some(path) = cli.write_pub.as_ref() {
+        Some(path.clone())
     } else if cli.label == "default" {
         Some(pub_dir.join("id_ecdsa.pub"))
     } else {
         Some(pub_dir.join(format!("{}.pub", cli.label)))
     };
+    let paired_private_path =
+        if cli.write_pub.is_none() && !cli.no_pub_file && cli.label == "default" {
+            write_pub.as_ref().map(|path| path.with_extension(""))
+        } else {
+            None
+        };
 
     // Check for existing files before overwriting (like ssh-keygen)
     if let Some(ref path) = write_pub {
-        let private_path = path.with_extension("");
-        let has_private = private_path.exists() && private_path != *path;
+        let has_private = paired_private_path
+            .as_ref()
+            .is_some_and(|private_path| private_path.exists() && private_path != path);
 
         if has_private {
-            let backups = sshenc_core::backup::backup_existing_key_material(path)?;
-            eprintln!("Backing up existing key pair:");
-            for entry in backups.entries() {
-                eprintln!(
-                    "  {} → {}",
-                    entry.original().display(),
-                    entry.backup().display()
-                );
-            }
+            eprintln!("Existing SSH key pair will be backed up before generation.");
         } else if path.exists() {
             eprintln!("{} already exists.", path.display());
             eprint!("Overwrite (y/n)? ");
@@ -104,10 +133,13 @@ fn main() -> Result<()> {
         label: key_label,
         comment,
         requires_user_presence: cli.require_user_presence,
-        write_pub_path: write_pub,
+        write_pub_path: write_pub.clone(),
     };
 
-    let info = backend.generate(&opts)?;
+    let info =
+        run_with_existing_key_backup(write_pub.as_ref(), paired_private_path.as_ref(), || {
+            Ok(backend.generate(&opts)?)
+        })?;
 
     if !cli.quiet {
         eprintln!("Generated key: {}", cli.label);

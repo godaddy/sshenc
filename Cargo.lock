@@ -1363,6 +1363,7 @@ version = "0.6.1"
 dependencies = [
  "dirs",
  "enclaveapp-core",
+ "sshenc-core",
 ]
 
 [[package]]
@@ -1383,6 +1384,7 @@ name = "sshenc-pkcs11"
 version = "0.6.1"
 dependencies = [
  "dirs",
+ "sshenc-core",
 ]
 
 [[package]]

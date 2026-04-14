@@ -6,6 +6,7 @@
 //! This crate contains no platform-specific code and provides the foundational
 //! types used across all other sshenc crates.
 
+pub mod backup;
 pub mod config;
 pub mod error;
 pub mod fingerprint;

@@ -1362,6 +1362,7 @@ name = "sshenc-gitenc"
 version = "0.6.1"
 dependencies = [
  "dirs",
+ "enclaveapp-core",
 ]
 
 [[package]]

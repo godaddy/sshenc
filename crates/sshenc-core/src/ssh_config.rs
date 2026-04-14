@@ -236,7 +236,10 @@ mod tests {
         assert!(std::fs::read_to_string(&config_path)
             .unwrap()
             .contains("IdentityAgent /tmp/.sshenc/agent.sock"));
-        assert_eq!(std::fs::read_to_string(dir.join(".config.tmp")).unwrap(), "stale");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".config.tmp")).unwrap(),
+            "stale"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

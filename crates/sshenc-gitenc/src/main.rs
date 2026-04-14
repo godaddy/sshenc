@@ -15,6 +15,7 @@
 //!   gitenc --config github-work               # configure current repo
 //!   gitenc pull                               # uses configured key
 
+use enclaveapp_core::types::validate_label;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -31,10 +32,7 @@ fn main() {
 
 #[allow(clippy::exit, clippy::print_stderr)]
 fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
-    let ssh_command = match label {
-        Some(l) => format!("sshenc ssh --label {} --", l),
-        None => "sshenc ssh --".to_string(),
-    };
+    let ssh_command = build_ssh_command(label).unwrap_or_else(|err| exit_invalid_label(&err));
 
     #[cfg(unix)]
     {
@@ -67,17 +65,15 @@ fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
 #[allow(clippy::print_stdout, clippy::print_stderr, clippy::exit)]
 fn configure_repo(label: Option<&str>) {
     let effective_label = label.unwrap_or("default");
-    let ssh_command = format!("sshenc ssh --label {} --", effective_label);
+    let ssh_command =
+        build_ssh_command(Some(effective_label)).unwrap_or_else(|err| exit_invalid_label(&err));
 
     // Determine the signing key path
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| "/tmp".into());
-    let signing_key = if effective_label == "default" {
-        format!("{home}/.ssh/id_ecdsa.pub")
-    } else {
-        format!("{home}/.ssh/{effective_label}.pub")
-    };
+    let signing_key =
+        signing_key_path(&home, effective_label).unwrap_or_else(|err| exit_invalid_label(&err));
 
     // Find sshenc binary (same directory as gitenc, or in PATH)
     let sshenc_bin = std::env::current_exe()
@@ -182,6 +178,31 @@ enum ParsedArgs {
         label: Option<String>,
         git_args: Vec<String>,
     },
+}
+
+fn build_ssh_command(label: Option<&str>) -> Result<String, String> {
+    match label {
+        Some(label) => {
+            validate_label(label).map_err(|e| e.to_string())?;
+            Ok(format!("sshenc ssh --label {label} --"))
+        }
+        None => Ok("sshenc ssh --".to_string()),
+    }
+}
+
+fn signing_key_path(home: &str, label: &str) -> Result<String, String> {
+    if label == "default" {
+        return Ok(format!("{home}/.ssh/id_ecdsa.pub"));
+    }
+
+    validate_label(label).map_err(|e| e.to_string())?;
+    Ok(format!("{home}/.ssh/{label}.pub"))
+}
+
+#[allow(clippy::print_stderr, clippy::exit)]
+fn exit_invalid_label(err: &str) -> ! {
+    eprintln!("gitenc: invalid label: {err}");
+    std::process::exit(2);
 }
 
 fn parse_args(args: &[String]) -> ParsedArgs {
@@ -379,6 +400,18 @@ mod tests {
     }
 
     #[test]
+    fn test_build_ssh_command_with_valid_label() {
+        let command = build_ssh_command(Some("github-work")).unwrap();
+        assert_eq!(command, "sshenc ssh --label github-work --");
+    }
+
+    #[test]
+    fn test_build_ssh_command_rejects_invalid_label() {
+        let err = build_ssh_command(Some("bad;label")).unwrap_err();
+        assert!(err.to_lowercase().contains("label"));
+    }
+
+    #[test]
     fn test_configure_repo_with_temp_git_repo() {
         let dir = std::env::temp_dir().join("sshenc-test-configure-repo");
         // Clean up from any prior run
@@ -397,11 +430,11 @@ mod tests {
         // Run configure_repo's git config commands by calling git config directly
         // in the temp repo context. We test the same logic configure_repo uses.
         let label = "test-key";
-        let ssh_command = format!("sshenc ssh --label {} --", label);
+        let ssh_command = build_ssh_command(Some(label)).unwrap();
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| "/tmp".into());
-        let signing_key = format!("{home}/.ssh/{label}.pub");
+        let signing_key = signing_key_path(&home, label).unwrap();
 
         let configs = vec![
             ("core.sshCommand", ssh_command.as_str()),
@@ -444,11 +477,7 @@ mod tests {
 
         // Replicate the logic from configure_repo for "default"
         let effective_label = "default";
-        let signing_key = if effective_label == "default" {
-            format!("{home}/.ssh/id_ecdsa.pub")
-        } else {
-            format!("{home}/.ssh/{effective_label}.pub")
-        };
+        let signing_key = signing_key_path(&home, effective_label).unwrap();
 
         assert!(
             signing_key.ends_with("/.ssh/id_ecdsa.pub"),
@@ -463,11 +492,17 @@ mod tests {
             .unwrap_or_else(|_| "/tmp".into());
 
         let effective_label = "github-work";
-        let signing_key = format!("{home}/.ssh/{effective_label}.pub");
+        let signing_key = signing_key_path(&home, effective_label).unwrap();
 
         assert!(
             signing_key.ends_with("/.ssh/github-work.pub"),
             "named label should use label.pub, got: {signing_key}"
         );
+    }
+
+    #[test]
+    fn test_signing_key_path_rejects_invalid_label() {
+        let err = signing_key_path("/tmp/home", "../escape").unwrap_err();
+        assert!(err.to_lowercase().contains("label"));
     }
 }

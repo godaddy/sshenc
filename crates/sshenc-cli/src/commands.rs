@@ -420,21 +420,26 @@ pub fn install() -> Result<()> {
     // SSH client) to connect to the sshenc agent.
     #[cfg(target_os = "windows")]
     {
-        let home =
-            dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(r"C:\Users\Default"));
-        let sock_path = home.join(".sshenc").join("agent.sock");
-        let sock_str = sock_path.to_string_lossy();
+        // Set SSH_AUTH_SOCK to the named pipe path with forward slashes.
+        // This lets ssh-add and other tools that don't read IdentityAgent
+        // from the config find the agent. Forward slashes avoid escape
+        // processing issues in various shells.
+        let pipe_path = config
+            .socket_path
+            .display()
+            .to_string()
+            .replace('\\', "/");
         let status = std::process::Command::new("setx")
-            .args(["SSH_AUTH_SOCK", &sock_str])
+            .args(["SSH_AUTH_SOCK", &pipe_path])
             .stdout(std::process::Stdio::null())
             .status();
         match status {
             Ok(s) if s.success() => {
-                println!("Set SSH_AUTH_SOCK={sock_str} (for Git Bash and MINGW SSH).");
+                println!("Set SSH_AUTH_SOCK={pipe_path}");
             }
             _ => {
-                eprintln!("warning: could not set SSH_AUTH_SOCK. Git Bash users should run:");
-                eprintln!("  setx SSH_AUTH_SOCK \"{}\"", sock_str);
+                eprintln!("warning: could not set SSH_AUTH_SOCK. Run:");
+                eprintln!("  setx SSH_AUTH_SOCK \"{}\"", pipe_path);
             }
         }
 

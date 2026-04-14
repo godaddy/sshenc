@@ -13,4 +13,4 @@ pub mod compat;
 mod unified;
 
 pub use backend::KeyBackend;
-pub use unified::SshencBackend;
+pub use unified::{sshenc_keys_dir, SshencBackend};

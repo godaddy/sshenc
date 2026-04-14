@@ -16,6 +16,8 @@ use std::sync::Arc;
 use tokio::signal;
 
 #[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -24,15 +26,7 @@ use tokio::net::UnixListener;
 #[cfg(unix)]
 #[allow(clippy::print_stdout)]
 pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Result<()> {
-    // Clean up stale socket
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-
-    // Ensure parent directory exists
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    prepare_socket_path(&socket_path)?;
 
     let listener = UnixListener::bind(&socket_path)?;
 
@@ -80,6 +74,42 @@ pub async fn run_agent(socket_path: PathBuf, allowed_labels: Vec<String>) -> Res
     // Cleanup socket
     drop(std::fs::remove_file(&socket_path));
     Ok(())
+}
+
+#[cfg(unix)]
+fn prepare_socket_path(socket_path: &Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::net::UnixStream;
+
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if !socket_path.exists() {
+        return Ok(());
+    }
+
+    let file_type = std::fs::symlink_metadata(socket_path)?.file_type();
+    if !file_type.is_socket() {
+        anyhow::bail!(
+            "refusing to replace existing non-socket path: {}",
+            socket_path.display()
+        );
+    }
+
+    match UnixStream::connect(socket_path) {
+        Ok(_) => anyhow::bail!("agent socket already in use: {}", socket_path.display()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            std::fs::remove_file(socket_path)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Run the SSH agent server on a Windows named pipe.
@@ -434,6 +464,17 @@ mod tests {
         HashSet::new()
     }
 
+    #[cfg(unix)]
+    fn test_socket_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sshenc-agent-socket-test-{}-{name}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("agent.sock")
+    }
+
     fn setup_backend() -> MockKeyBackend {
         let backend = MockKeyBackend::new();
         let opts = KeyGenOptions {
@@ -594,6 +635,44 @@ mod tests {
         } else {
             panic!("expected SignResponse");
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_prepare_socket_path_rejects_live_socket() {
+        let socket_path = test_socket_path("live");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        let error = prepare_socket_path(&socket_path).unwrap_err();
+        assert!(error.to_string().contains("already in use"));
+        assert!(socket_path.exists());
+
+        drop(std::fs::remove_file(socket_path));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_prepare_socket_path_removes_stale_socket() {
+        let socket_path = test_socket_path("stale");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        drop(listener);
+
+        assert!(socket_path.exists());
+        prepare_socket_path(&socket_path).unwrap();
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_prepare_socket_path_rejects_regular_file() {
+        let socket_path = test_socket_path("file");
+        std::fs::write(&socket_path, "not a socket").unwrap();
+
+        let error = prepare_socket_path(&socket_path).unwrap_err();
+        assert!(error.to_string().contains("non-socket"));
+        assert!(socket_path.exists());
+
+        drop(std::fs::remove_file(socket_path));
     }
 
     #[test]

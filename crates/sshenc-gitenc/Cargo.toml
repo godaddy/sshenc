@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 dirs = { workspace = true }
+enclaveapp-core = { workspace = true }
 
 [lints]
 workspace = true

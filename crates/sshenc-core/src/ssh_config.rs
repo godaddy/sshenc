@@ -6,7 +6,8 @@
 //! Manages a comment-delimited block in `~/.ssh/config` that configures
 //! `IdentityAgent` to point at the sshenc agent socket for all hosts.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use enclaveapp_core::metadata::{atomic_write, ensure_dir};
 use std::path::Path;
 
 const BEGIN_MARKER: &str = "# BEGIN sshenc managed block -- do not edit";
@@ -51,12 +52,7 @@ pub fn install_block(
     // Ensure parent directory exists with 0700 permissions
     if let Some(parent) = ssh_config_path.parent() {
         if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-            }
+            ensure_dir(parent).map_err(|e| Error::Config(e.to_string()))?;
         }
     }
 
@@ -106,13 +102,7 @@ pub fn install_block(
     }
     new_content.push_str(&block);
 
-    std::fs::write(ssh_config_path, &new_content)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(ssh_config_path, std::fs::Permissions::from_mode(0o644))?;
-    }
+    write_ssh_config(ssh_config_path, &new_content)?;
 
     Ok(InstallResult::Installed)
 }
@@ -161,8 +151,23 @@ pub fn uninstall_block(ssh_config_path: &Path) -> Result<UninstallResult> {
         new_content.push('\n');
     }
 
-    std::fs::write(ssh_config_path, &new_content)?;
+    write_ssh_config(ssh_config_path, &new_content)?;
     Ok(UninstallResult::Removed)
+}
+
+fn write_ssh_config(path: &Path, content: &str) -> Result<()> {
+    atomic_write(path, content.as_bytes()).map_err(|e| Error::Config(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+    }
+    #[cfg(not(unix))]
+    {
+        enclaveapp_core::metadata::restrict_file_permissions(path)
+            .map_err(|e| Error::Config(e.to_string()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -213,6 +218,28 @@ mod tests {
         assert!(content.contains(BEGIN_MARKER));
         // Blank separator line between existing content and block
         assert!(content.contains("User jay\n\n"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O
+    fn test_install_ignores_preexisting_legacy_tmp_file() {
+        let dir = temp_dir("stale-tmp");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+
+        std::fs::write(dir.join(".config.tmp"), "stale").unwrap();
+
+        let result = install_block(&config_path, &socket, None).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+        assert!(std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("IdentityAgent /tmp/.sshenc/agent.sock"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".config.tmp")).unwrap(),
+            "stale"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

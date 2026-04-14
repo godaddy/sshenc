@@ -128,6 +128,64 @@ enum WindowsAction {
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_action_description(action: &WindowsAction) -> String {
+    match action {
+        WindowsAction::StopService(service) => format!("stop Windows service '{service}'"),
+        WindowsAction::SetServiceStart { service, mode } => {
+            format!(
+                "set Windows service '{service}' start mode to {}",
+                mode.as_sc_value()
+            )
+        }
+        WindowsAction::StartService(service) => format!("start Windows service '{service}'"),
+        WindowsAction::SetUserEnv { key, .. } => format!("set Windows user environment '{key}'"),
+        WindowsAction::DeleteUserEnv(key) => {
+            format!("delete Windows user environment '{key}'")
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_action_is_allowed_failure(action: &WindowsAction, output: &str) -> bool {
+    let normalized = output.to_ascii_lowercase();
+    match action {
+        WindowsAction::StopService(_) => {
+            normalized.contains("service has not been started")
+                || normalized.contains("has not been started")
+        }
+        WindowsAction::StartService(_) => {
+            normalized.contains("already been started") || normalized.contains("already running")
+        }
+        WindowsAction::DeleteUserEnv(_) => {
+            normalized.contains("unable to find the specified registry key or value")
+                || normalized.contains("cannot find the file specified")
+        }
+        WindowsAction::SetServiceStart { .. } | WindowsAction::SetUserEnv { .. } => false,
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn validate_windows_action_result(
+    action: &WindowsAction,
+    success: bool,
+    output: &str,
+) -> Result<()> {
+    if success || windows_action_is_allowed_failure(action, output) {
+        return Ok(());
+    }
+
+    let details = if output.trim().is_empty() {
+        "no command output available"
+    } else {
+        output.trim()
+    };
+    bail!(
+        "failed to {}: {details}",
+        windows_action_description(action)
+    );
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn windows_prepare_install_actions() -> Vec<WindowsAction> {
     vec![
         WindowsAction::StopService("ssh-agent"),
@@ -193,50 +251,65 @@ fn windows_restore_actions(state: &WindowsInstallState) -> Vec<WindowsAction> {
 }
 
 #[cfg(target_os = "windows")]
-fn apply_windows_actions(actions: &[WindowsAction]) {
+fn apply_windows_actions(actions: &[WindowsAction]) -> Result<()> {
+    fn command_output(program: &str, args: &[&str]) -> Result<std::process::Output> {
+        Ok(std::process::Command::new(program).args(args).output()?)
+    }
+
+    fn output_text(output: &std::process::Output) -> String {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        format!("{stdout}\n{stderr}")
+    }
+
     for action in actions {
         match action {
             WindowsAction::StopService(service) => {
-                let _unused = std::process::Command::new("sc")
-                    .args(["stop", service])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                let output = command_output("sc", &["stop", service])?;
+                validate_windows_action_result(
+                    action,
+                    output.status.success(),
+                    &output_text(&output),
+                )?;
             }
             WindowsAction::SetServiceStart { service, mode } => {
-                let _unused = std::process::Command::new("sc")
-                    .args(["config", service, "start=", mode.as_sc_value()])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                let output =
+                    command_output("sc", &["config", service, "start=", mode.as_sc_value()])?;
+                validate_windows_action_result(
+                    action,
+                    output.status.success(),
+                    &output_text(&output),
+                )?;
             }
             WindowsAction::StartService(service) => {
-                let _unused = std::process::Command::new("sc")
-                    .args(["start", service])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                let output = command_output("sc", &["start", service])?;
+                validate_windows_action_result(
+                    action,
+                    output.status.success(),
+                    &output_text(&output),
+                )?;
             }
             WindowsAction::SetUserEnv { key, value } => {
-                let status = std::process::Command::new("setx")
-                    .args([key, value])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                if !status.is_ok_and(|status| status.success()) {
-                    eprintln!("warning: could not set {key}. Run:");
-                    eprintln!("  setx {key} \"{value}\"");
-                }
+                let output = command_output("setx", &[key, value.as_str()])?;
+                validate_windows_action_result(
+                    action,
+                    output.status.success(),
+                    &output_text(&output),
+                )?;
             }
             WindowsAction::DeleteUserEnv(key) => {
-                let _unused = std::process::Command::new("reg")
-                    .args(["delete", "HKCU\\Environment", "/v", key, "/f"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                let output =
+                    command_output("reg", &["delete", "HKCU\\Environment", "/v", key, "/f"])?;
+                validate_windows_action_result(
+                    action,
+                    output.status.success(),
+                    &output_text(&output),
+                )?;
             }
         }
     }
+
+    Ok(())
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -290,7 +363,11 @@ fn parse_reg_query_value(text: &str) -> Option<String> {
         let trimmed = line.trim();
         ["REG_SZ", "REG_EXPAND_SZ", "REG_MULTI_SZ"]
             .into_iter()
-            .find_map(|kind| trimmed.split_once(kind).map(|(_, value)| value.trim().to_string()))
+            .find_map(|kind| {
+                trimmed
+                    .split_once(kind)
+                    .map(|(_, value)| value.trim().to_string())
+            })
     })
 }
 
@@ -302,25 +379,35 @@ fn query_windows_user_env_var(key: &str) -> Result<Option<String>> {
     if !output.status.success() {
         return Ok(None);
     }
-    Ok(parse_reg_query_value(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_reg_query_value(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 #[cfg(target_os = "windows")]
 fn query_windows_service_start_mode(service: &str) -> Result<Option<WindowsServiceStartMode>> {
-    let output = std::process::Command::new("sc").args(["qc", service]).output()?;
+    let output = std::process::Command::new("sc")
+        .args(["qc", service])
+        .output()?;
     if !output.status.success() {
         bail!("failed to query Windows service configuration for {service}");
     }
-    Ok(parse_sc_start_mode(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_sc_start_mode(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 #[cfg(target_os = "windows")]
 fn query_windows_service_running(service: &str) -> Result<Option<bool>> {
-    let output = std::process::Command::new("sc").args(["query", service]).output()?;
+    let output = std::process::Command::new("sc")
+        .args(["query", service])
+        .output()?;
     if !output.status.success() {
         bail!("failed to query Windows service state for {service}");
     }
-    Ok(parse_sc_running_state(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_sc_running_state(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 #[cfg(target_os = "windows")]
@@ -361,6 +448,18 @@ fn capture_windows_install_state(managed_git_ssh_command: bool) -> Result<Window
         ssh_agent_was_running: query_windows_service_running("ssh-agent")?,
         managed_git_ssh_command,
     })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn restore_windows_state_with(
+    state: &WindowsInstallState,
+    apply_actions: impl FnOnce(&[WindowsAction]) -> Result<()>,
+    remove_state: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let actions = windows_restore_actions(state);
+    apply_actions(&actions)?;
+    remove_state()?;
+    Ok(())
 }
 
 #[allow(clippy::print_stdout)]
@@ -700,37 +799,75 @@ pub fn install() -> Result<()> {
     )?;
 
     #[cfg(target_os = "windows")]
-    let install_state = match capture_windows_install_state(git_ssh_command.is_some())
-        .and_then(|state| {
+    let install_state = match capture_windows_install_state(git_ssh_command.is_some()).and_then(
+        |state| {
             save_windows_install_state(&state)?;
             Ok(state)
-        }) {
+        },
+    ) {
         Ok(state) => {
-            apply_windows_actions(&windows_prepare_install_actions());
+            if let Err(error) = apply_windows_actions(&windows_prepare_install_actions()) {
+                if matches!(
+                    install_result,
+                    sshenc_core::ssh_config::InstallResult::Installed
+                ) {
+                    let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
+                }
+                let rollback_result = restore_windows_state_with(
+                    &state,
+                    apply_windows_actions,
+                    remove_windows_install_state,
+                );
+                return match rollback_result {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(anyhow!(
+                        "{error}; additionally failed to restore previous Windows state: {rollback_error}"
+                    )),
+                };
+            }
             println!("Configured Windows ssh-agent service for sshenc.");
             Some(state)
         }
         Err(error) => {
-            if matches!(install_result, sshenc_core::ssh_config::InstallResult::Installed) {
+            if matches!(
+                install_result,
+                sshenc_core::ssh_config::InstallResult::Installed
+            ) {
                 let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
             }
             return Err(error);
         }
     };
 
-    let agent_status = match start_agent_with_binary(&RealAgentLauncher, &config.socket_path, agent_bin.as_deref()) {
+    let agent_status = match start_agent_with_binary(
+        &RealAgentLauncher,
+        &config.socket_path,
+        agent_bin.as_deref(),
+    ) {
         Ok(status) => status,
         Err(error) => {
-            if matches!(install_result, sshenc_core::ssh_config::InstallResult::Installed) {
+            if matches!(
+                install_result,
+                sshenc_core::ssh_config::InstallResult::Installed
+            ) {
                 let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
             }
 
             #[cfg(target_os = "windows")]
             {
                 if let Some(ref state) = install_state {
-                    apply_windows_actions(&windows_restore_actions(state));
+                    let rollback_result = restore_windows_state_with(
+                        state,
+                        apply_windows_actions,
+                        remove_windows_install_state,
+                    );
+                    return match rollback_result {
+                        Ok(()) => Err(error),
+                        Err(rollback_error) => Err(anyhow!(
+                            "{error}; additionally failed to restore previous Windows state: {rollback_error}"
+                        )),
+                    };
                 }
-                let _unused = remove_windows_install_state();
             }
 
             return Err(error);
@@ -757,10 +894,31 @@ pub fn install() -> Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        apply_windows_actions(&windows_finalize_install_actions(
+        if let Err(error) = apply_windows_actions(&windows_finalize_install_actions(
             &config.socket_path,
             git_ssh_command.clone(),
-        ));
+        )) {
+            if matches!(
+                install_result,
+                sshenc_core::ssh_config::InstallResult::Installed
+            ) {
+                let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
+            }
+            if let Some(ref state) = install_state {
+                let rollback_result = restore_windows_state_with(
+                    state,
+                    apply_windows_actions,
+                    remove_windows_install_state,
+                );
+                return match rollback_result {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(anyhow!(
+                        "{error}; additionally failed to restore previous Windows state: {rollback_error}"
+                    )),
+                };
+            }
+            return Err(error);
+        }
         println!(
             "Set SSH_AUTH_SOCK={}",
             config.socket_path.display().to_string().replace('\\', "/")
@@ -913,8 +1071,11 @@ pub fn uninstall() -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         if let Some(state) = load_windows_install_state()? {
-            apply_windows_actions(&windows_restore_actions(&state));
-            remove_windows_install_state()?;
+            restore_windows_state_with(
+                &state,
+                apply_windows_actions,
+                remove_windows_install_state,
+            )?;
             println!("Restored the previous Windows SSH environment and ssh-agent service state.");
         } else {
             println!(
@@ -1086,7 +1247,10 @@ struct PromoteDefaultResult {
 
 #[cfg(not(target_os = "windows"))]
 fn unique_backup_path(path: &Path) -> PathBuf {
-    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("backup");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("backup");
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1207,7 +1371,11 @@ where
             }
             if let Some(ref backup_label) = backup_label {
                 if metadata::key_files_exist(keys_dir, backup_label) {
-                    drop(metadata::rename_key_files(keys_dir, backup_label, "default"));
+                    drop(metadata::rename_key_files(
+                        keys_dir,
+                        backup_label,
+                        "default",
+                    ));
                 }
             }
             if let Some(ref backup) = public_backup {
@@ -1234,13 +1402,9 @@ pub fn promote_to_default(label: &str) -> Result<()> {
     {
         let keys_dir = sshenc_keys_dir();
         let ssh_dir = default_ssh_dir()?;
-        let promotion = if let Some(promotion) = promote_to_default_with_dirs(
-            &keys_dir,
-            &ssh_dir,
-            label,
-            false,
-            write_atomic_file,
-        )? {
+        let promotion = if let Some(promotion) =
+            promote_to_default_with_dirs(&keys_dir, &ssh_dir, label, false, write_atomic_file)?
+        {
             promotion
         } else {
             let id_ecdsa_pub = ssh_dir.join("id_ecdsa.pub");
@@ -1323,10 +1487,7 @@ fn label_from_key_path(key_path: &Path) -> String {
             .unwrap_or_else(|| "default".to_string())
     };
 
-    label
-        .strip_suffix(".ssh")
-        .unwrap_or(&label)
-        .to_string()
+    label.strip_suffix(".ssh").unwrap_or(&label).to_string()
 }
 
 fn parse_ssh_sign_args(args: &[String]) -> Result<SshSignArgs> {
@@ -1526,7 +1687,10 @@ mod tests {
         }
 
         fn find_agent_binary(&self) -> Result<PathBuf> {
-            *self.find_count.lock().unwrap() += 1;
+            *self
+                .find_count
+                .lock()
+                .map_err(|_| anyhow!("find_count mutex poisoned"))? += 1;
             self.find_result
                 .as_ref()
                 .cloned()
@@ -1534,7 +1698,10 @@ mod tests {
         }
 
         fn spawn_agent(&self, _agent_bin: &Path, _socket_path: &Path) -> Result<()> {
-            *self.spawn_count.lock().unwrap() += 1;
+            *self
+                .spawn_count
+                .lock()
+                .map_err(|_| anyhow!("spawn_count mutex poisoned"))? += 1;
             self.spawn_result
                 .as_ref()
                 .map(|_| ())
@@ -1548,7 +1715,8 @@ mod tests {
         enclaveapp_core::metadata::ensure_dir(keys_dir).unwrap();
         enclaveapp_core::metadata::save_pub_key(keys_dir, label, &info.public_key_bytes).unwrap();
 
-        let mut meta = enclaveapp_core::metadata::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
+        let mut meta =
+            enclaveapp_core::metadata::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
         if let Some(comment) = comment {
             meta.set_app_field("comment", comment);
         }
@@ -2124,11 +2292,111 @@ mod tests {
     }
 
     #[test]
+    fn validate_windows_action_result_allows_expected_idempotent_failures() {
+        validate_windows_action_result(
+            &WindowsAction::StopService("ssh-agent"),
+            false,
+            "The service has not been started.",
+        )
+        .unwrap();
+        validate_windows_action_result(
+            &WindowsAction::StartService("ssh-agent"),
+            false,
+            "An instance of the service is already running.",
+        )
+        .unwrap();
+        validate_windows_action_result(
+            &WindowsAction::DeleteUserEnv("SSH_AUTH_SOCK"),
+            false,
+            "ERROR: The system was unable to find the specified registry key or value.",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_windows_action_result_rejects_required_failures() {
+        let error = validate_windows_action_result(
+            &WindowsAction::SetUserEnv {
+                key: "SSH_AUTH_SOCK",
+                value: "C:/socket".to_string(),
+            },
+            false,
+            "Access is denied.",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("set Windows user environment"));
+    }
+
+    #[test]
+    fn restore_windows_state_with_keeps_state_when_apply_fails() {
+        let state = WindowsInstallState {
+            previous_ssh_auth_sock: Some("C:/custom/agent.sock".to_string()),
+            previous_git_ssh_command: None,
+            ssh_agent_start_mode: Some(WindowsServiceStartMode::Demand),
+            ssh_agent_was_running: Some(false),
+            managed_git_ssh_command: false,
+        };
+        let apply_called = std::cell::Cell::new(0);
+        let remove_called = std::cell::Cell::new(0);
+
+        let error = restore_windows_state_with(
+            &state,
+            |_| {
+                apply_called.set(apply_called.get() + 1);
+                Err(anyhow!("restore failed"))
+            },
+            || {
+                remove_called.set(remove_called.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("restore failed"));
+        assert_eq!(apply_called.get(), 1);
+        assert_eq!(remove_called.get(), 0);
+    }
+
+    #[test]
+    fn restore_windows_state_with_removes_state_after_successful_apply() {
+        let state = WindowsInstallState {
+            previous_ssh_auth_sock: Some("C:/custom/agent.sock".to_string()),
+            previous_git_ssh_command: Some("C:/custom/ssh.exe".to_string()),
+            ssh_agent_start_mode: Some(WindowsServiceStartMode::Demand),
+            ssh_agent_was_running: Some(true),
+            managed_git_ssh_command: true,
+        };
+        let apply_called = std::cell::Cell::new(0);
+        let remove_called = std::cell::Cell::new(0);
+
+        restore_windows_state_with(
+            &state,
+            |actions| {
+                apply_called.set(apply_called.get() + 1);
+                assert!(actions.contains(&WindowsAction::StartService("ssh-agent")));
+                Ok(())
+            },
+            || {
+                remove_called.set(remove_called.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(apply_called.get(), 1);
+        assert_eq!(remove_called.get(), 1);
+    }
+
+    #[test]
     fn parse_sc_helpers_extract_service_state() {
         let qc = "START_TYPE         : 3   DEMAND_START";
         let query = "STATE              : 4  RUNNING";
 
-        assert_eq!(parse_sc_start_mode(qc), Some(WindowsServiceStartMode::Demand));
+        assert_eq!(
+            parse_sc_start_mode(qc),
+            Some(WindowsServiceStartMode::Demand)
+        );
         assert_eq!(parse_sc_running_state(query), Some(true));
     }
 
@@ -2180,12 +2448,10 @@ HKEY_CURRENT_USER\Environment
         let contents = std::fs::read_to_string(&identity_path).unwrap();
         assert!(contents.contains("ecdsa-sha2-nistp256"));
         assert!(contents.contains("wrapper@test"));
-        assert!(
-            invocation
-                .args
-                .iter()
-                .any(|arg| arg.contains(&identity_path.display().to_string()))
-        );
+        assert!(invocation
+            .args
+            .iter()
+            .any(|arg| arg.contains(&identity_path.display().to_string())));
 
         std::fs::remove_dir_all(&identity_dir).ok();
     }
@@ -2203,18 +2469,19 @@ HKEY_CURRENT_USER\Environment
         std::fs::write(ssh_dir.join("id_ecdsa"), "old private").unwrap();
         std::fs::write(ssh_dir.join("id_ecdsa.pub"), "old public").unwrap();
 
-        let error = promote_to_default_with_dirs(
-            &keys_dir,
-            &ssh_dir,
-            "work",
-            true,
-            |_path, _data| Err(anyhow!("disk full")),
-        )
-        .unwrap_err();
+        let error =
+            promote_to_default_with_dirs(&keys_dir, &ssh_dir, "work", true, |_path, _data| {
+                Err(anyhow!("disk full"))
+            })
+            .unwrap_err();
         assert!(error.to_string().contains("disk full"));
 
-        assert!(enclaveapp_core::metadata::key_files_exist(&keys_dir, "work"));
-        assert!(enclaveapp_core::metadata::key_files_exist(&keys_dir, "default"));
+        assert!(enclaveapp_core::metadata::key_files_exist(
+            &keys_dir, "work"
+        ));
+        assert!(enclaveapp_core::metadata::key_files_exist(
+            &keys_dir, "default"
+        ));
         assert_eq!(
             std::fs::read_to_string(ssh_dir.join("id_ecdsa")).unwrap(),
             "old private"

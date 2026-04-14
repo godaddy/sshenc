@@ -387,7 +387,7 @@ pub fn install() -> Result<()> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
-        if stop.map_or(false, |s| s.success()) || disable.map_or(false, |s| s.success()) {
+        if stop.is_ok_and(|s| s.success()) || disable.is_ok_and(|s| s.success()) {
             println!("Disabled Windows ssh-agent service (sshenc replaces it).");
         }
     }
@@ -433,7 +433,7 @@ pub fn install() -> Result<()> {
         }
 
         // Remove GIT_SSH_COMMAND if it was set by an older sshenc version
-        let _ = std::process::Command::new("reg")
+        let _unused = std::process::Command::new("reg")
             .args(["delete", "HKCU\\Environment", "/v", "GIT_SSH_COMMAND", "/f"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

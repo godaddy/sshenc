@@ -353,7 +353,13 @@ pub fn install() -> Result<()> {
         .join(".ssh")
         .join("config");
 
-    // Find the launcher dylib if available
+    // Find the launcher dylib if available.
+    // On Windows, skip PKCS#11 — the agent listens on the default OpenSSH pipe
+    // so auto-launching via PKCS#11 is unnecessary, and the stub PKCS#11 module
+    // crashes some OpenSSH builds during key exchange.
+    #[cfg(target_os = "windows")]
+    let dylib_path: Option<PathBuf> = None;
+    #[cfg(not(target_os = "windows"))]
     let dylib_path = find_launcher_dylib();
 
     match sshenc_core::ssh_config::install_block(
@@ -414,30 +420,38 @@ pub fn install() -> Result<()> {
     // SSH client) to connect to the sshenc agent.
     #[cfg(target_os = "windows")]
     {
-        let home =
-            dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(r"C:\Users\Default"));
-        let sock_path = home.join(".sshenc").join("agent.sock");
-        let sock_str = sock_path.to_string_lossy();
+        // Set SSH_AUTH_SOCK to the named pipe path with forward slashes.
+        // This lets ssh-add and other tools that don't read IdentityAgent
+        // from the config find the agent. Forward slashes avoid escape
+        // processing issues in various shells.
+        let pipe_path = config.socket_path.display().to_string().replace('\\', "/");
         let status = std::process::Command::new("setx")
-            .args(["SSH_AUTH_SOCK", &sock_str])
+            .args(["SSH_AUTH_SOCK", &pipe_path])
             .stdout(std::process::Stdio::null())
             .status();
         match status {
             Ok(s) if s.success() => {
-                println!("Set SSH_AUTH_SOCK={sock_str} (for Git Bash and MINGW SSH).");
+                println!("Set SSH_AUTH_SOCK={pipe_path}");
             }
             _ => {
-                eprintln!("warning: could not set SSH_AUTH_SOCK. Git Bash users should run:");
-                eprintln!("  setx SSH_AUTH_SOCK \"{}\"", sock_str);
+                eprintln!("warning: could not set SSH_AUTH_SOCK. Run:");
+                eprintln!("  setx SSH_AUTH_SOCK \"{}\"", pipe_path);
             }
         }
 
-        // Remove GIT_SSH_COMMAND if it was set by an older sshenc version
-        let _unused = std::process::Command::new("reg")
-            .args(["delete", "HKCU\\Environment", "/v", "GIT_SSH_COMMAND", "/f"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        // Set GIT_SSH_COMMAND to the Windows system SSH with forward slashes
+        // so git uses Windows SSH (which can access the agent pipe) instead of
+        // MINGW SSH (which cannot). Forward slashes survive Git Bash's path
+        // translation.
+        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        if Path::new(win_ssh).exists() {
+            let git_ssh = win_ssh.replace('\\', "/");
+            let _unused = std::process::Command::new("setx")
+                .args(["GIT_SSH_COMMAND", &git_ssh])
+                .stdout(std::process::Stdio::null())
+                .status();
+            println!("Set GIT_SSH_COMMAND={git_ssh}");
+        }
     }
 
     // On Windows, configure WSL distros if any are installed
@@ -453,6 +467,7 @@ pub fn install() -> Result<()> {
 }
 
 /// Find the PKCS#11 launcher library, if installed.
+#[cfg(not(target_os = "windows"))]
 fn find_launcher_dylib() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let lib_name = "libsshenc_pkcs11.dylib";
@@ -664,9 +679,24 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
         }
     }
 
-    let mut cmd = std::process::Command::new("ssh");
-    cmd.arg("-o")
-        .arg(format!("IdentityAgent {}", config.socket_path.display()));
+    // On Windows, use the system OpenSSH (not MINGW SSH which can't use named pipes).
+    #[cfg(target_os = "windows")]
+    let ssh_bin = {
+        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        if Path::new(win_ssh).exists() {
+            win_ssh.to_string()
+        } else {
+            "ssh".to_string()
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let ssh_bin = "ssh".to_string();
+
+    let mut cmd = std::process::Command::new(&ssh_bin);
+    let agent_path = config.socket_path.display().to_string();
+    #[cfg(target_os = "windows")]
+    let agent_path = agent_path.replace('\\', "/");
+    cmd.arg("-o").arg(format!("IdentityAgent {agent_path}"));
 
     // If a label is specified, pin to that key only
     if let Some(label) = label {

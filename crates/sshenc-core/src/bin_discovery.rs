@@ -173,6 +173,7 @@ mod tests {
 
         let context = BinaryDiscoveryContext {
             current_exe: Some(current_exe.clone()),
+            #[cfg(not(windows))]
             home_dir: Some(root.join("home")),
             #[cfg(windows)]
             local_app_data: Some(root.join("LocalAppData")),
@@ -206,6 +207,7 @@ mod tests {
 
         let context = BinaryDiscoveryContext {
             current_exe: None,
+            #[cfg(not(windows))]
             home_dir: Some(root.join("home")),
             #[cfg(windows)]
             local_app_data: Some(root.join("LocalAppData")),
@@ -257,6 +259,7 @@ mod tests {
 
         let context = BinaryDiscoveryContext {
             current_exe: Some(current_exe),
+            #[cfg(not(windows))]
             home_dir: Some(root.join("home")),
             #[cfg(windows)]
             local_app_data: Some(root.join("LocalAppData")),

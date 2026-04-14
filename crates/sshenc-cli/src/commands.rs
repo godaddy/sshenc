@@ -682,9 +682,24 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
         }
     }
 
-    let mut cmd = std::process::Command::new("ssh");
-    cmd.arg("-o")
-        .arg(format!("IdentityAgent {}", config.socket_path.display()));
+    // On Windows, use the system OpenSSH (not MINGW SSH which can't use named pipes).
+    #[cfg(target_os = "windows")]
+    let ssh_bin = {
+        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        if std::path::Path::new(win_ssh).exists() {
+            win_ssh.to_string()
+        } else {
+            "ssh".to_string()
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let ssh_bin = "ssh".to_string();
+
+    let mut cmd = std::process::Command::new(&ssh_bin);
+    let agent_path = config.socket_path.display().to_string();
+    #[cfg(target_os = "windows")]
+    let agent_path = agent_path.replace('\\', "/");
+    cmd.arg("-o").arg(format!("IdentityAgent {agent_path}"));
 
     // If a label is specified, pin to that key only
     if let Some(label) = label {

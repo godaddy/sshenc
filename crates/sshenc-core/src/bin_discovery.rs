@@ -11,6 +11,7 @@ use std::io::Read;
 #[derive(Debug, Clone, Default)]
 struct BinaryDiscoveryContext {
     current_exe: Option<PathBuf>,
+    #[cfg(not(windows))]
     home_dir: Option<PathBuf>,
     #[cfg(windows)]
     local_app_data: Option<PathBuf>,
@@ -24,6 +25,7 @@ impl BinaryDiscoveryContext {
     fn current() -> Self {
         Self {
             current_exe: std::env::current_exe().ok(),
+            #[cfg(not(windows))]
             home_dir: dirs::home_dir(),
             #[cfg(windows)]
             local_app_data: std::env::var_os("LOCALAPPDATA").map(PathBuf::from),

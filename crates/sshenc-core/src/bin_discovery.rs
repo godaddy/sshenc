@@ -166,8 +166,14 @@ mod tests {
         let root = test_dir("sibling");
         let bin_dir = root.join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
+        #[cfg(not(windows))]
         let current_exe = bin_dir.join("sshenc");
+        #[cfg(windows)]
+        let current_exe = bin_dir.join("sshenc.exe");
+        #[cfg(not(windows))]
         let sibling = bin_dir.join("sshenc-agent");
+        #[cfg(windows)]
+        let sibling = bin_dir.join("sshenc-agent.exe");
         write_test_binary(&current_exe);
         write_test_binary(&sibling);
 
@@ -183,8 +189,13 @@ mod tests {
             program_files_x86: Some(root.join("ProgramFilesX86")),
         };
 
+        #[cfg(not(windows))]
+        let binary_name = "sshenc-agent";
+        #[cfg(windows)]
+        let binary_name = "sshenc-agent.exe";
+
         assert_eq!(
-            find_trusted_binary_with_context("sshenc-agent", &context).as_deref(),
+            find_trusted_binary_with_context(binary_name, &context).as_deref(),
             Some(sibling.as_path())
         );
 

@@ -4,6 +4,7 @@
 //! Configuration model for sshenc.
 
 use crate::error::{Error, Result};
+use enclaveapp_core::metadata::{atomic_write, ensure_dir, restrict_file_permissions};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -128,10 +129,11 @@ impl Config {
     /// Save config to a file path, creating parent directories if needed.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            ensure_dir(parent).map_err(|e| Error::Config(e.to_string()))?;
         }
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        atomic_write(path, content.as_bytes()).map_err(|e| Error::Config(e.to_string()))?;
+        restrict_file_permissions(path).map_err(|e| Error::Config(e.to_string()))?;
         Ok(())
     }
 
@@ -207,6 +209,31 @@ mod tests {
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.allowed_labels, vec!["test-key".to_string()]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI; file I/O
+    fn test_config_save_ignores_preexisting_legacy_tmp_file() {
+        let dir = std::env::temp_dir().join("sshenc-test-config-stale-tmp");
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(dir.join(".config.toml.tmp"), "stale").unwrap();
+
+        let config = Config {
+            allowed_labels: vec!["test-key".into()],
+            ..Config::default()
+        };
+        config.save(&path).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.allowed_labels, vec!["test-key".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".config.toml.tmp")).unwrap(),
+            "stale"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -3,43 +3,159 @@
 
 //! CLI command implementations.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::Config;
-use sshenc_se::KeyBackend;
+use sshenc_se::{sshenc_keys_dir, KeyBackend, SshencBackend};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// Return the sshenc keys directory.
-/// macOS: ~/.sshenc/keys/
-/// Windows: %APPDATA%\sshenc\keys\
-#[allow(clippy::print_stderr)]
-fn sshenc_keys_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(".sshenc")
-            .join("keys")
+#[derive(Debug, PartialEq, Eq)]
+enum AgentStartStatus {
+    Started,
+    AlreadyRunning,
+}
+
+trait AgentLauncher {
+    fn is_running(&self, socket_path: &Path) -> bool;
+    fn find_agent_binary(&self) -> Result<PathBuf>;
+    fn spawn_agent(&self, agent_bin: &Path, socket_path: &Path) -> Result<()>;
+}
+
+#[derive(Debug, Default)]
+struct RealAgentLauncher;
+
+impl AgentLauncher for RealAgentLauncher {
+    fn is_running(&self, socket_path: &Path) -> bool {
+        agent_is_running(socket_path)
     }
-    #[cfg(target_os = "windows")]
-    {
-        dirs::data_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| {
-                eprintln!("warning: could not determine app data directory, using temp");
-                std::env::temp_dir()
-            })
-            .join("sshenc")
-            .join("keys")
+
+    fn find_agent_binary(&self) -> Result<PathBuf> {
+        find_agent_binary()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(".sshenc")
-            .join("keys")
+
+    fn spawn_agent(&self, agent_bin: &Path, socket_path: &Path) -> Result<()> {
+        std::process::Command::new(agent_bin)
+            .arg("--socket")
+            .arg(socket_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+}
+
+fn ensure_agent_running(launcher: &impl AgentLauncher, socket_path: &Path) -> Result<AgentStartStatus> {
+    if launcher.is_running(socket_path) {
+        return Ok(AgentStartStatus::AlreadyRunning);
+    }
+
+    let agent_bin = launcher.find_agent_binary()?;
+    launcher.spawn_agent(&agent_bin, socket_path)?;
+    Ok(AgentStartStatus::Started)
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WindowsAction {
+    StopService(&'static str),
+    SetServiceStart {
+        service: &'static str,
+        mode: &'static str,
+    },
+    StartService(&'static str),
+    SetUserEnv {
+        key: &'static str,
+        value: String,
+    },
+    DeleteUserEnv(&'static str),
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_install_actions(
+    socket_path: &Path,
+    git_ssh_command: Option<String>,
+) -> Vec<WindowsAction> {
+    let mut actions = vec![
+        WindowsAction::StopService("ssh-agent"),
+        WindowsAction::SetServiceStart {
+            service: "ssh-agent",
+            mode: "disabled",
+        },
+        WindowsAction::SetUserEnv {
+            key: "SSH_AUTH_SOCK",
+            value: socket_path.display().to_string().replace('\\', "/"),
+        },
+    ];
+    if let Some(git_ssh_command) = git_ssh_command {
+        actions.push(WindowsAction::SetUserEnv {
+            key: "GIT_SSH_COMMAND",
+            value: git_ssh_command,
+        });
+    }
+    actions
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_uninstall_actions() -> Vec<WindowsAction> {
+    vec![
+        WindowsAction::DeleteUserEnv("SSH_AUTH_SOCK"),
+        WindowsAction::DeleteUserEnv("GIT_SSH_COMMAND"),
+        WindowsAction::SetServiceStart {
+            service: "ssh-agent",
+            mode: "demand",
+        },
+        WindowsAction::StartService("ssh-agent"),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_actions(actions: &[WindowsAction]) {
+    for action in actions {
+        match action {
+            WindowsAction::StopService(service) => {
+                let _unused = std::process::Command::new("sc")
+                    .args(["stop", service])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            WindowsAction::SetServiceStart { service, mode } => {
+                let _unused = std::process::Command::new("sc")
+                    .args(["config", service, "start=", mode])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            WindowsAction::StartService(service) => {
+                let _unused = std::process::Command::new("sc")
+                    .args(["start", service])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            WindowsAction::SetUserEnv { key, value } => {
+                let status = std::process::Command::new("setx")
+                    .args([key, value])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                if !status.is_ok_and(|status| status.success()) {
+                    eprintln!("warning: could not set {key}. Run:");
+                    eprintln!("  setx {key} \"{value}\"");
+                }
+            }
+            WindowsAction::DeleteUserEnv(key) => {
+                let _unused = std::process::Command::new("reg")
+                    .args(["delete", "HKCU\\Environment", "/v", key, "/f"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
     }
 }
 
@@ -345,6 +461,14 @@ pub fn config_show() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn windows_git_ssh_command() -> Option<String> {
+    let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+    Path::new(win_ssh)
+        .exists()
+        .then(|| win_ssh.replace('\\', "/"))
+}
+
 #[allow(clippy::print_stdout, clippy::print_stderr, unused_qualifications)]
 pub fn install() -> Result<()> {
     let config = Config::load_default()?;
@@ -379,78 +503,36 @@ pub fn install() -> Result<()> {
         }
     }
 
-    // On Windows, stop the built-in ssh-agent service so sshenc can bind
-    // \\.\pipe\openssh-ssh-agent (the default Windows SSH agent pipe).
     #[cfg(target_os = "windows")]
     {
-        let stop = std::process::Command::new("sc")
-            .args(["stop", "ssh-agent"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let disable = std::process::Command::new("sc")
-            .args(["config", "ssh-agent", "start=", "disabled"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if stop.is_ok_and(|s| s.success()) || disable.is_ok_and(|s| s.success()) {
-            println!("Disabled Windows ssh-agent service (sshenc replaces it).");
-        }
+        apply_windows_actions(&[
+            WindowsAction::StopService("ssh-agent"),
+            WindowsAction::SetServiceStart {
+                service: "ssh-agent",
+                mode: "disabled",
+            },
+        ]);
+        println!("Configured Windows ssh-agent service for sshenc.");
     }
 
-    // Start the agent as a daemon if it's not already running
-    if !agent_is_running(&config.socket_path) {
-        let agent_bin = find_agent_binary()?;
-        std::process::Command::new(&agent_bin)
-            .arg("--socket")
-            .arg(&config.socket_path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok();
-        println!("Started sshenc agent.");
-    } else {
-        println!("Agent already running.");
+    match ensure_agent_running(&RealAgentLauncher, &config.socket_path)? {
+        AgentStartStatus::Started => println!("Started sshenc agent."),
+        AgentStartStatus::AlreadyRunning => println!("Agent already running."),
     }
 
-    // On Windows, set SSH_AUTH_SOCK as a persistent user environment variable
-    // pointing to the Unix domain socket that the agent also listens on.
-    // This allows Git for Windows' MINGW SSH (and any other Unix socket-aware
-    // SSH client) to connect to the sshenc agent.
     #[cfg(target_os = "windows")]
     {
-        // Set SSH_AUTH_SOCK to the named pipe path with forward slashes.
-        // This lets ssh-add and other tools that don't read IdentityAgent
-        // from the config find the agent. Forward slashes avoid escape
-        // processing issues in various shells.
-        let pipe_path = config.socket_path.display().to_string().replace('\\', "/");
-        let status = std::process::Command::new("setx")
-            .args(["SSH_AUTH_SOCK", &pipe_path])
-            .stdout(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => {
-                println!("Set SSH_AUTH_SOCK={pipe_path}");
-            }
-            _ => {
-                eprintln!("warning: could not set SSH_AUTH_SOCK. Run:");
-                eprintln!("  setx SSH_AUTH_SOCK \"{}\"", pipe_path);
-            }
-        }
-
-        // Set GIT_SSH_COMMAND to the Windows system SSH with forward slashes
-        // so git uses Windows SSH (which can access the agent pipe) instead of
-        // MINGW SSH (which cannot). Forward slashes survive Git Bash's path
-        // translation.
-        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
-        if Path::new(win_ssh).exists() {
-            let git_ssh = win_ssh.replace('\\', "/");
-            let _unused = std::process::Command::new("setx")
-                .args(["GIT_SSH_COMMAND", &git_ssh])
-                .stdout(std::process::Stdio::null())
-                .status();
-            println!("Set GIT_SSH_COMMAND={git_ssh}");
+        let git_ssh_command = windows_git_ssh_command();
+        apply_windows_actions(&windows_install_actions(
+            &config.socket_path,
+            git_ssh_command.clone(),
+        ));
+        println!(
+            "Set SSH_AUTH_SOCK={}",
+            config.socket_path.display().to_string().replace('\\', "/")
+        );
+        if let Some(git_ssh_command) = git_ssh_command {
+            println!("Set GIT_SSH_COMMAND={git_ssh_command}");
         }
     }
 
@@ -594,17 +676,11 @@ pub fn uninstall() -> Result<()> {
         }
     }
 
-    // On Windows, remove the GIT_SSH_COMMAND user environment variable
     #[cfg(target_os = "windows")]
     {
-        drop(
-            std::process::Command::new("reg")
-                .args(["delete", "HKCU\\Environment", "/v", "GIT_SSH_COMMAND", "/f"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status(),
-        );
-        println!("Removed GIT_SSH_COMMAND environment variable.");
+        apply_windows_actions(&windows_uninstall_actions());
+        println!("Removed SSH_AUTH_SOCK and GIT_SSH_COMMAND environment variables.");
+        println!("Restored the Windows ssh-agent service.");
 
         // Clean up WSL distros
         crate::wsl::unconfigure_wsl_distros();
@@ -654,71 +730,255 @@ pub fn openssh_print_config(
     Ok(())
 }
 
+#[derive(Debug)]
+struct SshInvocation {
+    ssh_bin: String,
+    args: Vec<String>,
+    temp_identity_file: Option<PathBuf>,
+}
+
+fn default_ssh_dir() -> Result<PathBuf> {
+    dirs::home_dir()
+        .ok_or_else(|| anyhow!("could not determine home directory"))
+        .map(|home| home.join(".ssh"))
+}
+
+fn ssh_binary() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        if Path::new(win_ssh).exists() {
+            return win_ssh.to_string();
+        }
+    }
+    "ssh".to_string()
+}
+
+fn write_atomic_file(path: &Path, data: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    enclaveapp_core::metadata::atomic_write(path, data).map_err(|e| anyhow!(e.to_string()))
+}
+
+fn unique_temp_identity_path(identity_dir: &Path, label: &str) -> PathBuf {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    identity_dir.join(format!("{label}-{pid}-{nanos}.pub"))
+}
+
+fn build_ssh_wrapper_invocation(
+    backend: &dyn KeyBackend,
+    socket_path: &Path,
+    label: Option<&str>,
+    ssh_args: &[String],
+    identity_dir: &Path,
+) -> Result<SshInvocation> {
+    let mut args = Vec::new();
+    let agent_path = socket_path.display().to_string();
+    #[cfg(target_os = "windows")]
+    let agent_path = agent_path.replace('\\', "/");
+    args.push("-o".to_string());
+    args.push(format!("IdentityAgent {agent_path}"));
+
+    let mut temp_identity_file = None;
+    if let Some(label) = label {
+        let info = backend.get(label)?;
+        let ssh_pubkey =
+            SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
+        let identity_path = unique_temp_identity_path(identity_dir, label);
+        let line = format!("{}\n", ssh_pubkey.to_openssh_line());
+        write_atomic_file(&identity_path, line.as_bytes())?;
+        args.push("-o".to_string());
+        args.push(format!("IdentityFile {}", identity_path.display()));
+        args.push("-o".to_string());
+        args.push("IdentitiesOnly yes".to_string());
+        temp_identity_file = Some(identity_path);
+    }
+
+    args.extend(ssh_args.iter().cloned());
+
+    Ok(SshInvocation {
+        ssh_bin: ssh_binary(),
+        args,
+        temp_identity_file,
+    })
+}
+
 #[allow(clippy::exit, clippy::print_stderr)]
 pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
-    use enclaveapp_core::metadata;
-
-    let keys_dir = sshenc_keys_dir();
     let config = Config::load_default()?;
 
-    // Ensure agent is running
-    if !agent_is_running(&config.socket_path) {
-        let agent_bin = find_agent_binary()?;
-        std::process::Command::new(&agent_bin)
-            .arg("--socket")
-            .arg(&config.socket_path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok();
+    if ensure_agent_running(&RealAgentLauncher, &config.socket_path)? == AgentStartStatus::Started {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        // Verify the agent is reachable; warn but don't fail — it may just be slow to start
         if !agent_is_running(&config.socket_path) {
             eprintln!("warning: agent may not be ready yet (socket not connectable)");
         }
     }
 
-    // On Windows, use the system OpenSSH (not MINGW SSH which can't use named pipes).
-    #[cfg(target_os = "windows")]
-    let ssh_bin = {
-        let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
-        if Path::new(win_ssh).exists() {
-            win_ssh.to_string()
-        } else {
-            "ssh".to_string()
-        }
-    };
-    #[cfg(not(target_os = "windows"))]
-    let ssh_bin = "ssh".to_string();
+    let ssh_dir = default_ssh_dir()?;
+    let backend = SshencBackend::new(ssh_dir.clone())
+        .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
+    let invocation =
+        build_ssh_wrapper_invocation(&backend, &config.socket_path, label, ssh_args, &ssh_dir)?;
 
-    let mut cmd = std::process::Command::new(&ssh_bin);
-    let agent_path = config.socket_path.display().to_string();
-    #[cfg(target_os = "windows")]
-    let agent_path = agent_path.replace('\\', "/");
-    cmd.arg("-o").arg(format!("IdentityAgent {agent_path}"));
+    let status = std::process::Command::new(&invocation.ssh_bin)
+        .args(&invocation.args)
+        .status();
+    if let Some(path) = invocation.temp_identity_file.as_ref() {
+        drop(std::fs::remove_file(path));
+    }
+    let status = status?;
+    std::process::exit(status.code().unwrap_or(1));
+}
 
-    // If a label is specified, pin to that key only
-    if let Some(label) = label {
-        let ssh_pub = keys_dir.join(format!("{label}.ssh.pub"));
-        if !ssh_pub.exists() {
-            let pub_bytes = metadata::load_pub_key(&keys_dir, label)
-                .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
-            // Write the SSH-formatted public key file
-            let ssh_pubkey = SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
-            let line = ssh_pubkey.to_openssh_line();
-            std::fs::create_dir_all(&keys_dir)?;
-            std::fs::write(&ssh_pub, format!("{line}\n"))?;
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug)]
+struct PromoteDefaultResult {
+    fingerprint: String,
+    public_key_path: PathBuf,
+    backup_label: Option<String>,
+    removed_old_pub: Option<PathBuf>,
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unique_backup_path(path: &Path) -> PathBuf {
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("backup");
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.with_file_name(format!("{file_name}.{pid}.{nanos}.bak"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn load_label_public_key(keys_dir: &Path, label: &str) -> Result<SshPublicKey> {
+    let pub_bytes = enclaveapp_core::metadata::load_pub_key(keys_dir, label)
+        .map_err(|_| anyhow!("key '{label}' not found"))?;
+    let meta = sshenc_se::compat::load_sshenc_meta(keys_dir, label)
+        .map_err(|e| anyhow!("failed to load metadata for '{label}': {e}"))?;
+    let comment = meta.get_app_field("comment").map(str::to_owned);
+    SshPublicKey::from_sec1_bytes(&pub_bytes, comment).map_err(Into::into)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restore_backup(original: &Path, backup: &Path) {
+    if backup.exists() {
+        if original.exists() {
+            drop(std::fs::remove_file(original));
         }
-        cmd.arg("-o")
-            .arg(format!("IdentityFile {}", ssh_pub.display()))
-            .arg("-o")
-            .arg("IdentitiesOnly yes");
+        drop(std::fs::rename(backup, original));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn promote_to_default_with_dirs<F>(
+    keys_dir: &Path,
+    ssh_dir: &Path,
+    label: &str,
+    allow_pub_overwrite: bool,
+    write_file: F,
+) -> Result<Option<PromoteDefaultResult>>
+where
+    F: Fn(&Path, &[u8]) -> Result<()> + Copy,
+{
+    use enclaveapp_core::metadata;
+
+    if label == "default" {
+        bail!("key is already named 'default'");
     }
 
-    cmd.args(ssh_args);
-    let status = cmd.status()?;
-    std::process::exit(status.code().unwrap_or(1));
+    let source_pubkey = load_label_public_key(keys_dir, label)?;
+    let id_ecdsa_pub = ssh_dir.join("id_ecdsa.pub");
+    let id_ecdsa_priv = ssh_dir.join("id_ecdsa");
+    let old_pub = ssh_dir.join(format!("{label}.pub"));
+
+    if id_ecdsa_pub.exists() && !id_ecdsa_priv.exists() && !allow_pub_overwrite {
+        return Ok(None);
+    }
+
+    std::fs::create_dir_all(ssh_dir)?;
+
+    let mut private_backup = None;
+    let mut public_backup = None;
+    let mut backup_label = None;
+    let mut source_renamed = false;
+
+    let result = (|| -> Result<PromoteDefaultResult> {
+        if id_ecdsa_priv.exists() {
+            let backup = unique_backup_path(&id_ecdsa_priv);
+            std::fs::rename(&id_ecdsa_priv, &backup)?;
+            private_backup = Some(backup);
+        }
+        if id_ecdsa_pub.exists() {
+            let backup = unique_backup_path(&id_ecdsa_pub);
+            std::fs::rename(&id_ecdsa_pub, &backup)?;
+            public_backup = Some(backup);
+        }
+
+        if metadata::key_files_exist(keys_dir, "default") {
+            let renamed_default = format!("default-backup-{}", std::process::id());
+            metadata::rename_key_files(keys_dir, "default", &renamed_default)
+                .map_err(|e| anyhow!("failed to rename default key: {e}"))?;
+            backup_label = Some(renamed_default);
+        }
+
+        metadata::rename_key_files(keys_dir, label, "default")
+            .map_err(|e| anyhow!("failed to rename key: {e}"))?;
+        source_renamed = true;
+
+        let ssh_pubkey = load_label_public_key(keys_dir, "default")
+            .map_err(|e| anyhow!("failed to load renamed key: {e}"))?;
+        let pub_line = format!("{}\n", ssh_pubkey.to_openssh_line());
+        write_file(&id_ecdsa_pub, pub_line.as_bytes())?;
+
+        let removed_old_pub = if old_pub.exists() {
+            std::fs::remove_file(&old_pub)?;
+            Some(old_pub)
+        } else {
+            None
+        };
+
+        Ok(PromoteDefaultResult {
+            fingerprint: sshenc_core::fingerprint::fingerprint_sha256(&source_pubkey),
+            public_key_path: id_ecdsa_pub.clone(),
+            backup_label: backup_label.clone(),
+            removed_old_pub,
+        })
+    })();
+
+    match result {
+        Ok(promotion) => {
+            if let Some(backup) = public_backup {
+                drop(std::fs::remove_file(backup));
+            }
+            if let Some(backup) = private_backup {
+                drop(std::fs::remove_file(backup));
+            }
+            Ok(Some(promotion))
+        }
+        Err(error) => {
+            if source_renamed && metadata::key_files_exist(keys_dir, "default") {
+                drop(metadata::rename_key_files(keys_dir, "default", label));
+            }
+            if let Some(ref backup_label) = backup_label {
+                if metadata::key_files_exist(keys_dir, backup_label) {
+                    drop(metadata::rename_key_files(keys_dir, backup_label, "default"));
+                }
+            }
+            if let Some(ref backup) = public_backup {
+                restore_backup(&id_ecdsa_pub, backup);
+            }
+            if let Some(ref backup) = private_backup {
+                restore_backup(&id_ecdsa_priv, backup);
+            }
+            Err(error)
+        }
+    }
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
@@ -732,39 +992,18 @@ pub fn promote_to_default(label: &str) -> Result<()> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        use enclaveapp_core::metadata;
-
         let keys_dir = sshenc_keys_dir();
-
-        if label == "default" {
-            bail!("key is already named 'default'");
-        }
-
-        // Verify the source key exists
-        metadata::load_pub_key(&keys_dir, label)
-            .map_err(|_| anyhow::anyhow!("key '{label}' not found"))?;
-
-        let ssh_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
-            .join(".ssh");
-        let id_ecdsa_pub = ssh_dir.join("id_ecdsa.pub");
-        let id_ecdsa_priv = ssh_dir.join("id_ecdsa");
-
-        // Back up existing id_ecdsa key pair if present
-        if id_ecdsa_priv.exists() {
-            let priv_bak = id_ecdsa_priv.with_extension("bak");
-            let pub_bak = PathBuf::from(format!("{}.bak", id_ecdsa_pub.display()));
-            eprintln!("Backing up existing id_ecdsa key pair:");
-            eprintln!("  {} → {}", id_ecdsa_priv.display(), priv_bak.display());
-            if id_ecdsa_pub.exists() {
-                eprintln!("  {} → {}", id_ecdsa_pub.display(), pub_bak.display());
-            }
-            std::fs::rename(&id_ecdsa_priv, &priv_bak)?;
-            if id_ecdsa_pub.exists() {
-                std::fs::rename(&id_ecdsa_pub, &pub_bak)?;
-            }
-        } else if id_ecdsa_pub.exists() {
-            // Just the pub file, no private key — prompt before overwriting
+        let ssh_dir = default_ssh_dir()?;
+        let promotion = if let Some(promotion) = promote_to_default_with_dirs(
+            &keys_dir,
+            &ssh_dir,
+            label,
+            false,
+            write_atomic_file,
+        )? {
+            promotion
+        } else {
+            let id_ecdsa_pub = ssh_dir.join("id_ecdsa.pub");
             eprintln!("{} already exists.", id_ecdsa_pub.display());
             eprint!("Overwrite (y/n)? ");
             Write::flush(&mut io::stderr()).ok();
@@ -774,43 +1013,19 @@ pub fn promote_to_default(label: &str) -> Result<()> {
                 println!("Cancelled.");
                 return Ok(());
             }
-        }
-
-        // If there's already a "default" key, rename it to a backup label
-        if metadata::load_pub_key(&keys_dir, "default").is_ok() {
-            let backup_label = format!("default-backup-{}", std::process::id());
-            eprintln!("Renaming existing default key to '{backup_label}'");
-            metadata::rename_key_files(&keys_dir, "default", &backup_label)
-                .map_err(|e| anyhow::anyhow!("failed to rename default key: {e}"))?;
-        }
-
-        // Rename the source key to "default"
-        metadata::rename_key_files(&keys_dir, label, "default")
-            .map_err(|e| anyhow::anyhow!("failed to rename key: {e}"))?;
-
-        // Write ~/.ssh/id_ecdsa.pub
-        let pub_bytes = metadata::load_pub_key(&keys_dir, "default")
-            .map_err(|e| anyhow::anyhow!("failed to load renamed key: {e}"))?;
-        let ssh_pubkey = SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
-        let line = ssh_pubkey.to_openssh_line();
-        std::fs::create_dir_all(&ssh_dir)?;
-        std::fs::write(&id_ecdsa_pub, format!("{line}\n"))?;
-
-        // Remove the old ~/.ssh/<label>.pub if it exists
-        let old_pub = ssh_dir.join(format!("{label}.pub"));
-        if old_pub.exists() {
-            std::fs::remove_file(&old_pub)?;
-            println!("Removed {}", old_pub.display());
-        }
+            promote_to_default_with_dirs(&keys_dir, &ssh_dir, label, true, write_atomic_file)?
+                .ok_or_else(|| anyhow!("default-key promotion confirmation was not applied"))?
+        };
 
         println!("Promoted '{label}' to default key.");
-        println!("  Public key: {}", id_ecdsa_pub.display());
-        println!(
-            "  Fingerprint: {}",
-            sshenc_core::fingerprint::fingerprint_sha256(&SshPublicKey::from_sec1_bytes(
-                &pub_bytes, None
-            )?)
-        );
+        println!("  Public key: {}", promotion.public_key_path.display());
+        println!("  Fingerprint: {}", promotion.fingerprint);
+        if let Some(ref backup_label) = promotion.backup_label {
+            println!("  Previous default key backed up as: {backup_label}");
+        }
+        if let Some(ref old_pub) = promotion.removed_old_pub {
+            println!("Removed {}", old_pub.display());
+        }
         println!();
         println!("The agent will now present this key first for all connections.");
         println!("Restart the agent for the change to take effect:");
@@ -850,15 +1065,32 @@ pub fn forward_to_ssh_keygen(args: &[String]) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Handle ssh-keygen-compatible signing mode.
-/// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
-/// We sign via the hardware backend and write an SSH signature to <data_file>.sig.
-pub fn ssh_sign(args: &[String]) -> Result<()> {
-    use enclaveapp_core::metadata;
-    use enclaveapp_core::traits::EnclaveSigner;
+#[derive(Debug, PartialEq, Eq)]
+struct SshSignArgs {
+    namespace: String,
+    label: String,
+    data_file: PathBuf,
+}
 
-    // Parse: -Y sign -n <namespace> -f <key_file> <data_file>
-    let mut namespace = "git";
+fn label_from_key_path(key_path: &Path) -> String {
+    let label = if key_path.file_name().map(|f| f.to_string_lossy()) == Some("id_ecdsa.pub".into())
+    {
+        "default".to_string()
+    } else {
+        key_path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string())
+    };
+
+    label
+        .strip_suffix(".ssh")
+        .unwrap_or(&label)
+        .to_string()
+}
+
+fn parse_ssh_sign_args(args: &[String]) -> Result<SshSignArgs> {
+    let mut namespace = "git".to_string();
     let mut key_file = None;
     let mut data_file = None;
 
@@ -866,55 +1098,42 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "-Y" => {
-                // skip "sign" after -Y
                 i += 1;
             }
             "-n" => {
                 i += 1;
                 if i < args.len() {
-                    namespace = Box::leak(args[i].clone().into_boxed_str());
+                    namespace = args[i].clone();
                 }
             }
             "-f" => {
                 i += 1;
                 if i < args.len() {
-                    key_file = Some(args[i].clone());
+                    key_file = Some(PathBuf::from(&args[i]));
                 }
             }
             other if !other.starts_with('-') && key_file.is_some() => {
-                data_file = Some(other.to_string());
+                data_file = Some(PathBuf::from(other));
             }
             _ => {}
         }
         i += 1;
     }
 
-    let key_file = key_file.ok_or_else(|| anyhow::anyhow!("missing -f <key_file>"))?;
-    let data_file = data_file.ok_or_else(|| anyhow::anyhow!("missing data file argument"))?;
+    let key_file = key_file.ok_or_else(|| anyhow!("missing -f <key_file>"))?;
+    let data_file = data_file.ok_or_else(|| anyhow!("missing data file argument"))?;
 
-    // Determine which label to use from the key file path
-    let key_path = Path::new(&key_file);
-    let label = if key_path.file_name().map(|f| f.to_string_lossy()) == Some("id_ecdsa.pub".into())
-    {
-        "default".to_string()
-    } else {
-        key_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "default".to_string())
-    };
+    Ok(SshSignArgs {
+        namespace,
+        label: label_from_key_path(&key_file),
+        data_file,
+    })
+}
 
-    // Also check if this is an sshenc .ssh.pub file
-    let label = if label.ends_with(".ssh") {
-        label.strip_suffix(".ssh").unwrap_or(&label).to_string()
-    } else {
-        label
-    };
+fn ssh_sign_with_backend(backend: &dyn KeyBackend, args: &[String]) -> Result<()> {
+    let sign_args = parse_ssh_sign_args(args)?;
 
-    // Build the SSHSIG "signed data" blob per the OpenSSH spec (sshsig.c).
-    // The key signs: MAGIC || string(namespace) || string("") || string(hash_alg) || string(H(message))
-    // Note: version is NOT part of the signed data — only the outer envelope.
-    let file_data = std::fs::read(&data_file)?;
+    let file_data = std::fs::read(&sign_args.data_file)?;
     let message_hash = {
         use sha2::{Digest, Sha256};
         Sha256::digest(&file_data)
@@ -923,58 +1142,50 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
         use sshenc_core::pubkey::write_ssh_string;
         let mut buf = Vec::new();
         buf.extend_from_slice(b"SSHSIG");
-        write_ssh_string(&mut buf, namespace.as_bytes());
+        write_ssh_string(&mut buf, sign_args.namespace.as_bytes());
         write_ssh_string(&mut buf, b"");
         write_ssh_string(&mut buf, b"sha256");
         write_ssh_string(&mut buf, &message_hash);
         buf
     };
 
-    // Sign via the hardware backend
-    let keys_dir = sshenc_keys_dir();
+    let der_sig = backend
+        .sign(&sign_args.label, &signed_data)
+        .map_err(|e| anyhow!("signing failed: {e}"))?;
+    let info = backend.get(&sign_args.label)?;
+    let ssh_pubkey =
+        SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
+    let sig_blob = build_ssh_signature(&ssh_pubkey, &sign_args.namespace, &der_sig)?;
 
-    #[cfg(target_os = "macos")]
-    let signer = enclaveapp_apple::SecureEnclaveSigner::with_keys_dir("sshenc", keys_dir.clone());
-    #[cfg(target_os = "windows")]
-    let signer = enclaveapp_windows::TpmSigner::with_keys_dir("sshenc", keys_dir.clone());
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    let signer: Box<dyn EnclaveSigner> = if enclaveapp_linux_tpm::is_available() {
-        Box::new(enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(
-            "sshenc",
-            keys_dir.clone(),
-        ))
+    let sig_path = sign_args.data_file.with_extension(format!(
+        "{}.sig",
+        sign_args
+            .data_file
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+    ));
+    let sig_path = if sign_args.data_file.extension().is_some() {
+        sig_path
     } else {
-        Box::new(enclaveapp_software::SoftwareSigner::with_keys_dir(
-            "sshenc",
-            keys_dir.clone(),
-        ))
+        PathBuf::from(format!("{}.sig", sign_args.data_file.display()))
     };
-    #[cfg(all(target_os = "linux", not(target_env = "gnu")))]
-    let signer = enclaveapp_software::SoftwareSigner::with_keys_dir("sshenc", keys_dir.clone());
-
-    let der_sig = signer
-        .sign(&label, &signed_data)
-        .map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
-
-    // Get the public key for the signature header
-    let pub_bytes = metadata::load_pub_key(&keys_dir, &label)
-        .map_err(|e| anyhow::anyhow!("key '{label}' not found: {e}"))?;
-    let ssh_pubkey = SshPublicKey::from_sec1_bytes(&pub_bytes, None)?;
-
-    // Build the SSH signature in the format ssh-keygen produces:
-    // MAGIC_PREAMBLE || uint32(version) || string(publickey) || string(namespace)
-    // || string(reserved) || string(hash_algorithm) || string(signature)
-    let sig_blob = build_ssh_signature(&ssh_pubkey, namespace, &der_sig)?;
-
-    // Write PEM-encoded signature to <data_file>.sig
-    let sig_path = format!("{data_file}.sig");
     let pem = format!(
         "-----BEGIN SSH SIGNATURE-----\n{}\n-----END SSH SIGNATURE-----\n",
         base64_wrap(&sig_blob, 70)
     );
-    std::fs::write(&sig_path, &pem)?;
-
+    write_atomic_file(&sig_path, pem.as_bytes())?;
     Ok(())
+}
+
+/// Handle ssh-keygen-compatible signing mode.
+/// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
+/// We sign via the hardware backend and write an SSH signature to <data_file>.sig.
+pub fn ssh_sign(args: &[String]) -> Result<()> {
+    let ssh_dir = default_ssh_dir()?;
+    let backend = SshencBackend::new(ssh_dir)
+        .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
+    ssh_sign_with_backend(&backend, args)
 }
 
 /// Build an SSH signature blob per the SSH signature format spec.
@@ -1027,8 +1238,10 @@ fn base64_wrap(data: &[u8], width: usize) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use enclaveapp_core::{AccessPolicy, KeyType};
     use sshenc_test_support::MockKeyBackend;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1056,6 +1269,44 @@ mod tests {
         };
         backend.generate(&opts).unwrap();
         backend
+    }
+
+    #[derive(Debug)]
+    struct FakeLauncher {
+        running: bool,
+        spawn_result: Result<()>,
+        spawn_count: Mutex<usize>,
+    }
+
+    impl AgentLauncher for FakeLauncher {
+        fn is_running(&self, _socket_path: &Path) -> bool {
+            self.running
+        }
+
+        fn find_agent_binary(&self) -> Result<PathBuf> {
+            Ok(PathBuf::from("/tmp/sshenc-agent"))
+        }
+
+        fn spawn_agent(&self, _agent_bin: &Path, _socket_path: &Path) -> Result<()> {
+            *self.spawn_count.lock().unwrap() += 1;
+            self.spawn_result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| anyhow!(error.to_string()))
+        }
+    }
+
+    fn seed_promote_key(keys_dir: &Path, label: &str, comment: Option<&str>) {
+        let backend = backend_with_key(label, comment.map(str::to_owned));
+        let info = backend.get(label).unwrap();
+        enclaveapp_core::metadata::ensure_dir(keys_dir).unwrap();
+        enclaveapp_core::metadata::save_pub_key(keys_dir, label, &info.public_key_bytes).unwrap();
+
+        let mut meta = enclaveapp_core::metadata::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
+        if let Some(comment) = comment {
+            meta.set_app_field("comment", comment);
+        }
+        enclaveapp_core::metadata::save_meta(keys_dir, label, &meta).unwrap();
     }
 
     // -----------------------------------------------------------------------
@@ -1497,6 +1748,67 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn ensure_agent_running_propagates_spawn_errors() {
+        let launcher = FakeLauncher {
+            running: false,
+            spawn_result: Err(anyhow!("spawn failed")),
+            spawn_count: Mutex::new(0),
+        };
+
+        let error = ensure_agent_running(&launcher, Path::new("/tmp/agent.sock")).unwrap_err();
+        assert!(error.to_string().contains("spawn failed"));
+        assert_eq!(*launcher.spawn_count.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn ensure_agent_running_skips_spawn_when_already_running() {
+        let launcher = FakeLauncher {
+            running: true,
+            spawn_result: Ok(()),
+            spawn_count: Mutex::new(0),
+        };
+
+        let status = ensure_agent_running(&launcher, Path::new("/tmp/agent.sock")).unwrap();
+        assert_eq!(status, AgentStartStatus::AlreadyRunning);
+        assert_eq!(*launcher.spawn_count.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn windows_install_actions_disable_service_and_set_socket_env() {
+        let actions = windows_install_actions(
+            Path::new(r"\\.\pipe\openssh-ssh-agent"),
+            Some("C:/Windows/System32/OpenSSH/ssh.exe".to_string()),
+        );
+
+        assert!(actions.contains(&WindowsAction::StopService("ssh-agent")));
+        assert!(actions.contains(&WindowsAction::SetServiceStart {
+            service: "ssh-agent",
+            mode: "disabled",
+        }));
+        assert!(actions.contains(&WindowsAction::SetUserEnv {
+            key: "SSH_AUTH_SOCK",
+            value: "//./pipe/openssh-ssh-agent".to_string(),
+        }));
+        assert!(actions.contains(&WindowsAction::SetUserEnv {
+            key: "GIT_SSH_COMMAND",
+            value: "C:/Windows/System32/OpenSSH/ssh.exe".to_string(),
+        }));
+    }
+
+    #[test]
+    fn windows_uninstall_actions_restore_service_and_remove_env_vars() {
+        let actions = windows_uninstall_actions();
+
+        assert!(actions.contains(&WindowsAction::DeleteUserEnv("SSH_AUTH_SOCK")));
+        assert!(actions.contains(&WindowsAction::DeleteUserEnv("GIT_SSH_COMMAND")));
+        assert!(actions.contains(&WindowsAction::SetServiceStart {
+            service: "ssh-agent",
+            mode: "demand",
+        }));
+        assert!(actions.contains(&WindowsAction::StartService("ssh-agent")));
+    }
+
     // -----------------------------------------------------------------------
     // promote_to_default tests
     // -----------------------------------------------------------------------
@@ -1511,6 +1823,119 @@ mod tests {
             err_msg.contains("already named 'default'"),
             "error: {err_msg}"
         );
+    }
+
+    #[test]
+    fn build_ssh_wrapper_invocation_writes_temp_identity_file() {
+        let backend = backend_with_key("wrapper-key", Some("wrapper@test".into()));
+        let identity_dir = test_dir("wrapper-identities");
+        let invocation = build_ssh_wrapper_invocation(
+            &backend,
+            Path::new("/tmp/sshenc-agent.sock"),
+            Some("wrapper-key"),
+            &["example.com".to_string()],
+            &identity_dir,
+        )
+        .unwrap();
+
+        let identity_path = invocation.temp_identity_file.unwrap();
+        assert!(identity_path.starts_with(&identity_dir));
+        assert!(identity_path.exists());
+        let contents = std::fs::read_to_string(&identity_path).unwrap();
+        assert!(contents.contains("ecdsa-sha2-nistp256"));
+        assert!(contents.contains("wrapper@test"));
+        assert!(
+            invocation
+                .args
+                .iter()
+                .any(|arg| arg.contains(&identity_path.display().to_string()))
+        );
+
+        std::fs::remove_dir_all(&identity_dir).ok();
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn promote_to_default_rolls_back_on_publish_failure() {
+        let root = test_dir("promote-rollback");
+        let keys_dir = root.join("keys");
+        let ssh_dir = root.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+
+        seed_promote_key(&keys_dir, "work", Some("work@test"));
+        seed_promote_key(&keys_dir, "default", Some("default@test"));
+        std::fs::write(ssh_dir.join("id_ecdsa"), "old private").unwrap();
+        std::fs::write(ssh_dir.join("id_ecdsa.pub"), "old public").unwrap();
+
+        let error = promote_to_default_with_dirs(
+            &keys_dir,
+            &ssh_dir,
+            "work",
+            true,
+            |_path, _data| Err(anyhow!("disk full")),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disk full"));
+
+        assert!(enclaveapp_core::metadata::key_files_exist(&keys_dir, "work"));
+        assert!(enclaveapp_core::metadata::key_files_exist(&keys_dir, "default"));
+        assert_eq!(
+            std::fs::read_to_string(ssh_dir.join("id_ecdsa")).unwrap(),
+            "old private"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ssh_dir.join("id_ecdsa.pub")).unwrap(),
+            "old public"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn parse_ssh_sign_args_preserves_namespace_and_normalizes_label() {
+        let parsed = parse_ssh_sign_args(&[
+            "-Y".to_string(),
+            "sign".to_string(),
+            "-n".to_string(),
+            "git-namespace-with-extra-segments".to_string(),
+            "-f".to_string(),
+            "/tmp/work.ssh.pub".to_string(),
+            "/tmp/payload".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.namespace, "git-namespace-with-extra-segments");
+        assert_eq!(parsed.label, "work");
+        assert_eq!(parsed.data_file, PathBuf::from("/tmp/payload"));
+    }
+
+    #[test]
+    fn ssh_sign_with_backend_writes_signature_file() {
+        let root = test_dir("ssh-sign");
+        let data_path = root.join("payload.txt");
+        let pub_path = root.join("sig-key.pub");
+        let backend = backend_with_key("sig-key", Some("sig@test".into()));
+        std::fs::write(&data_path, "payload").unwrap();
+
+        ssh_sign_with_backend(
+            &backend,
+            &[
+                "-Y".to_string(),
+                "sign".to_string(),
+                "-n".to_string(),
+                "git-namespace".to_string(),
+                "-f".to_string(),
+                pub_path.display().to_string(),
+                data_path.display().to_string(),
+            ],
+        )
+        .unwrap();
+
+        let signature = std::fs::read_to_string(root.join("payload.txt.sig")).unwrap();
+        assert!(signature.contains("BEGIN SSH SIGNATURE"));
+        assert!(signature.contains("END SSH SIGNATURE"));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // -----------------------------------------------------------------------

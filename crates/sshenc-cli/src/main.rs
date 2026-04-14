@@ -416,14 +416,19 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
 }
 
 fn selected_access_policy(auth_policy: Option<&str>, require_user_presence: bool) -> AccessPolicy {
-    match auth_policy {
-        Some("none") => AccessPolicy::None,
-        Some("any") => AccessPolicy::Any,
-        Some("biometric") => AccessPolicy::BiometricOnly,
-        Some("password") => AccessPolicy::PasswordOnly,
-        Some(_) => AccessPolicy::None,
-        None if require_user_presence => AccessPolicy::Any,
-        None => AccessPolicy::None,
+    if let Some(policy) = auth_policy {
+        return match policy {
+            "any" => AccessPolicy::Any,
+            "biometric" => AccessPolicy::BiometricOnly,
+            "password" => AccessPolicy::PasswordOnly,
+            _ => AccessPolicy::None,
+        };
+    }
+
+    if require_user_presence {
+        AccessPolicy::Any
+    } else {
+        AccessPolicy::None
     }
 }
 

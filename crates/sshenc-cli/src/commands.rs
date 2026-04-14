@@ -731,7 +731,7 @@ pub fn agent(
     #[cfg(unix)]
     {
         let error = command.exec();
-        return Err(anyhow!("failed to exec {}: {error}", agent_bin.display()));
+        Err(anyhow!("failed to exec {}: {error}", agent_bin.display()))
     }
 
     #[cfg(windows)]

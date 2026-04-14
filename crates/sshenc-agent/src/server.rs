@@ -60,7 +60,6 @@ pub async fn run_agent(
                 let (stream, _addr) = accept_result?;
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
-                let prompt_policy = prompt_policy;
                 tokio::spawn(async move {
                     if let Err(e) =
                         handle_connection(stream, &*backend, &allowed, prompt_policy).await
@@ -193,9 +192,13 @@ pub async fn run_agent(
                     Ok((conn, _)) => {
                         let backend = Arc::clone(&backend_for_unix);
                         let allowed = Arc::clone(&allowed_for_unix);
-                        let prompt_policy = prompt_policy_for_unix;
                         std::thread::spawn(move || {
-                            handle_blocking_connection(conn, &*backend, &allowed, prompt_policy);
+                            handle_blocking_connection(
+                                conn,
+                                &*backend,
+                                &allowed,
+                                prompt_policy_for_unix,
+                            );
                         });
                     }
                     Err(e) => {
@@ -216,7 +219,6 @@ pub async fn run_agent(
 
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
-                let prompt_policy = prompt_policy;
                 tokio::spawn(async move {
                     if let Err(e) =
                         handle_connection(stream, &*backend, &allowed, prompt_policy).await

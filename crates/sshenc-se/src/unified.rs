@@ -250,6 +250,7 @@ impl KeyBackend for SshencBackend {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -360,8 +361,7 @@ mod tests {
         let pub_dir = test_pub_dir();
         let backend = test_backend(&pub_dir);
 
-        let mut meta =
-            metadata::KeyMeta::new("test-key", metadata::KeyType::Signing, AccessPolicy::None);
+        let mut meta = metadata::KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", "/custom/path/test-key.pub");
 
         let result = backend.persisted_pub_file_path(&meta, "test-key");
@@ -376,8 +376,7 @@ mod tests {
         std::fs::write(pub_dir.join("test-key.pub"), "key content").unwrap();
         let backend = test_backend(&pub_dir);
 
-        let mut meta =
-            metadata::KeyMeta::new("test-key", metadata::KeyType::Signing, AccessPolicy::None);
+        let mut meta = metadata::KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", serde_json::Value::Null);
 
         let result = backend.persisted_pub_file_path(&meta, "test-key");
@@ -394,7 +393,7 @@ mod tests {
         let backend = test_backend(&pub_dir);
 
         // Legacy metadata has no pub_file_path field at all
-        let meta = metadata::KeyMeta::new("legacy", metadata::KeyType::Signing, AccessPolicy::None);
+        let meta = metadata::KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
 
         let result = backend.persisted_pub_file_path(&meta, "legacy");
         assert!(result.is_some());
@@ -408,8 +407,7 @@ mod tests {
         let pub_dir = test_pub_dir();
         let backend = test_backend(&pub_dir);
 
-        let mut meta =
-            metadata::KeyMeta::new("no-pub", metadata::KeyType::Signing, AccessPolicy::None);
+        let mut meta = metadata::KeyMeta::new("no-pub", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", serde_json::Value::Null);
 
         let result = backend.persisted_pub_file_path(&meta, "no-pub");

@@ -102,6 +102,14 @@ fn write_ready_file_contents(path: &Path, content: &str) -> Result<()> {
 
     std::fs::write(path, content)
         .with_context(|| format!("failed to write readiness file {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        drop(std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(0o600),
+        ));
+    }
     Ok(())
 }
 

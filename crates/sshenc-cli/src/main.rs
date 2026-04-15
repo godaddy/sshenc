@@ -50,8 +50,8 @@ enum Commands {
         #[arg(long)]
         no_pub_file: bool,
 
-        /// Print the public key to stdout.
-        #[arg(long, default_value_t = true)]
+        /// Print the public key to stdout after generation.
+        #[arg(long)]
         print_pub: bool,
 
         /// Require user presence (Touch ID or password) for each signing operation.

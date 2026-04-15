@@ -36,7 +36,7 @@ pub struct SshencBackend {
 /// Return the sshenc keys directory (~/.sshenc/keys/).
 pub fn sshenc_keys_dir() -> PathBuf {
     // sshenc uses ~/.sshenc/keys/ on Unix, %APPDATA%\sshenc\keys\ on Windows.
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         dirs::data_dir()
             .or_else(dirs::home_dir)
@@ -44,7 +44,7 @@ pub fn sshenc_keys_dir() -> PathBuf {
             .join("sshenc")
             .join("keys")
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(windows))]
     {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))

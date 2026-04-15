@@ -147,6 +147,13 @@ pub fn uninstall_block(ssh_config_path: &Path) -> Result<UninstallResult> {
         }
     }
 
+    if in_block {
+        return Err(Error::Config(format!(
+            "malformed sshenc block in {}: found BEGIN marker but no END marker; refusing to modify",
+            ssh_config_path.display()
+        )));
+    }
+
     // Rebuild content
     let mut new_content = new_lines.join("\n");
     if !new_content.is_empty() {
@@ -510,6 +517,25 @@ mod tests {
 
         // is_installed only checks for BEGIN marker, so this should return true
         assert!(is_installed(&config_path).unwrap());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_uninstall_refuses_truncated_block() {
+        let dir = temp_dir("truncated-block");
+        let config_path = dir.join("config");
+        let content = format!(
+            "Host foo\n    User bar\n\n{}\nHost *\n    IdentityAgent /tmp/sock\n",
+            BEGIN_MARKER
+        );
+        std::fs::write(&config_path, &content).unwrap();
+
+        let result = uninstall_block(&config_path);
+        assert!(result.is_err(), "should refuse to modify a truncated block");
+        // Original content should be untouched
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), content);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

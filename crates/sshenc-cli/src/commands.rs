@@ -962,9 +962,11 @@ fn find_launcher_dylib() -> Option<PathBuf> {
             // Homebrew (macOS): binary in bin/, dylib in lib/
             #[cfg(target_os = "macos")]
             {
-                let lib_candidate = dir.parent()?.join("lib").join(lib_name);
-                if lib_candidate.exists() {
-                    return Some(lib_candidate);
+                if let Some(parent) = dir.parent() {
+                    let lib_candidate = parent.join("lib").join(lib_name);
+                    if lib_candidate.exists() {
+                        return Some(lib_candidate);
+                    }
                 }
             }
         }
@@ -1394,6 +1396,8 @@ where
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn promote_to_default(label: &str) -> Result<()> {
+    let _label = KeyLabel::new(label)?;
+
     // On Windows, CNG key names are immutable — create keys with the right name from the start.
     #[cfg(windows)]
     {
@@ -1444,6 +1448,8 @@ pub fn promote_to_default(label: &str) -> Result<()> {
 
 #[allow(clippy::print_stdout)]
 pub fn set_identity(label: &str, name: &str, email: &str) -> Result<()> {
+    let _label = KeyLabel::new(label)?;
+
     use enclaveapp_core::metadata;
 
     let keys_dir = sshenc_keys_dir();

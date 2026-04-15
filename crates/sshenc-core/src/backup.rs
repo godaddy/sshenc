@@ -155,7 +155,7 @@ fn backup_existing_files(paths: &[PathBuf]) -> Result<BackupPlan> {
     let mut entries = Vec::new();
 
     for path in paths {
-        let backup = unique_backup_path(path);
+        let backup = unique_backup_path(path)?;
         if let Err(err) = std::fs::rename(path, &backup) {
             if let Err(rollback_err) = rollback_backups(&entries) {
                 return Err(crate::error::Error::Other(format!(
@@ -199,7 +199,7 @@ fn rollback_backups(entries: &[FileBackup]) -> Result<()> {
     }
 }
 
-fn unique_backup_path(path: &Path) -> PathBuf {
+fn unique_backup_path(path: &Path) -> Result<PathBuf> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -216,10 +216,13 @@ fn unique_backup_path(path: &Path) -> PathBuf {
             path.with_file_name(format!("{file_name}.{pid}.{nanos}.{attempt}.bak"))
         };
         if !candidate.exists() {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    path.with_file_name(format!("{file_name}.{pid}.{nanos}.bak"))
+    Err(crate::error::Error::Other(format!(
+        "could not find unique backup path for {}",
+        path.display()
+    )))
 }
 
 #[cfg(test)]

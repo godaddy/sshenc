@@ -90,7 +90,7 @@ pub fn require_home_dir() -> Result<PathBuf> {
 
 impl Default for Config {
     fn default() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        let home = dirs::home_dir().expect("could not determine home directory; set $HOME");
         #[cfg(unix)]
         let socket_path = home.join(".sshenc").join("agent.sock");
         #[cfg(windows)]

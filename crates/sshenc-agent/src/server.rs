@@ -87,6 +87,10 @@ fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
     }
 
     if !socket_path.exists() {
@@ -152,7 +156,7 @@ pub async fn run_agent(
         use socket2::{Domain, SockAddr, Socket, Type};
 
         let sock_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
+            .expect("could not determine home directory; set USERPROFILE")
             .join(".sshenc");
         let sock_path = sock_dir.join("agent.sock");
         let _unused = std::fs::create_dir_all(&sock_dir);
@@ -236,7 +240,7 @@ pub async fn run_agent(
 
     // Clean up Unix socket on exit
     let sock_path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
+        .expect("could not determine home directory; set USERPROFILE")
         .join(".sshenc")
         .join("agent.sock");
     let _unused = std::fs::remove_file(&sock_path);

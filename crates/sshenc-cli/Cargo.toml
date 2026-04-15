@@ -38,7 +38,7 @@ enclaveapp-windows = { workspace = true }
 enclaveapp-wsl = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-enclaveapp-software = { workspace = true }
+enclaveapp-keyring = { workspace = true }
 enclaveapp-linux-tpm = { workspace = true }
 
 [build-dependencies]

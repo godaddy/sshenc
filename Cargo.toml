@@ -31,7 +31,7 @@ sshenc-test-support = { path = "crates/sshenc-test-support" }
 enclaveapp-core = { path = "../crates/enclaveapp-core" }
 enclaveapp-apple = { path = "../crates/enclaveapp-apple", features = ["signing"] }
 enclaveapp-windows = { path = "../crates/enclaveapp-windows", features = ["signing"] }
-enclaveapp-software = { path = "../crates/enclaveapp-software", features = ["signing", "keyring-storage"] }
+enclaveapp-keyring = { path = "../crates/enclaveapp-keyring", features = ["signing"] }
 enclaveapp-linux-tpm = { path = "../crates/enclaveapp-linux-tpm", features = ["signing"] }
 enclaveapp-wsl = { path = "../crates/enclaveapp-wsl" }
 enclaveapp-app-storage = { path = "../crates/enclaveapp-app-storage" }

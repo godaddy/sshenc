@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Integration Type
 
-sshenc is a **Type 1 (HelperTool)** enclave app. It implements the SSH agent protocol — SSH clients connect to the sshenc agent socket and request key operations (signing) on demand. Private keys never leave the hardware security module.
+sshenc is a [**Type 1 (HelperTool)**](https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md#type-1-helpertool) enclave app. It implements the SSH agent protocol — SSH clients connect to the sshenc agent socket and request key operations (signing) on demand. Private keys never leave the hardware security module. See [libenclaveapp DESIGN.md](https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md#application-integration-types) for the full integration type taxonomy.
 
 ## Build & Development
 

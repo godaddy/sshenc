@@ -110,9 +110,9 @@ fn main() -> Result<()> {
         write_pub_path: write_pub.clone(),
     };
 
-    let info: sshenc_core::key::KeyInfo =
+    let info =
         backup::run_with_backup(write_pub.as_deref(), paired_private_path.as_deref(), || {
-            Ok(backend.generate(&opts)?)
+            backend.generate(&opts).map_err(|e| anyhow::anyhow!("{e}"))
         })?;
 
     if !cli.quiet {

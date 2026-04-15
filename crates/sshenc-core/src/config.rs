@@ -90,23 +90,45 @@ pub fn require_home_dir() -> Result<PathBuf> {
 
 impl Default for Config {
     fn default() -> Self {
-        let home = dirs::home_dir().expect("could not determine home directory; set $HOME");
+        Self::new().unwrap_or_else(|_| {
+            // Fallback for environments without HOME set
+            let fallback = std::env::temp_dir().join("sshenc");
+            #[cfg(unix)]
+            let socket_path = fallback.join("agent.sock");
+            #[cfg(windows)]
+            let socket_path = PathBuf::from(r"\\.\pipe\openssh-ssh-agent");
+            Config {
+                socket_path,
+                allowed_labels: Vec::new(),
+                prompt_policy: PromptPolicy::default(),
+                pub_dir: fallback.join(".ssh"),
+                log_level: LogLevel::default(),
+                host_identities: Vec::new(),
+            }
+        })
+    }
+}
+
+impl Config {
+    /// Create a new `Config` with default values derived from the user's home directory.
+    ///
+    /// Returns an error if the home directory cannot be determined.
+    pub fn new() -> Result<Self> {
+        let home = require_home_dir()?;
         #[cfg(unix)]
         let socket_path = home.join(".sshenc").join("agent.sock");
         #[cfg(windows)]
         let socket_path = PathBuf::from(r"\\.\pipe\openssh-ssh-agent");
-        Config {
+        Ok(Config {
             socket_path,
             allowed_labels: Vec::new(),
             prompt_policy: PromptPolicy::default(),
             pub_dir: home.join(".ssh"),
             log_level: LogLevel::default(),
             host_identities: Vec::new(),
-        }
+        })
     }
-}
 
-impl Config {
     /// Returns the default config file path.
     pub fn default_path() -> PathBuf {
         dirs::config_dir()

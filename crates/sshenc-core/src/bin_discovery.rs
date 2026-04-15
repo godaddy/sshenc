@@ -88,17 +88,23 @@ fn find_trusted_binary_with_context(
     candidate_dirs(context)
         .into_iter()
         .map(|dir| dir.join(binary_name))
-        .find(|candidate| is_trusted_binary_candidate(candidate))
+        .find_map(|candidate| resolve_trusted_binary_candidate(&candidate))
 }
 
 pub fn find_trusted_binary(binary_name: &str) -> Option<PathBuf> {
     find_trusted_binary_with_context(binary_name, &BinaryDiscoveryContext::current())
 }
 
-fn is_trusted_binary_candidate(path: &std::path::Path) -> bool {
-    // Resolve symlinks so we validate the real target, not just the link.
-    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    resolved.is_file() && candidate_looks_executable(&resolved)
+/// Resolve a candidate path to its canonical (symlink-resolved) form and verify
+/// it is a trusted executable. Returns the canonical path to prevent
+/// symlink-swap TOCTOU attacks.
+fn resolve_trusted_binary_candidate(path: &std::path::Path) -> Option<PathBuf> {
+    let resolved = path.canonicalize().ok()?;
+    if resolved.is_file() && candidate_looks_executable(&resolved) {
+        Some(resolved)
+    } else {
+        None
+    }
 }
 
 #[cfg(unix)]
@@ -197,9 +203,10 @@ mod tests {
         #[cfg(windows)]
         let binary_name = "sshenc-agent.exe";
 
+        let expected = sibling.canonicalize().unwrap();
         assert_eq!(
             find_trusted_binary_with_context(binary_name, &context).as_deref(),
-            Some(sibling.as_path())
+            Some(expected.as_path())
         );
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -236,9 +243,10 @@ mod tests {
         #[cfg(not(windows))]
         let binary_name = "sshenc";
 
+        let expected = trusted.canonicalize().unwrap();
         assert_eq!(
             find_trusted_binary_with_context(binary_name, &context).as_deref(),
-            Some(trusted.as_path())
+            Some(expected.as_path())
         );
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -288,9 +296,10 @@ mod tests {
         #[cfg(windows)]
         let binary_name = "sshenc-agent.exe";
 
+        let expected = fallback.canonicalize().unwrap();
         assert_eq!(
             find_trusted_binary_with_context(binary_name, &context).as_deref(),
-            Some(fallback.as_path())
+            Some(expected.as_path())
         );
 
         std::fs::remove_dir_all(&root).unwrap();

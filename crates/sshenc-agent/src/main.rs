@@ -54,7 +54,7 @@ struct Cli {
 #[cfg(unix)]
 fn default_socket_or_pipe() -> String {
     dirs::home_dir()
-        .expect("could not determine home directory; set $HOME")
+        .unwrap_or_else(|| std::env::temp_dir().join("sshenc"))
         .join(".sshenc")
         .join("agent.sock")
         .to_string_lossy()
@@ -68,7 +68,7 @@ fn default_socket_or_pipe() -> String {
 
 fn default_pid_path() -> PathBuf {
     dirs::home_dir()
-        .expect("could not determine home directory; set $HOME")
+        .unwrap_or_else(|| std::env::temp_dir().join("sshenc"))
         .join(".sshenc")
         .join("agent.pid")
 }

@@ -326,21 +326,17 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
             let comment = comment.or_else(default_comment);
             let access_policy =
                 selected_access_policy(auth_policy.as_deref(), require_user_presence)?;
-            backup::run_with_backup(
-                pub_path.as_deref(),
-                paired_private_path.as_deref(),
-                || {
-                    commands::keygen(
-                        backend,
-                        &label,
-                        comment,
-                        pub_path.clone(),
-                        print_pub,
-                        access_policy,
-                        json,
-                    )
-                },
-            )
+            backup::run_with_backup(pub_path.as_deref(), paired_private_path.as_deref(), || {
+                commands::keygen(
+                    backend,
+                    &label,
+                    comment,
+                    pub_path.clone(),
+                    print_pub,
+                    access_policy,
+                    json,
+                )
+            })
         }
         Commands::List { json } => commands::list(backend, json),
         Commands::Inspect {

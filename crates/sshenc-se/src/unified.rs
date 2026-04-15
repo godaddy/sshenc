@@ -394,8 +394,7 @@ mod tests {
         let backend = test_backend(&pub_dir);
 
         // Legacy metadata has no pub_file_path field at all
-        let meta =
-            metadata::KeyMeta::new("legacy", metadata::KeyType::Signing, AccessPolicy::None);
+        let meta = metadata::KeyMeta::new("legacy", metadata::KeyType::Signing, AccessPolicy::None);
 
         let result = backend.persisted_pub_file_path(&meta, "legacy");
         assert!(result.is_some());

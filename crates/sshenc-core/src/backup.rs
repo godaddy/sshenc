@@ -86,9 +86,8 @@ where
             rollback,
             remaining_backups,
         }) => {
-            let mut msg = format!(
-                "{operation}; failed to restore backed up SSH key material: {rollback}"
-            );
+            let mut msg =
+                format!("{operation}; failed to restore backed up SSH key material: {rollback}");
             if !remaining_backups.is_empty() {
                 msg.push_str("; backup files remaining on disk:");
                 for path in &remaining_backups {

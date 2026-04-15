@@ -110,11 +110,10 @@ fn main() -> Result<()> {
         write_pub_path: write_pub.clone(),
     };
 
-    let info = backup::run_with_backup(
-        write_pub.as_deref(),
-        paired_private_path.as_deref(),
-        || Ok(backend.generate(&opts)?),
-    )?;
+    let info =
+        backup::run_with_backup(write_pub.as_deref(), paired_private_path.as_deref(), || {
+            Ok(backend.generate(&opts)?)
+        })?;
 
     if !cli.quiet {
         eprintln!("Generated key: {}", cli.label);

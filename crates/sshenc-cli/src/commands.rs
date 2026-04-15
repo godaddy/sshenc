@@ -1109,6 +1109,7 @@ struct SshInvocation {
     temp_identity_file: Option<PathBuf>,
 }
 
+#[cfg(not(windows))]
 fn default_ssh_dir() -> Result<PathBuf> {
     Ok(Config::load_default()?.pub_dir)
 }
@@ -1568,6 +1569,7 @@ fn maybe_verify_user_presence(
 }
 
 #[cfg(not(windows))]
+#[allow(clippy::print_stderr)]
 fn maybe_verify_user_presence(
     info: &sshenc_core::key::KeyInfo,
     policy: PromptPolicy,
@@ -1592,7 +1594,7 @@ fn maybe_verify_user_presence(
     #[cfg(not(target_os = "macos"))]
     {
         eprint!("sshenc: signing requires user confirmation. Continue? [y/N] ");
-        io::Write::flush(&mut io::stderr()).ok();
+        Write::flush(&mut io::stderr()).ok();
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {

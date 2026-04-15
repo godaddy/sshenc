@@ -263,6 +263,24 @@ mod tests {
         dir
     }
 
+    /// Try to create a test backend. Returns None if hardware is unavailable
+    /// (e.g., no TPM on Windows CI, no SE on macOS CI).
+    fn try_test_backend(pub_dir: PathBuf) -> Option<SshencBackend> {
+        let backend = AppSigningBackend::init(StorageConfig {
+            app_name: "sshenc-test".into(),
+            key_label: String::new(),
+            access_policy: AccessPolicy::None,
+            extra_bridge_paths: vec![],
+            keys_dir: None,
+        })
+        .ok()?;
+        Some(SshencBackend {
+            pub_dir,
+            keys_dir: sshenc_keys_dir(),
+            backend,
+        })
+    }
+
     #[test]
     fn sshenc_keys_dir_is_absolute() {
         let dir = sshenc_keys_dir();
@@ -276,17 +294,9 @@ mod tests {
         let pub_dir = test_pub_dir();
         std::fs::write(pub_dir.join("id_ecdsa.pub"), "key content").unwrap();
 
-        let backend = SshencBackend {
-            pub_dir: pub_dir.clone(),
-            keys_dir: sshenc_keys_dir(),
-            backend: AppSigningBackend::init(StorageConfig {
-                app_name: "sshenc-test".into(),
-                key_label: String::new(),
-                access_policy: AccessPolicy::None,
-                extra_bridge_paths: vec![],
-                keys_dir: None,
-            })
-            .unwrap(),
+        let Some(backend) = try_test_backend(pub_dir.clone()) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            return; // hardware not available in CI
         };
         let path = backend.find_pub_file("default");
         assert!(path.is_some());
@@ -300,17 +310,9 @@ mod tests {
         let pub_dir = test_pub_dir();
         std::fs::write(pub_dir.join("github-work.pub"), "key content").unwrap();
 
-        let backend = SshencBackend {
-            pub_dir: pub_dir.clone(),
-            keys_dir: sshenc_keys_dir(),
-            backend: AppSigningBackend::init(StorageConfig {
-                app_name: "sshenc-test".into(),
-                key_label: String::new(),
-                access_policy: AccessPolicy::None,
-                extra_bridge_paths: vec![],
-                keys_dir: None,
-            })
-            .unwrap(),
+        let Some(backend) = try_test_backend(pub_dir.clone()) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            return;
         };
         let path = backend.find_pub_file("github-work");
         assert!(path.is_some());
@@ -323,17 +325,9 @@ mod tests {
     fn find_pub_file_returns_none_when_missing() {
         let pub_dir = test_pub_dir();
 
-        let backend = SshencBackend {
-            pub_dir: pub_dir.clone(),
-            keys_dir: sshenc_keys_dir(),
-            backend: AppSigningBackend::init(StorageConfig {
-                app_name: "sshenc-test".into(),
-                key_label: String::new(),
-                access_policy: AccessPolicy::None,
-                extra_bridge_paths: vec![],
-                keys_dir: None,
-            })
-            .unwrap(),
+        let Some(backend) = try_test_backend(pub_dir.clone()) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            return;
         };
         let path = backend.find_pub_file("nonexistent");
         assert!(path.is_none());
@@ -341,25 +335,17 @@ mod tests {
         std::fs::remove_dir_all(&pub_dir).unwrap();
     }
 
-    fn test_backend(pub_dir: &Path) -> SshencBackend {
-        SshencBackend {
-            pub_dir: pub_dir.to_path_buf(),
-            keys_dir: sshenc_keys_dir(),
-            backend: AppSigningBackend::init(StorageConfig {
-                app_name: "sshenc-test".into(),
-                key_label: String::new(),
-                access_policy: AccessPolicy::None,
-                extra_bridge_paths: vec![],
-                keys_dir: None,
-            })
-            .unwrap(),
-        }
+    fn test_backend(pub_dir: &Path) -> Option<SshencBackend> {
+        try_test_backend(pub_dir.to_path_buf())
     }
 
     #[test]
     fn persisted_pub_file_path_uses_recorded_string() {
         let pub_dir = test_pub_dir();
-        let backend = test_backend(&pub_dir);
+        let Some(backend) = test_backend(&pub_dir) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            return;
+        };
 
         let mut meta = metadata::KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", "/custom/path/test-key.pub");
@@ -374,7 +360,10 @@ mod tests {
     fn persisted_pub_file_path_null_falls_through_to_filesystem() {
         let pub_dir = test_pub_dir();
         std::fs::write(pub_dir.join("test-key.pub"), "key content").unwrap();
-        let backend = test_backend(&pub_dir);
+        let Some(backend) = test_backend(&pub_dir) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            return;
+        };
 
         let mut meta = metadata::KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", serde_json::Value::Null);
@@ -390,7 +379,10 @@ mod tests {
     fn persisted_pub_file_path_absent_field_falls_through_to_filesystem() {
         let pub_dir = test_pub_dir();
         std::fs::write(pub_dir.join("legacy.pub"), "key content").unwrap();
-        let backend = test_backend(&pub_dir);
+        let Some(backend) = test_backend(&pub_dir) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            return;
+        };
 
         // Legacy metadata has no pub_file_path field at all
         let meta = metadata::KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
@@ -405,7 +397,10 @@ mod tests {
     #[test]
     fn persisted_pub_file_path_null_no_filesystem_returns_none() {
         let pub_dir = test_pub_dir();
-        let backend = test_backend(&pub_dir);
+        let Some(backend) = test_backend(&pub_dir) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            return;
+        };
 
         let mut meta = metadata::KeyMeta::new("no-pub", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", serde_json::Value::Null);

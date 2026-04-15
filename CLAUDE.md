@@ -25,12 +25,12 @@ cargo fmt --all                    # auto-format
 
 Rust workspace under `crates/`:
 
-- **sshenc-core** — Domain models, SSH public key encoding (ecdsa-sha2-nistp256), fingerprints (SHA-256/MD5), config model, shared error types. No platform-specific code.
-- **sshenc-ffi-apple** — Apple Security.framework bridge. All raw Apple API calls isolated here. Defines `kSecAttrApplicationTag` via extern link since it's missing from `security-framework-sys`. Keys tagged with `sshenc:<label>` Keychain label and `com.sshenc.key.<label>` application tag.
-- **sshenc-se** — High-level key operations via `KeyBackend` trait. Unified `SshencBackend` uses `enclaveapp-app-storage::AppSigningBackend` for automatic platform detection (Secure Enclave, TPM, software). SSH-specific logic (pub file management, fingerprinting, metadata) stays in this crate. The trait enables mock backends for testing.
+- **sshenc-core** — Domain models, SSH public key encoding (ecdsa-sha2-nistp256), fingerprints (SHA-256/MD5), config model (`AccessPolicy`, `PromptPolicy`), shared error types, `backup.rs` (transactional key material backup/rollback), and `bin_discovery.rs` (trusted binary discovery without PATH lookup). Note: `bin_discovery.rs` and `ssh_config.rs` contain platform-specific code (`#[cfg(windows)]` / `#[cfg(unix)]`).
+- **sshenc-se** — High-level key operations via `KeyBackend` trait. Unified `SshencBackend` uses `enclaveapp-app-storage::AppSigningBackend` for automatic platform detection (Secure Enclave, TPM, software). SSH-specific logic (pub file management, fingerprinting, metadata) stays in this crate. The trait enables mock backends for testing. Note: platform backends (Secure Enclave, TPM, software) are provided by the `enclaveapp-*` crate family via `enclaveapp-app-storage`; the old `sshenc-ffi-apple` crate has been removed.
 - **sshenc-agent-proto** — SSH agent protocol: message parsing/serialization, DER-to-SSH signature conversion. Implements identity enumeration and sign request/response.
 - **sshenc-agent** — SSH agent daemon (tokio async). Unix socket server, key selection by label allowlist. Both a library (`sshenc_agent::server`) and binary (`sshenc-agent`).
 - **sshenc-cli** — Main CLI (`sshenc`). Subcommands: keygen, list, inspect, delete, export-pub, agent, config, openssh. Uses sshenc-agent library for embedded agent mode.
+- **sshenc-gitenc** — Git wrapper binary (`gitenc`). Selects Secure Enclave identities for git operations, configures repos for SSH auth and commit signing.
 - **sshenc-keygen-cli** — Standalone `sshenc-keygen` binary.
 - **sshenc-pkcs11** — PKCS#11 provider (cdylib). Session management and info functions implemented. Crypto operations (`C_FindObjects`, `C_Sign`, etc.) return `CKR_FUNCTION_NOT_SUPPORTED` — scaffold for future implementation.
 - **sshenc-test-support** — `MockKeyBackend` for testing without Secure Enclave hardware. Deterministic key generation and signature production.
@@ -47,11 +47,12 @@ Rust workspace under `crates/`:
 1. `sshenc` — umbrella CLI with all subcommands
 2. `sshenc-keygen` — convenience keygen binary
 3. `sshenc-agent` — ssh-agent-compatible daemon
-4. `libsshenc_pkcs11.dylib` — PKCS#11 provider (cdylib)
+4. `gitenc` — git wrapper for Secure Enclave identity selection and repo config
+5. `libsshenc_pkcs11.dylib` — PKCS#11 provider (cdylib)
 
 ## Testing
 
-41 unit tests across sshenc-core (15), sshenc-agent-proto (14), sshenc-pkcs11 (4), sshenc-test-support (8). Tests cover:
+90+ unit tests across the workspace. Tests cover:
 - SSH public key wire format encoding/decoding roundtrips
 - OpenSSH line format parsing
 - Fingerprint generation (SHA-256/MD5)
@@ -60,12 +61,15 @@ Rust workspace under `crates/`:
 - DER signature parsing
 - PKCS#11 session management
 - Mock backend key lifecycle (generate/list/get/delete/sign)
+- Trusted binary discovery and SSH config generation
+- Transactional backup/rollback of key material
+- AccessPolicy and PromptPolicy configuration
 
 Real Secure Enclave integration tests require macOS hardware and are not yet gated behind cfg flags (future work).
 
 ## Platform
 
 Supports macOS, Windows, and Linux:
-- **macOS**: Uses Apple Secure Enclave via Security.framework. The `sshenc-ffi-apple` crate links against the Security framework at build time.
+- **macOS**: Uses Apple Secure Enclave via CryptoKit. Platform backend provided by `enclaveapp-app-storage`.
 - **Windows**: Uses TPM 2.0 via Windows CNG.
 - **Linux**: Uses software-backed ECDSA P-256 keys via `enclaveapp-software`. Keys are stored on disk in `~/.sshenc/keys/` and are NOT hardware-protected.

@@ -84,7 +84,7 @@ fn ensure_agent_running(
     start_agent_with_binary(launcher, socket_path, agent_bin.as_deref())
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum WindowsServiceStartMode {
     Auto,
@@ -92,7 +92,7 @@ enum WindowsServiceStartMode {
     Disabled,
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 impl WindowsServiceStartMode {
     fn as_sc_value(self) -> &'static str {
         match self {
@@ -103,7 +103,7 @@ impl WindowsServiceStartMode {
     }
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WindowsInstallState {
     previous_ssh_auth_sock: Option<String>,
@@ -113,7 +113,7 @@ struct WindowsInstallState {
     managed_git_ssh_command: bool,
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WindowsAction {
     StopService(&'static str),
@@ -129,7 +129,7 @@ enum WindowsAction {
     DeleteUserEnv(&'static str),
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_action_description(action: &WindowsAction) -> String {
     match action {
         WindowsAction::StopService(service) => format!("stop Windows service '{service}'"),
@@ -147,7 +147,7 @@ fn windows_action_description(action: &WindowsAction) -> String {
     }
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_action_is_allowed_failure(action: &WindowsAction, output: &str) -> bool {
     let normalized = output.to_ascii_lowercase();
     match action {
@@ -166,7 +166,7 @@ fn windows_action_is_allowed_failure(action: &WindowsAction, output: &str) -> bo
     }
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn validate_windows_action_result(
     action: &WindowsAction,
     success: bool,
@@ -187,7 +187,7 @@ fn validate_windows_action_result(
     );
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_prepare_install_actions() -> Vec<WindowsAction> {
     vec![
         WindowsAction::StopService("ssh-agent"),
@@ -198,7 +198,7 @@ fn windows_prepare_install_actions() -> Vec<WindowsAction> {
     ]
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_finalize_install_actions(
     socket_path: &Path,
     git_ssh_command: Option<String>,
@@ -216,7 +216,7 @@ fn windows_finalize_install_actions(
     actions
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_restore_actions(state: &WindowsInstallState) -> Vec<WindowsAction> {
     let mut actions = Vec::new();
 
@@ -252,7 +252,7 @@ fn windows_restore_actions(state: &WindowsInstallState) -> Vec<WindowsAction> {
     actions
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn apply_windows_actions(actions: &[WindowsAction]) -> Result<()> {
     fn command_output(program: &str, args: &[&str]) -> Result<std::process::Output> {
         Ok(std::process::Command::new(program).args(args).output()?)
@@ -275,8 +275,8 @@ fn apply_windows_actions(actions: &[WindowsAction]) -> Result<()> {
                 )?;
             }
             WindowsAction::SetServiceStart { service, mode } => {
-                let output =
-                    command_output("sc", &["config", service, "start=", mode.as_sc_value()])?;
+                let start_arg = format!("start={}", mode.as_sc_value());
+                let output = command_output("sc", &["config", service, &start_arg])?;
                 validate_windows_action_result(
                     action,
                     output.status.success(),
@@ -314,7 +314,7 @@ fn apply_windows_actions(actions: &[WindowsAction]) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_install_state_path() -> Result<PathBuf> {
     let config_path = Config::default_path();
     let parent = config_path
@@ -323,7 +323,7 @@ fn windows_install_state_path() -> Result<PathBuf> {
     Ok(parent.join("install-state.json"))
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_sc_start_mode(text: &str) -> Option<WindowsServiceStartMode> {
     text.lines().find_map(|line| {
         let normalized = line.trim();
@@ -342,11 +342,11 @@ fn parse_sc_start_mode(text: &str) -> Option<WindowsServiceStartMode> {
     })
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_sc_running_state(text: &str) -> Option<bool> {
     text.lines().find_map(|line| {
         let normalized = line.trim();
-        if !normalized.contains("STATE") {
+        if !normalized.split_whitespace().any(|token| token == "STATE") {
             return None;
         }
         if normalized.contains("RUNNING") {
@@ -359,7 +359,7 @@ fn parse_sc_running_state(text: &str) -> Option<bool> {
     })
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_reg_query_value(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let trimmed = line.trim();
@@ -373,7 +373,7 @@ fn parse_reg_query_value(text: &str) -> Option<String> {
     })
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn query_windows_user_env_var(key: &str) -> Result<Option<String>> {
     let output = std::process::Command::new("reg")
         .args(["query", "HKCU\\Environment", "/v", key])
@@ -386,7 +386,7 @@ fn query_windows_user_env_var(key: &str) -> Result<Option<String>> {
     )))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn query_windows_service_start_mode(service: &str) -> Result<Option<WindowsServiceStartMode>> {
     let output = std::process::Command::new("sc")
         .args(["qc", service])
@@ -399,7 +399,7 @@ fn query_windows_service_start_mode(service: &str) -> Result<Option<WindowsServi
     )))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn query_windows_service_running(service: &str) -> Result<Option<bool>> {
     let output = std::process::Command::new("sc")
         .args(["query", service])
@@ -412,7 +412,7 @@ fn query_windows_service_running(service: &str) -> Result<Option<bool>> {
     )))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn save_windows_install_state(state: &WindowsInstallState) -> Result<()> {
     let path = windows_install_state_path()?;
     let contents = serde_json::to_vec_pretty(state)?;
@@ -422,7 +422,7 @@ fn save_windows_install_state(state: &WindowsInstallState) -> Result<()> {
     enclaveapp_core::metadata::atomic_write(&path, &contents).map_err(|e| anyhow!(e.to_string()))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn load_windows_install_state() -> Result<Option<WindowsInstallState>> {
     let path = windows_install_state_path()?;
     if !path.exists() {
@@ -432,7 +432,7 @@ fn load_windows_install_state() -> Result<Option<WindowsInstallState>> {
     Ok(Some(serde_json::from_slice(&contents)?))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn remove_windows_install_state() -> Result<()> {
     let path = windows_install_state_path()?;
     if path.exists() {
@@ -441,7 +441,7 @@ fn remove_windows_install_state() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn capture_windows_install_state(managed_git_ssh_command: bool) -> Result<WindowsInstallState> {
     Ok(WindowsInstallState {
         previous_ssh_auth_sock: query_windows_user_env_var("SSH_AUTH_SOCK")?,
@@ -452,7 +452,7 @@ fn capture_windows_install_state(managed_git_ssh_command: bool) -> Result<Window
     })
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn restore_windows_state_with(
     state: &WindowsInstallState,
     apply_actions: impl FnOnce(&[WindowsAction]) -> Result<()>,
@@ -768,7 +768,7 @@ pub fn config_show() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn windows_git_ssh_command() -> Option<String> {
     let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
     Path::new(win_ssh)
@@ -789,11 +789,11 @@ pub fn install() -> Result<()> {
     // On Windows, skip PKCS#11 — the agent listens on the default OpenSSH pipe
     // so auto-launching via PKCS#11 is unnecessary, and the stub PKCS#11 module
     // crashes some OpenSSH builds during key exchange.
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     let dylib_path: Option<PathBuf> = None;
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(windows))]
     let dylib_path = find_launcher_dylib();
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     let git_ssh_command = windows_git_ssh_command();
 
     let install_result = sshenc_core::ssh_config::install_block(
@@ -802,7 +802,7 @@ pub fn install() -> Result<()> {
         dylib_path.as_deref(),
     )?;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     let install_state = match capture_windows_install_state(git_ssh_command.is_some()).and_then(
         |state| {
             save_windows_install_state(&state)?;
@@ -857,7 +857,7 @@ pub fn install() -> Result<()> {
                 let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
             }
 
-            #[cfg(target_os = "windows")]
+            #[cfg(windows)]
             {
                 if let Some(ref state) = install_state {
                     let rollback_result = restore_windows_state_with(
@@ -896,7 +896,7 @@ pub fn install() -> Result<()> {
         AgentStartStatus::AlreadyRunning => println!("Agent already running."),
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         if let Err(error) = apply_windows_actions(&windows_finalize_install_actions(
             &config.socket_path,
@@ -933,7 +933,7 @@ pub fn install() -> Result<()> {
     }
 
     // On Windows, configure WSL distros if any are installed
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         crate::wsl::configure_wsl_distros();
     }
@@ -945,13 +945,11 @@ pub fn install() -> Result<()> {
 }
 
 /// Find the PKCS#11 launcher library, if installed.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 fn find_launcher_dylib() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let lib_name = "libsshenc_pkcs11.dylib";
-    #[cfg(target_os = "windows")]
-    let lib_name = "sshenc_pkcs11.dll";
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(target_os = "macos"))]
     let lib_name = "libsshenc_pkcs11.so";
 
     // Next to the current executable
@@ -1036,7 +1034,7 @@ pub fn uninstall() -> Result<()> {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         if let Some(state) = load_windows_install_state()? {
             restore_windows_state_with(
@@ -1116,7 +1114,7 @@ fn default_ssh_dir() -> Result<PathBuf> {
 }
 
 fn ssh_binary() -> String {
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         let win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
         if Path::new(win_ssh).exists() {
@@ -1151,7 +1149,7 @@ fn build_ssh_wrapper_invocation(
 ) -> Result<SshInvocation> {
     let mut args = Vec::new();
     let agent_path = socket_path.display().to_string();
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     let agent_path = agent_path.replace('\\', "/");
     args.push("-o".to_string());
     args.push(format!("IdentityAgent {agent_path}"));
@@ -1185,13 +1183,15 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     let config = Config::load_default()?;
 
     if ensure_agent_running(&RealAgentLauncher, &config.socket_path)? == AgentStartStatus::Started {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if !agent_is_running(&config.socket_path) {
-            eprintln!("warning: agent may not be ready yet (socket not connectable)");
+        for attempt in 0..5_u32 {
+            if agent_is_running(&config.socket_path) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
         }
     }
 
-    let ssh_dir = default_ssh_dir()?;
+    let ssh_dir = config.pub_dir.clone();
     let backend = SshencBackend::new(ssh_dir.clone())
         .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
     let invocation =
@@ -1207,7 +1207,7 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 #[derive(Debug)]
 struct PromoteDefaultResult {
     fingerprint: String,
@@ -1216,7 +1216,7 @@ struct PromoteDefaultResult {
     removed_old_pub: Option<PathBuf>,
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 fn unique_backup_path(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -1230,7 +1230,7 @@ fn unique_backup_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{file_name}.{pid}.{nanos}.bak"))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 fn load_label_public_key(keys_dir: &Path, label: &str) -> Result<SshPublicKey> {
     let pub_bytes = enclaveapp_core::metadata::load_pub_key(keys_dir, label)
         .map_err(|_| anyhow!("key '{label}' not found"))?;
@@ -1240,7 +1240,7 @@ fn load_label_public_key(keys_dir: &Path, label: &str) -> Result<SshPublicKey> {
     SshPublicKey::from_sec1_bytes(&pub_bytes, comment).map_err(Into::into)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 fn restore_backup(original: &Path, backup: &Path) -> Result<()> {
     if backup.exists() {
         if original.exists() {
@@ -1251,14 +1251,14 @@ fn restore_backup(original: &Path, backup: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 fn key_files_exist(keys_dir: &Path, label: &str) -> bool {
     ["meta", "pub", "handle", "ssh.pub"]
         .into_iter()
         .any(|ext| keys_dir.join(format!("{label}.{ext}")).exists())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 fn promote_to_default_with_dirs<F>(
     keys_dir: &Path,
     ssh_dir: &Path,
@@ -1394,13 +1394,13 @@ where
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn promote_to_default(label: &str) -> Result<()> {
     // On Windows, CNG key names are immutable — create keys with the right name from the start.
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         let _ = label;
         bail!("'sshenc default' is not yet supported on Windows. Create your default key with: sshenc keygen");
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(windows))]
     {
         let keys_dir = sshenc_keys_dir();
         let ssh_dir = default_ssh_dir()?;
@@ -1438,7 +1438,7 @@ pub fn promote_to_default(label: &str) -> Result<()> {
         println!("  pkill sshenc-agent && sshenc install");
 
         Ok(())
-    } // end #[cfg(not(target_os = "windows"))]
+    } // end #[cfg(not(windows))]
 }
 
 #[allow(clippy::print_stdout)]
@@ -1549,25 +1549,57 @@ fn resolve_signing_label(backend: &dyn KeyBackend, key_file: &Path) -> Result<St
     Ok(first)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn maybe_verify_user_presence(
     info: &sshenc_core::key::KeyInfo,
     policy: PromptPolicy,
 ) -> Result<()> {
-    let _should_prompt = match policy {
+    let should_prompt = match policy {
         PromptPolicy::Always => true,
         PromptPolicy::Never => false,
         PromptPolicy::KeyDefault => info.metadata.access_policy != AccessPolicy::None,
     };
+    if should_prompt {
+        // Windows Hello verification is enforced by the TPM backend during
+        // signing for keys created with a user-presence access policy.
+        // No additional sshenc-layer pre-check is needed here.
+    }
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 fn maybe_verify_user_presence(
-    _info: &sshenc_core::key::KeyInfo,
-    _policy: PromptPolicy,
+    info: &sshenc_core::key::KeyInfo,
+    policy: PromptPolicy,
 ) -> Result<()> {
-    Ok(())
+    let should_prompt = match policy {
+        PromptPolicy::Always => true,
+        PromptPolicy::Never => false,
+        PromptPolicy::KeyDefault => info.metadata.access_policy != AccessPolicy::None,
+    };
+    if !should_prompt {
+        return Ok(());
+    }
+    // On macOS, the Secure Enclave enforces user presence at the hardware
+    // level during signing — the biometric/password prompt fires inside
+    // SecKeyCreateSignature.  No additional sshenc-layer check is needed.
+    #[cfg(target_os = "macos")]
+    {
+        Ok(())
+    }
+    // On Linux (software backend), there is no hardware enforcement.
+    // Prompt the user on stderr for confirmation.
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprint!("sshenc: signing requires user confirmation. Continue? [y/N] ");
+        io::Write::flush(&mut io::stderr()).ok();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            bail!("signing cancelled by user");
+        }
+        Ok(())
+    }
 }
 
 fn ssh_sign_with_backend(
@@ -1603,19 +1635,7 @@ fn ssh_sign_with_backend(
         SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
     let sig_blob = build_ssh_signature(&ssh_pubkey, &sign_args.namespace, &der_sig)?;
 
-    let sig_path = sign_args.data_file.with_extension(format!(
-        "{}.sig",
-        sign_args
-            .data_file
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default()
-    ));
-    let sig_path = if sign_args.data_file.extension().is_some() {
-        sig_path
-    } else {
-        PathBuf::from(format!("{}.sig", sign_args.data_file.display()))
-    };
+    let sig_path = PathBuf::from(format!("{}.sig", sign_args.data_file.display()));
     let pem = format!(
         "-----BEGIN SSH SIGNATURE-----\n{}\n-----END SSH SIGNATURE-----\n",
         base64_wrap(&sig_blob, 70)
@@ -1685,8 +1705,8 @@ fn base64_wrap(data: &[u8], width: usize) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    #[cfg(not(target_os = "windows"))]
-    use enclaveapp_core::{AccessPolicy, KeyType};
+    #[cfg(not(windows))]
+    use enclaveapp_core::KeyType;
     use sshenc_test_support::MockKeyBackend;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
@@ -1756,7 +1776,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(windows))]
     fn seed_promote_key(keys_dir: &Path, label: &str, comment: Option<&str>) {
         let backend = backend_with_key(label, comment.map(str::to_owned));
         let info = backend.get(label).unwrap();
@@ -2590,7 +2610,7 @@ HKEY_CURRENT_USER\Environment
     // -----------------------------------------------------------------------
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(windows))]
     fn promote_to_default_already_default_is_error() {
         let result = promote_to_default("default");
         assert!(result.is_err());
@@ -2629,7 +2649,7 @@ HKEY_CURRENT_USER\Environment
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(windows))]
     fn promote_to_default_rolls_back_on_publish_failure() {
         let root = test_dir("promote-rollback");
         let keys_dir = root.join("keys");
@@ -2663,7 +2683,7 @@ HKEY_CURRENT_USER\Environment
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(windows))]
     fn promote_to_default_reports_restore_failure() {
         let root = test_dir("promote-rollback-error");
         let keys_dir = root.join("keys");

@@ -36,6 +36,12 @@ impl BackupPlan {
         &self.entries
     }
 
+    pub fn cleanup(&self) {
+        for entry in &self.entries {
+            drop(std::fs::remove_file(&entry.backup));
+        }
+    }
+
     pub fn restore(&self) -> Result<()> {
         rollback_backups(&self.entries)
     }
@@ -48,7 +54,50 @@ pub enum BackupExecutionError<E> {
     Rollback {
         operation: E,
         rollback: crate::error::Error,
+        /// Backup files that may still exist on disk after rollback failure.
+        remaining_backups: Vec<PathBuf>,
     },
+}
+
+/// Run a key-material operation with automatic backup and rollback.
+///
+/// Convenience wrapper around [`with_existing_key_material_backup`] that
+/// converts [`BackupExecutionError`] variants into the caller's error type
+/// so binary crates don't need to match each variant individually.
+pub fn run_with_backup<T, E, F>(
+    public_path: Option<&std::path::Path>,
+    paired_private_path: Option<&std::path::Path>,
+    operation: F,
+) -> std::result::Result<T, E>
+where
+    E: From<crate::error::Error> + std::fmt::Display,
+    F: FnOnce() -> std::result::Result<T, E>,
+{
+    let Some(public_path) = public_path else {
+        return operation();
+    };
+
+    match with_existing_key_material_backup(public_path, paired_private_path, operation) {
+        Ok(value) => Ok(value),
+        Err(BackupExecutionError::Backup(error)) => Err(error.into()),
+        Err(BackupExecutionError::Operation(error)) => Err(error),
+        Err(BackupExecutionError::Rollback {
+            operation,
+            rollback,
+            remaining_backups,
+        }) => {
+            let mut msg = format!(
+                "{operation}; failed to restore backed up SSH key material: {rollback}"
+            );
+            if !remaining_backups.is_empty() {
+                msg.push_str("; backup files remaining on disk:");
+                for path in &remaining_backups {
+                    msg.push_str(&format!(" {}", path.display()));
+                }
+            }
+            Err(crate::error::Error::Other(msg).into())
+        }
+    }
 }
 
 pub fn with_existing_key_material_backup<T, E, F>(
@@ -62,13 +111,25 @@ where
     let plan = backup_existing_key_material(public_path, paired_private_path)
         .map_err(BackupExecutionError::Backup)?;
     match operation() {
-        Ok(value) => Ok(value),
+        Ok(value) => {
+            plan.cleanup();
+            Ok(value)
+        }
         Err(operation) => match plan.restore() {
             Ok(()) => Err(BackupExecutionError::Operation(operation)),
-            Err(rollback) => Err(BackupExecutionError::Rollback {
-                operation,
-                rollback,
-            }),
+            Err(rollback) => {
+                let remaining_backups = plan
+                    .entries()
+                    .iter()
+                    .filter(|e| e.backup().exists())
+                    .map(|e| e.backup().to_path_buf())
+                    .collect();
+                Err(BackupExecutionError::Rollback {
+                    operation,
+                    rollback,
+                    remaining_backups,
+                })
+            }
         },
     }
 }
@@ -97,7 +158,11 @@ fn backup_existing_files(paths: &[PathBuf]) -> Result<BackupPlan> {
     for path in paths {
         let backup = unique_backup_path(path);
         if let Err(err) = std::fs::rename(path, &backup) {
-            rollback_backups(&entries)?;
+            if let Err(rollback_err) = rollback_backups(&entries) {
+                return Err(crate::error::Error::Other(format!(
+                    "backup failed: {err}; rollback also failed: {rollback_err}"
+                )));
+            }
             return Err(err.into());
         }
         entries.push(FileBackup {
@@ -110,17 +175,29 @@ fn backup_existing_files(paths: &[PathBuf]) -> Result<BackupPlan> {
 }
 
 fn rollback_backups(entries: &[FileBackup]) -> Result<()> {
+    let mut errors = Vec::new();
     for entry in entries.iter().rev() {
         if !entry.backup.exists() {
             continue;
         }
         if entry.original.exists() {
-            std::fs::remove_file(&entry.original)?;
+            if let Err(e) = std::fs::remove_file(&entry.original) {
+                errors.push(format!("{}: {e}", entry.original.display()));
+                continue;
+            }
         }
-        std::fs::rename(&entry.backup, &entry.original)?;
+        if let Err(e) = std::fs::rename(&entry.backup, &entry.original) {
+            errors.push(format!("{}: {e}", entry.original.display()));
+        }
     }
-
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::error::Error::Other(format!(
+            "rollback failures: {}",
+            errors.join("; ")
+        )))
+    }
 }
 
 fn unique_backup_path(path: &Path) -> PathBuf {
@@ -133,6 +210,16 @@ fn unique_backup_path(path: &Path) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    for attempt in 0_u32..100 {
+        let candidate = if attempt == 0 {
+            path.with_file_name(format!("{file_name}.{pid}.{nanos}.bak"))
+        } else {
+            path.with_file_name(format!("{file_name}.{pid}.{nanos}.{attempt}.bak"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
     path.with_file_name(format!("{file_name}.{pid}.{nanos}.bak"))
 }
 
@@ -270,6 +357,7 @@ mod tests {
             BackupExecutionError::Rollback {
                 operation,
                 rollback,
+                ..
             } => {
                 assert_eq!(operation, "generation failed");
                 assert!(!rollback.to_string().is_empty());
@@ -297,6 +385,37 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&sibling_path).unwrap(),
             "not-a-private-key"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn with_existing_key_material_backup_cleans_up_backups_on_success() {
+        let dir = test_dir("cleanup-on-success");
+        let public_path = dir.join("id_ecdsa.pub");
+        let private_path = dir.join("id_ecdsa");
+        std::fs::write(&private_path, "private").unwrap();
+        std::fs::write(&public_path, "public").unwrap();
+
+        let result = with_existing_key_material_backup::<&str, &str, _>(
+            &public_path,
+            Some(&private_path),
+            || Ok("success"),
+        )
+        .unwrap();
+
+        assert_eq!(result, "success");
+        // Backup files should have been cleaned up
+        let bak_files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "bak"))
+            .collect();
+        assert!(
+            bak_files.is_empty(),
+            "backup files should be cleaned up on success, found: {:?}",
+            bak_files.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

@@ -3,8 +3,8 @@
 
 //! Core domain models, SSH public key formatting, and shared types for sshenc.
 //!
-//! This crate contains no platform-specific code and provides the foundational
-//! types used across all other sshenc crates.
+//! This crate provides foundational types and platform-aware utilities used
+//! across all other sshenc crates.
 
 pub mod backup;
 pub mod bin_discovery;

@@ -60,6 +60,11 @@ pub struct HostIdentity {
 }
 
 /// Top-level sshenc configuration.
+///
+/// Always construct via [`Config::load`] or [`Config::load_default`] rather
+/// than deserializing directly — those methods apply tilde expansion and
+/// other post-load processing that raw `toml::from_str` / `serde_json::from_str`
+/// will skip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -75,6 +80,12 @@ pub struct Config {
     pub log_level: LogLevel,
     /// Host-specific identity preferences.
     pub host_identities: Vec<HostIdentity>,
+}
+
+/// Return the user's home directory, or an error if it cannot be determined.
+pub fn require_home_dir() -> Result<PathBuf> {
+    dirs::home_dir()
+        .ok_or_else(|| Error::Config("could not determine home directory; set $HOME".into()))
 }
 
 impl Default for Config {
@@ -99,11 +110,8 @@ impl Config {
     /// Returns the default config file path.
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("/tmp"))
-                    .join(".config")
-            })
+            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+            .unwrap_or_else(|| PathBuf::from(".config"))
             .join("sshenc")
             .join("config.toml")
     }
@@ -162,12 +170,13 @@ impl Config {
 fn expand_tilde_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
     }
 
     if let Some(suffix) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-        return home.join(suffix);
+        if let Some(home) = dirs::home_dir() {
+            return home.join(suffix);
+        }
     }
 
     path.to_path_buf()

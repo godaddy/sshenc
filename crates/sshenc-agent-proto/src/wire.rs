@@ -50,6 +50,12 @@ pub fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>> {
     let len = cursor
         .read_u32::<BigEndian>()
         .map_err(|e| Error::AgentProtocol(format!("failed to read string length: {e}")))?;
+    let remaining = cursor.get_ref().len() - cursor.position() as usize;
+    if (len as usize) > remaining {
+        return Err(Error::AgentProtocol(format!(
+            "string length {len} exceeds remaining data ({remaining} bytes)"
+        )));
+    }
     let mut buf = vec![0_u8; len as usize];
     cursor
         .read_exact(&mut buf)
@@ -253,6 +259,23 @@ mod tests {
         assert!(
             err_msg.contains("empty"),
             "error should mention 'empty': {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_read_string_rejects_length_exceeding_remaining_data() {
+        // Craft a buffer with a string length claiming 1MB but only 4 bytes of data
+        let mut buf = Vec::new();
+        buf.write_u32::<BigEndian>(1_000_000).unwrap();
+        buf.extend_from_slice(b"tiny");
+
+        let mut cursor = Cursor::new(buf.as_slice());
+        let result = read_string(&mut cursor);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeds remaining"),
+            "error should mention exceeding: {err_msg}"
         );
     }
 

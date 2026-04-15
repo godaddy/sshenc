@@ -289,7 +289,9 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 Some(path.clone())
             } else {
                 let ssh_dir = dirs::home_dir()
-                    .expect("could not determine home directory")
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("could not determine home directory; set $HOME")
+                    })?
                     .join(".ssh");
                 // "default" label uses standard OpenSSH naming (id_ecdsa.pub)
                 if label == "default" {

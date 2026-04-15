@@ -252,6 +252,90 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn find_trusted_binary_resolves_symlinks() {
+        let root = test_dir("symlink-resolve");
+        let bin_dir = root.join("real-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let real_binary = bin_dir.join("sshenc-agent");
+        write_test_binary(&real_binary);
+
+        let link_dir = root.join("link-bin");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let symlink = link_dir.join("sshenc-agent");
+        std::os::unix::fs::symlink(&real_binary, &symlink).unwrap();
+
+        // Point current_exe into the link dir so the symlink is found first
+        let context = BinaryDiscoveryContext {
+            current_exe: Some(link_dir.join("sshenc")),
+            home_dir: Some(root.join("home")),
+        };
+
+        let result = find_trusted_binary_with_context("sshenc-agent", &context);
+        let canonical = real_binary.canonicalize().unwrap();
+        assert_eq!(
+            result.as_deref(),
+            Some(canonical.as_path()),
+            "should return canonical path, not symlink"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn find_trusted_binary_skips_nonexistent() {
+        let root = test_dir("nonexistent");
+        // No binary exists in any candidate dir
+        let context = BinaryDiscoveryContext {
+            current_exe: Some(root.join("bin").join("sshenc")),
+            #[cfg(not(windows))]
+            home_dir: Some(root.join("home")),
+            #[cfg(windows)]
+            local_app_data: Some(root.join("LocalAppData")),
+            #[cfg(windows)]
+            program_files: Some(root.join("ProgramFiles")),
+            #[cfg(windows)]
+            program_files_x86: Some(root.join("ProgramFilesX86")),
+        };
+
+        #[cfg(not(windows))]
+        let binary_name = "sshenc-agent";
+        #[cfg(windows)]
+        let binary_name = "sshenc-agent.exe";
+
+        assert!(
+            find_trusted_binary_with_context(binary_name, &context).is_none(),
+            "should return None when no candidate exists"
+        );
+
+        let _unused = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_trusted_binary_skips_non_executable() {
+        let root = test_dir("non-executable");
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let non_exec = bin_dir.join("sshenc-agent");
+        // Write a file without execute permission
+        std::fs::write(&non_exec, b"not executable").unwrap();
+        std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let context = BinaryDiscoveryContext {
+            current_exe: Some(bin_dir.join("sshenc")),
+            home_dir: Some(root.join("home")),
+        };
+
+        assert!(
+            find_trusted_binary_with_context("sshenc-agent", &context).is_none(),
+            "should skip non-executable file"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn discovery_skips_non_executable_file_and_falls_back() {
         let root = test_dir("invalid-file");

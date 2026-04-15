@@ -488,6 +488,78 @@ mod tests {
         assert!(error.to_string().contains("timed out"));
     }
 
+    #[test]
+    fn default_socket_or_pipe_returns_valid_path() {
+        let path = default_socket_or_pipe();
+        assert!(
+            !path.is_empty(),
+            "default socket/pipe path should not be empty"
+        );
+        #[cfg(unix)]
+        assert!(
+            path.contains("agent.sock"),
+            "Unix socket path should contain 'agent.sock': {path}"
+        );
+        #[cfg(windows)]
+        assert!(
+            path.contains(r"\\.\pipe\"),
+            "Windows pipe path should contain named pipe prefix: {path}"
+        );
+    }
+
+    #[test]
+    fn default_pid_path_returns_valid_path() {
+        let path = default_pid_path();
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains("agent.pid"),
+            "pid path should contain 'agent.pid': {path_str}"
+        );
+    }
+
+    #[test]
+    fn write_ready_file_creates_file_with_ready_content() {
+        let path = test_path("ready-content");
+        let _unused = std::fs::remove_file(&path);
+
+        write_ready_file(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "ready\n");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_ready_file_contents_sets_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = test_path("ready-perms");
+        let _unused = std::fs::remove_file(&path);
+
+        write_ready_file_contents(&path, "ready\n").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "ready file should have 0o600 permissions"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn write_ready_error_file_creates_error_content() {
+        let path = test_path("ready-error-content");
+        let _unused = std::fs::remove_file(&path);
+
+        write_ready_error_file(&path, "something broke").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "error:something broke\n");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn validate_setsid_result_rejects_failure() {

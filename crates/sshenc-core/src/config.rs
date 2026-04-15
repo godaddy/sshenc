@@ -459,6 +459,34 @@ label = "gl"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Config::new() calls dirs::home_dir() -> FFI
+    fn config_new_succeeds_with_home_set() {
+        let config = Config::new();
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn config_default_does_not_panic() {
+        // This test documents that Default never panics, even if HOME is unset,
+        // because the implementation falls back to temp_dir.
+        let _config = Config::default();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // Config::new() calls dirs::home_dir() -> FFI
+    fn config_new_uses_home_for_paths() {
+        let config = Config::new().unwrap();
+        let home = dirs::home_dir().unwrap();
+        // pub_dir should be under the user's home directory
+        assert!(
+            config.pub_dir.starts_with(&home),
+            "pub_dir {:?} should start with home {:?}",
+            config.pub_dir,
+            home
+        );
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI
     fn test_platform_conditional_socket_path() {
         let config = Config::default();

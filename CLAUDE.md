@@ -73,3 +73,7 @@ Supports macOS, Windows, and Linux:
 - **macOS**: Uses Apple Secure Enclave via CryptoKit. Platform backend provided by `enclaveapp-app-storage`.
 - **Windows**: Uses TPM 2.0 via Windows CNG.
 - **Linux**: Uses software-backed ECDSA P-256 keys via `enclaveapp-software`. Keys are stored on disk in `~/.sshenc/keys/` and are NOT hardware-protected.
+
+## Commits
+
+Do not add Co-Authored-By lines for Claude Code in commit messages.

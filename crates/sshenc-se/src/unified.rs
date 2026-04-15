@@ -100,12 +100,17 @@ impl SshencBackend {
         }
     }
 
+    #[allow(clippy::match_same_arms)] // arms kept separate for intent documentation
     fn persisted_pub_file_path(&self, meta: &metadata::KeyMeta, label: &str) -> Option<PathBuf> {
-        meta.app_specific
-            .get("pub_file_path")
-            .and_then(|value| value.as_str())
-            .map(PathBuf::from)
-            .or_else(|| self.find_pub_file(label))
+        match meta.app_specific.get("pub_file_path") {
+            // Explicit path recorded — use it
+            Some(value) if value.is_string() => value.as_str().map(PathBuf::from),
+            // Field present but null — key was generated without a pub file.
+            // Fall through to filesystem discovery in case one was created later.
+            Some(_) => self.find_pub_file(label),
+            // Field absent (legacy metadata) — discover from filesystem
+            None => self.find_pub_file(label),
+        }
     }
 }
 
@@ -245,6 +250,7 @@ impl KeyBackend for SshencBackend {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -331,6 +337,81 @@ mod tests {
         };
         let path = backend.find_pub_file("nonexistent");
         assert!(path.is_none());
+
+        std::fs::remove_dir_all(&pub_dir).unwrap();
+    }
+
+    fn test_backend(pub_dir: &Path) -> SshencBackend {
+        SshencBackend {
+            pub_dir: pub_dir.to_path_buf(),
+            keys_dir: sshenc_keys_dir(),
+            backend: AppSigningBackend::init(StorageConfig {
+                app_name: "sshenc-test".into(),
+                key_label: String::new(),
+                access_policy: AccessPolicy::None,
+                extra_bridge_paths: vec![],
+                keys_dir: None,
+            })
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn persisted_pub_file_path_uses_recorded_string() {
+        let pub_dir = test_pub_dir();
+        let backend = test_backend(&pub_dir);
+
+        let mut meta = metadata::KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
+        meta.set_app_field("pub_file_path", "/custom/path/test-key.pub");
+
+        let result = backend.persisted_pub_file_path(&meta, "test-key");
+        assert_eq!(result, Some(PathBuf::from("/custom/path/test-key.pub")));
+
+        std::fs::remove_dir_all(&pub_dir).unwrap();
+    }
+
+    #[test]
+    fn persisted_pub_file_path_null_falls_through_to_filesystem() {
+        let pub_dir = test_pub_dir();
+        std::fs::write(pub_dir.join("test-key.pub"), "key content").unwrap();
+        let backend = test_backend(&pub_dir);
+
+        let mut meta = metadata::KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
+        meta.set_app_field("pub_file_path", serde_json::Value::Null);
+
+        let result = backend.persisted_pub_file_path(&meta, "test-key");
+        assert!(result.is_some());
+        assert!(result.unwrap().ends_with("test-key.pub"));
+
+        std::fs::remove_dir_all(&pub_dir).unwrap();
+    }
+
+    #[test]
+    fn persisted_pub_file_path_absent_field_falls_through_to_filesystem() {
+        let pub_dir = test_pub_dir();
+        std::fs::write(pub_dir.join("legacy.pub"), "key content").unwrap();
+        let backend = test_backend(&pub_dir);
+
+        // Legacy metadata has no pub_file_path field at all
+        let meta = metadata::KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
+
+        let result = backend.persisted_pub_file_path(&meta, "legacy");
+        assert!(result.is_some());
+        assert!(result.unwrap().ends_with("legacy.pub"));
+
+        std::fs::remove_dir_all(&pub_dir).unwrap();
+    }
+
+    #[test]
+    fn persisted_pub_file_path_null_no_filesystem_returns_none() {
+        let pub_dir = test_pub_dir();
+        let backend = test_backend(&pub_dir);
+
+        let mut meta = metadata::KeyMeta::new("no-pub", KeyType::Signing, AccessPolicy::None);
+        meta.set_app_field("pub_file_path", serde_json::Value::Null);
+
+        let result = backend.persisted_pub_file_path(&meta, "no-pub");
+        assert!(result.is_none());
 
         std::fs::remove_dir_all(&pub_dir).unwrap();
     }

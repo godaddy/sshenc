@@ -80,7 +80,7 @@
             ExeCommand="uninstall"
             Execute="deferred"
             Impersonate="yes"
-            Return="check" />
+            Return="ignore" />
 
         <InstallExecuteSequence>
             <Custom Action="SshencInstall" After="InstallFiles" Condition="NOT REMOVE" />

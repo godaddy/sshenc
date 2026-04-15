@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
-use sshenc_core::backup::{self, BackupExecutionError};
+use sshenc_core::backup;
 use sshenc_core::{AccessPolicy, Config};
 use std::path::PathBuf;
 
@@ -13,35 +13,6 @@ mod commands;
 #[cfg(target_os = "windows")]
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 mod wsl;
-
-fn run_with_existing_key_backup<T, F>(
-    public_path: Option<&PathBuf>,
-    paired_private_path: Option<&PathBuf>,
-    operation: F,
-) -> Result<T>
-where
-    F: FnOnce() -> Result<T>,
-{
-    let Some(public_path) = public_path else {
-        return operation();
-    };
-
-    match backup::with_existing_key_material_backup(
-        public_path,
-        paired_private_path.map(PathBuf::as_path),
-        operation,
-    ) {
-        Ok(value) => Ok(value),
-        Err(BackupExecutionError::Backup(error)) => Err(error.into()),
-        Err(BackupExecutionError::Operation(error)) => Err(error),
-        Err(BackupExecutionError::Rollback {
-            operation,
-            rollback,
-        }) => Err(anyhow::anyhow!(
-            "{operation}; failed to restore backed up SSH key material: {rollback}"
-        )),
-    }
-}
 
 #[derive(Parser)]
 #[command(
@@ -354,8 +325,8 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
             }
             let comment = comment.or_else(default_comment);
             let access_policy =
-                selected_access_policy(auth_policy.as_deref(), require_user_presence);
-            run_with_existing_key_backup(pub_path.as_ref(), paired_private_path.as_ref(), || {
+                selected_access_policy(auth_policy.as_deref(), require_user_presence)?;
+            backup::run_with_backup(pub_path.as_deref(), paired_private_path.as_deref(), || {
                 commands::keygen(
                     backend,
                     &label,
@@ -415,21 +386,25 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
     }
 }
 
-fn selected_access_policy(auth_policy: Option<&str>, require_user_presence: bool) -> AccessPolicy {
+fn selected_access_policy(
+    auth_policy: Option<&str>,
+    require_user_presence: bool,
+) -> Result<AccessPolicy> {
     if let Some(policy) = auth_policy {
         return match policy {
-            "any" => AccessPolicy::Any,
-            "biometric" => AccessPolicy::BiometricOnly,
-            "password" => AccessPolicy::PasswordOnly,
-            _ => AccessPolicy::None,
+            "any" => Ok(AccessPolicy::Any),
+            "biometric" => Ok(AccessPolicy::BiometricOnly),
+            "password" => Ok(AccessPolicy::PasswordOnly),
+            "none" => Ok(AccessPolicy::None),
+            other => anyhow::bail!("unknown access policy: {other}"),
         };
     }
 
-    if require_user_presence {
+    Ok(if require_user_presence {
         AccessPolicy::Any
     } else {
         AccessPolicy::None
-    }
+    })
 }
 
 /// Generate a default SSH key comment: user@hostname (same as ssh-keygen).

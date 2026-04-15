@@ -314,7 +314,10 @@ fn handle_blocking_connection(
         match stream.read_exact(&mut len_buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!("unix socket read error: {e}");
+                return;
+            }
         }
         let len = u32::from_be_bytes(len_buf);
 
@@ -324,18 +327,25 @@ fn handle_blocking_connection(
 
         // Read message body
         let mut payload = vec![0_u8; len as usize];
-        if stream.read_exact(&mut payload).is_err() {
+        if let Err(e) = stream.read_exact(&mut payload) {
+            tracing::warn!("unix socket read error: {e}");
             return;
         }
 
         // Parse and handle
         let request = match message::parse_request(&payload) {
             Ok(r) => r,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!("unix socket parse error: {e}");
+                return;
+            }
         };
         let response = match handle_request(request, backend, allowed_labels, prompt_policy) {
             Ok(r) => r,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!("unix socket request error: {e}");
+                return;
+            }
         };
         let response_payload = message::serialize_response(&response);
 
@@ -449,11 +459,19 @@ fn handle_request(
             };
 
             if should_verify {
-                #[cfg(target_os = "windows")]
+                // On macOS the Secure Enclave enforces user presence during
+                // SecKeyCreateSignature — the biometric/password prompt fires
+                // automatically.  On Windows the TPM backend enforces it via
+                // Windows Hello during the sign operation.
+                //
+                // On Linux with the software backend there is no hardware
+                // enforcement and the agent has no terminal to prompt the
+                // user, so we log a warning.
+                #[cfg(not(any(target_os = "macos", windows)))]
                 {
-                    tracing::debug!(
+                    tracing::warn!(
                         label = key.metadata.label.as_str(),
-                        "additional user verification requested but not available in this build"
+                        "user verification requested but software backend cannot enforce it"
                     );
                 }
             }

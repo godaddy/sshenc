@@ -121,6 +121,8 @@ pub struct KeyMetadata {
     /// Persisted access policy for signing.
     pub access_policy: AccessPolicy,
     /// Whether user presence (biometric/password) is required for signing.
+    /// Derived from `access_policy` — never serialized independently.
+    #[serde(skip, default)]
     pub requires_user_presence: bool,
     /// Optional comment for the SSH public key line.
     pub comment: Option<String>,

@@ -71,7 +71,7 @@ pub fn install_block(
     // parser treats backslashes as escape characters, mangling \\.\pipe\...
     // into \.\pipe\... which fails to connect.
     let socket_str = socket_path.display().to_string();
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     let socket_str = socket_str.replace('\\', "/");
     let socket_quoted = if socket_str.contains(' ') {
         format!("\"{socket_str}\"")
@@ -81,6 +81,8 @@ pub fn install_block(
     let mut lines = format!("{BEGIN_MARKER}\nHost *\n    IdentityAgent {socket_quoted}\n");
     if let Some(dylib) = dylib_path {
         let dylib_str = dylib.display().to_string();
+        #[cfg(windows)]
+        let dylib_str = dylib_str.replace('\\', "/");
         let dylib_quoted = if dylib_str.contains(' ') {
             format!("\"{dylib_str}\"")
         } else {
@@ -164,8 +166,9 @@ fn write_ssh_config(path: &Path, content: &str) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        enclaveapp_core::metadata::restrict_file_permissions(path)
-            .map_err(|e| Error::Config(e.to_string()))?;
+        // On Windows, leave default file permissions — OpenSSH and other
+        // processes need to read ~/.ssh/config.  The parent directory
+        // (~/.ssh/) already inherits restrictive ACLs from the user profile.
     }
     Ok(())
 }

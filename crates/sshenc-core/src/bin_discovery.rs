@@ -65,6 +65,7 @@ fn candidate_dirs(context: &BinaryDiscoveryContext) -> Vec<PathBuf> {
     {
         if let Some(home_dir) = context.home_dir.as_ref() {
             dirs.push(home_dir.join(".local").join("bin"));
+            dirs.push(home_dir.join(".cargo").join("bin"));
         }
         dirs.push(PathBuf::from("/opt/homebrew/bin"));
         dirs.push(PathBuf::from("/usr/local/bin"));
@@ -95,7 +96,9 @@ pub fn find_trusted_binary(binary_name: &str) -> Option<PathBuf> {
 }
 
 fn is_trusted_binary_candidate(path: &std::path::Path) -> bool {
-    path.is_file() && candidate_looks_executable(path)
+    // Resolve symlinks so we validate the real target, not just the link.
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    resolved.is_file() && candidate_looks_executable(&resolved)
 }
 
 #[cfg(unix)]

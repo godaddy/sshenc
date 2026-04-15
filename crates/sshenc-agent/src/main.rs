@@ -54,7 +54,7 @@ struct Cli {
 #[cfg(unix)]
 fn default_socket_or_pipe() -> String {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .expect("could not determine home directory; set $HOME")
         .join(".sshenc")
         .join("agent.sock")
         .to_string_lossy()
@@ -68,7 +68,7 @@ fn default_socket_or_pipe() -> String {
 
 fn default_pid_path() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .expect("could not determine home directory; set $HOME")
         .join(".sshenc")
         .join("agent.pid")
 }
@@ -184,7 +184,7 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     #[allow(clippy::used_underscore_binding)]
     if !cli.foreground && !cli._internal_daemon {
-        daemonize(&cli.socket)?;
+        daemonize(&cli)?;
     }
 
     let ready_file = take_ready_file_from_env();
@@ -335,7 +335,7 @@ fn daemonize(socket_path: &str) -> Result<()> {
 /// Re-exec as a detached background process and write pidfile (Windows).
 #[cfg(windows)]
 #[allow(clippy::exit)]
-fn daemonize(pipe_name: &str) -> Result<()> {
+fn daemonize(cli: &Cli) -> Result<()> {
     use std::os::windows::process::CommandExt;
 
     // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
@@ -345,10 +345,20 @@ fn daemonize(pipe_name: &str) -> Result<()> {
     let exe = std::env::current_exe()?;
     let ready_path = unique_ready_file_path();
     let _unused = std::fs::remove_file(&ready_path);
-    let mut child = std::process::Command::new(&exe)
-        .arg("--socket")
-        .arg(pipe_name)
-        .arg("--_internal-daemon")
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--socket")
+        .arg(&cli.socket)
+        .arg("--_internal-daemon");
+    if cli.debug {
+        cmd.arg("--debug");
+    }
+    if let Some(ref config) = cli.config {
+        cmd.arg("--config").arg(config);
+    }
+    if !cli.labels.is_empty() {
+        cmd.arg("--labels").arg(cli.labels.join(","));
+    }
+    let mut child = cmd
         .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

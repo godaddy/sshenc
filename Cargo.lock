@@ -428,10 +428,12 @@ dependencies = [
 name = "enclaveapp-apple"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "base64 0.22.1",
  "dirs",
  "enclaveapp-core",
  "libc",
+ "rand",
  "serde",
  "serde_json",
 ]
@@ -463,8 +465,12 @@ dependencies = [
 name = "enclaveapp-linux-tpm"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "dirs",
+ "elliptic-curve",
  "enclaveapp-core",
+ "p256",
+ "rand",
  "serde",
  "serde_json",
  "sha2",

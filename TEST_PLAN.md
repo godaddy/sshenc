@@ -49,3 +49,27 @@ cargo fmt --all -- --check
 - backend changes: `cargo test -p sshenc-se`
 - config or metadata changes: `cargo test -p sshenc-core -p sshenc-test-support`
 - CLI changes: verify `sshenc --help`, `sshenc help openssh`, and `sshenc help config`
+
+## Per-Crate Test Inventory
+
+- **sshenc-core** (~20 tests): SSH public key wire format encoding/decoding roundtrips, OpenSSH line format parsing, fingerprint generation (SHA-256/MD5), config serialization roundtrips, SSH config install/uninstall/idempotency, backup/rollback transactional safety, binary discovery candidate selection
+- **sshenc-agent-proto** (~14 tests): Agent protocol message parsing/serialization, DER-to-SSH signature conversion, identity enumeration encoding
+- **sshenc-agent** (~15 tests): PID file management, readiness protocol (ready/error/timeout), socket path preparation (stale socket cleanup, live socket rejection), prompt policy enforcement, handle_request for identity and sign requests
+- **sshenc-cli** (~40 tests): keygen lifecycle (create/duplicate/invalid label/comment/pub file/user presence/json), list (empty/populated/json), inspect (existing/missing/json/pub), delete (single/multiple/pub cleanup/empty labels/verification), export-pub (stdout/file/nested dir/fingerprint/json/authorized_keys), agent launcher (spawn/already running/error propagation), Windows install state (prepare/finalize/restore/service parsing/registry parsing), promote-to-default (rename/rollback/overwrite), ssh wrapper invocation, ssh-keygen sign args parsing, SSH signature file creation, base64 wrapping, openssh config printing
+- **sshenc-gitenc** (~15 tests): Arg parsing (label/config/short flags/empty/passthrough), build_ssh_command validation, configure_repo_entries (default/named label/recorded pub path/missing pub path), git key metadata parsing (app_specific/legacy), signing_key_path validation
+- **sshenc-pkcs11** (~4 tests): Session management, slot/token info
+- **sshenc-test-support** (~8 tests): Mock backend key lifecycle (generate/list/get/delete/sign), deterministic key generation, pub file write, comment handling
+
+## Fuzz Targets
+
+Run with: `cd fuzz && cargo +nightly fuzz run <target>`
+
+- `read_ssh_string` — fuzzes `sshenc_core::pubkey::read_ssh_string` with arbitrary byte input
+- `parse_request` — fuzzes `sshenc_agent_proto::message::parse_request` with arbitrary byte input
+- `parse_der_signature` — fuzzes `sshenc_agent_proto::signature::der_to_ssh_signature` with arbitrary byte input
+
+## Future Testing Roadmap
+
+- **Miri**: run `cargo +nightly miri test` on `sshenc-core` and `sshenc-agent-proto` (pure Rust, no FFI). Several tests are already `#[cfg_attr(miri, ignore)]` for file I/O.
+- **Hardware integration**: gate real Secure Enclave / TPM tests behind `#[cfg(feature = "hardware-tests")]` and a CI runner with hardware access.
+- **Property-based testing**: consider `proptest` for SSH wire format roundtrip properties.

@@ -269,9 +269,13 @@ git log --show-signature                # verify locally
 ```
 core.sshCommand = sshenc ssh --label NAME --
 gpg.format = ssh
+gpg.ssh.program = /path/to/sshenc
 user.signingkey = ~/.ssh/NAME.pub
 commit.gpgsign = true
 ```
+
+`gpg.ssh.program` points git at the `sshenc` binary so it can invoke
+`ssh-keygen -Y sign` compatible signing via the Secure Enclave key.
 
 `gitenc --config` without a label keeps agent-default SSH authentication via
 `core.sshCommand = sshenc ssh --` and configures commit signing to use the

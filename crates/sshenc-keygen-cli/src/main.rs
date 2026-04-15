@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use sshenc_core::backup::{self, BackupExecutionError};
+use sshenc_core::backup;
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::{AccessPolicy, Config};
@@ -47,35 +47,6 @@ struct Cli {
     /// Suppress public key output to stdout.
     #[arg(long, short = 'q')]
     quiet: bool,
-}
-
-fn run_with_existing_key_backup<T, F>(
-    public_path: Option<&PathBuf>,
-    paired_private_path: Option<&PathBuf>,
-    operation: F,
-) -> Result<T>
-where
-    F: FnOnce() -> Result<T>,
-{
-    let Some(public_path) = public_path else {
-        return operation();
-    };
-
-    match backup::with_existing_key_material_backup(
-        public_path,
-        paired_private_path.map(PathBuf::as_path),
-        operation,
-    ) {
-        Ok(value) => Ok(value),
-        Err(BackupExecutionError::Backup(error)) => Err(error.into()),
-        Err(BackupExecutionError::Operation(error)) => Err(error),
-        Err(BackupExecutionError::Rollback {
-            operation,
-            rollback,
-        }) => Err(anyhow::anyhow!(
-            "{operation}; failed to restore backed up SSH key material: {rollback}"
-        )),
-    }
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
@@ -140,8 +111,8 @@ fn main() -> Result<()> {
     };
 
     let info =
-        run_with_existing_key_backup(write_pub.as_ref(), paired_private_path.as_ref(), || {
-            Ok(backend.generate(&opts)?)
+        backup::run_with_backup(write_pub.as_deref(), paired_private_path.as_deref(), || {
+            backend.generate(&opts).map_err(|e| anyhow::anyhow!("{e}"))
         })?;
 
     if !cli.quiet {

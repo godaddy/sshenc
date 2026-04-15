@@ -7,11 +7,14 @@
 //! `IdentityAgent` to point at the sshenc agent socket for all hosts.
 
 use crate::error::{Error, Result};
-use enclaveapp_core::metadata::{atomic_write, ensure_dir};
+use enclaveapp_core::config_block::{self, BlockMarkers};
+use enclaveapp_core::metadata::ensure_dir;
+use enclaveapp_core::quoting::quote_ssh_path;
 use std::path::Path;
 
-const BEGIN_MARKER: &str = "# BEGIN sshenc managed block -- do not edit";
-const END_MARKER: &str = "# END sshenc managed block";
+fn markers() -> BlockMarkers {
+    BlockMarkers::standard("sshenc")
+}
 
 /// Result of an install operation.
 #[derive(Debug, PartialEq, Eq)]
@@ -33,7 +36,7 @@ pub fn is_installed(ssh_config_path: &Path) -> Result<bool> {
         return Ok(false);
     }
     let content = std::fs::read_to_string(ssh_config_path)?;
-    Ok(content.contains(BEGIN_MARKER))
+    Ok(content.contains(&markers().begin))
 }
 
 /// Install the sshenc block into the SSH config file.
@@ -49,60 +52,33 @@ pub fn install_block(
     socket_path: &Path,
     dylib_path: Option<&Path>,
 ) -> Result<InstallResult> {
-    // Ensure parent directory exists with 0700 permissions
+    let markers = markers();
+
+    // Ensure parent directory exists with 0700 permissions (SSH requirement).
     if let Some(parent) = ssh_config_path.parent() {
         if !parent.exists() {
             ensure_dir(parent).map_err(|e| Error::Config(e.to_string()))?;
         }
     }
 
-    let content = if ssh_config_path.exists() {
-        std::fs::read_to_string(ssh_config_path)?.replace("\r\n", "\n")
-    } else {
-        String::new()
-    };
+    let content = config_block::read_config_file(ssh_config_path)
+        .map_err(|e| Error::Config(e.to_string()))?
+        .unwrap_or_default();
 
-    if content.contains(BEGIN_MARKER) {
+    if content.contains(&markers.begin) {
         return Ok(InstallResult::AlreadyPresent);
     }
 
-    // Quote paths in case they contain spaces.
-    // On Windows, use forward slashes for the pipe path — OpenSSH's config
-    // parser treats backslashes as escape characters, mangling \\.\pipe\...
-    // into \.\pipe\... which fails to connect.
-    let socket_str = socket_path.display().to_string();
-    #[cfg(windows)]
-    let socket_str = socket_str.replace('\\', "/");
-    let socket_quoted = if socket_str.contains(' ') {
-        format!("\"{socket_str}\"")
-    } else {
-        socket_str
-    };
-    let mut lines = format!("{BEGIN_MARKER}\nHost *\n    IdentityAgent {socket_quoted}\n");
+    // Build the SSH config body.
+    let socket_quoted = quote_ssh_path(socket_path);
+    let mut body = format!("Host *\n    IdentityAgent {socket_quoted}\n");
     if let Some(dylib) = dylib_path {
-        let dylib_str = dylib.display().to_string();
-        #[cfg(windows)]
-        let dylib_str = dylib_str.replace('\\', "/");
-        let dylib_quoted = if dylib_str.contains(' ') {
-            format!("\"{dylib_str}\"")
-        } else {
-            dylib_str
-        };
-        lines.push_str(&format!("    PKCS11Provider {dylib_quoted}\n"));
+        let dylib_quoted = quote_ssh_path(dylib);
+        body.push_str(&format!("    PKCS11Provider {dylib_quoted}\n"));
     }
-    lines.push_str(&format!("{END_MARKER}\n"));
-    let block = lines;
 
-    let mut new_content = content;
-    // Ensure existing content ends with newline
-    if !new_content.is_empty() && !new_content.ends_with('\n') {
-        new_content.push('\n');
-    }
-    // Add blank separator line if there's existing content
-    if !new_content.is_empty() {
-        new_content.push('\n');
-    }
-    new_content.push_str(&block);
+    let block = config_block::build_block(&markers, &body);
+    let new_content = config_block::upsert_block(&content, &markers, &block);
 
     write_ssh_config(ssh_config_path, &new_content)?;
 
@@ -114,58 +90,43 @@ pub fn install_block(
 /// Removes everything between (and including) the BEGIN and END markers,
 /// plus any single blank line immediately before the block.
 pub fn uninstall_block(ssh_config_path: &Path) -> Result<UninstallResult> {
+    let markers = markers();
+
     if !ssh_config_path.exists() {
         return Ok(UninstallResult::NotPresent);
     }
 
-    let content = std::fs::read_to_string(ssh_config_path)?.replace("\r\n", "\n");
-    if !content.contains(BEGIN_MARKER) {
+    let content = config_block::read_config_file(ssh_config_path)
+        .map_err(|e| Error::Config(e.to_string()))?
+        .unwrap_or_default();
+
+    if !content.contains(&markers.begin) {
         return Ok(UninstallResult::NotPresent);
     }
 
-    let lines: Vec<&str> = content.lines().collect();
-    let mut new_lines: Vec<&str> = Vec::new();
-    let mut in_block = false;
-
-    for line in &lines {
-        if line.contains(BEGIN_MARKER) {
-            in_block = true;
-            // Remove a trailing blank line before the block
-            if let Some(last) = new_lines.last() {
-                if last.is_empty() {
-                    new_lines.pop();
-                }
-            }
-            continue;
-        }
-        if line.contains(END_MARKER) {
-            in_block = false;
-            continue;
-        }
-        if !in_block {
-            new_lines.push(line);
-        }
-    }
-
-    if in_block {
+    // Check for BEGIN without END (malformed block).
+    if config_block::find_block(&content, &markers).is_none() {
         return Err(Error::Config(format!(
             "malformed sshenc block in {}: found BEGIN marker but no END marker; refusing to modify",
             ssh_config_path.display()
         )));
     }
 
-    // Rebuild content
-    let mut new_content = new_lines.join("\n");
-    if !new_content.is_empty() {
-        new_content.push('\n');
+    let (result, status) = config_block::remove_block(&content, &markers);
+    if status == config_block::BlockRemoveResult::Removed {
+        write_ssh_config(ssh_config_path, &result)?;
     }
 
-    write_ssh_config(ssh_config_path, &new_content)?;
     Ok(UninstallResult::Removed)
 }
 
+/// Write the SSH config file with appropriate permissions (0o644 on Unix).
+///
+/// SSH config files need to be world-readable (unlike secrets which use 0o600),
+/// because `~/.ssh/config` is a configuration file, not a private key.
 fn write_ssh_config(path: &Path, content: &str) -> Result<()> {
-    atomic_write(path, content.as_bytes()).map_err(|e| Error::Config(e.to_string()))?;
+    enclaveapp_core::metadata::atomic_write(path, content.as_bytes())
+        .map_err(|e| Error::Config(e.to_string()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -204,9 +165,9 @@ mod tests {
         assert_eq!(result, InstallResult::Installed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains(BEGIN_MARKER));
+        assert!(content.contains(&markers().begin));
         assert!(content.contains("IdentityAgent /tmp/.sshenc/agent.sock"));
-        assert!(content.contains(END_MARKER));
+        assert!(content.contains(&markers().end));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -225,7 +186,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.starts_with("Host example.com"));
-        assert!(content.contains(BEGIN_MARKER));
+        assert!(content.contains(&markers().begin));
         // Blank separator line between existing content and block
         assert!(content.contains("User jay\n\n"));
 
@@ -269,7 +230,7 @@ mod tests {
         let content = std::fs::read_to_string(&config_path).unwrap();
         // Should have added newline before the block
         assert!(!content.contains("bar#"));
-        assert!(content.contains(BEGIN_MARKER));
+        assert!(content.contains(&markers().begin));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -307,8 +268,8 @@ mod tests {
         assert_eq!(result, UninstallResult::Removed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(!content.contains(BEGIN_MARKER));
-        assert!(!content.contains(END_MARKER));
+        assert!(!content.contains(&markers().begin));
+        assert!(!content.contains(&markers().end));
         assert!(!content.contains("IdentityAgent"));
         assert!(content.contains("Host foo"));
 
@@ -425,8 +386,8 @@ mod tests {
         assert_eq!(result, UninstallResult::Removed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(!content.contains(BEGIN_MARKER));
-        assert!(!content.contains(END_MARKER));
+        assert!(!content.contains(&markers().begin));
+        assert!(!content.contains(&markers().end));
         assert!(!content.contains("IdentityAgent"));
         assert!(!content.contains("PKCS11Provider"));
         assert!(content.contains("Host foo"));
@@ -448,9 +409,9 @@ mod tests {
         assert_eq!(result, InstallResult::Installed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains(BEGIN_MARKER));
+        assert!(content.contains(&markers().begin));
         assert!(content.contains("IdentityAgent"));
-        assert!(content.contains(END_MARKER));
+        assert!(content.contains(&markers().end));
         // No blank separator line at the start (no prior content)
         assert!(!content.starts_with('\n'));
 
@@ -491,7 +452,7 @@ mod tests {
         assert_eq!(result, UninstallResult::Removed);
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(!content.contains(BEGIN_MARKER));
+        assert!(!content.contains(&markers().begin));
         assert!(content.contains("Host foo"));
         // Should not have excessive blank lines piling up
         assert!(
@@ -511,7 +472,7 @@ mod tests {
         // Write a file that has BEGIN marker but no END marker (corrupted/partial)
         let content = format!(
             "Host foo\n    User bar\n\n{}\nHost *\n    IdentityAgent /tmp/sock\n",
-            BEGIN_MARKER
+            markers().begin
         );
         std::fs::write(&config_path, &content).unwrap();
 
@@ -528,7 +489,7 @@ mod tests {
         let config_path = dir.join("config");
         let content = format!(
             "Host foo\n    User bar\n\n{}\nHost *\n    IdentityAgent /tmp/sock\n",
-            BEGIN_MARKER
+            markers().begin
         );
         std::fs::write(&config_path, &content).unwrap();
 

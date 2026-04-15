@@ -428,12 +428,10 @@ dependencies = [
 name = "enclaveapp-apple"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "base64 0.22.1",
  "dirs",
  "enclaveapp-core",
  "libc",
- "rand",
  "serde",
  "serde_json",
 ]
@@ -446,6 +444,13 @@ dependencies = [
  "enclaveapp-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "enclaveapp-build-support"
+version = "0.1.0"
+dependencies = [
+ "winresource",
 ]
 
 [[package]]
@@ -1326,6 +1331,7 @@ dependencies = [
  "clap_complete",
  "dirs",
  "enclaveapp-apple",
+ "enclaveapp-build-support",
  "enclaveapp-core",
  "enclaveapp-linux-tpm",
  "enclaveapp-software",
@@ -1343,7 +1349,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "winresource",
 ]
 
 [[package]]

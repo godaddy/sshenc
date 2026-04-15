@@ -35,6 +35,7 @@ enclaveapp-software = { path = "../crates/enclaveapp-software", features = ["sig
 enclaveapp-linux-tpm = { path = "../crates/enclaveapp-linux-tpm", features = ["signing"] }
 enclaveapp-wsl = { path = "../crates/enclaveapp-wsl" }
 enclaveapp-app-storage = { path = "../crates/enclaveapp-app-storage" }
+enclaveapp-build-support = { path = "../crates/enclaveapp-build-support" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

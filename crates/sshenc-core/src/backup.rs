@@ -65,8 +65,8 @@ pub enum BackupExecutionError<E> {
 /// converts [`BackupExecutionError`] variants into the caller's error type
 /// so binary crates don't need to match each variant individually.
 pub fn run_with_backup<T, E, F>(
-    public_path: Option<&std::path::Path>,
-    paired_private_path: Option<&std::path::Path>,
+    public_path: Option<&Path>,
+    paired_private_path: Option<&Path>,
     operation: F,
 ) -> std::result::Result<T, E>
 where

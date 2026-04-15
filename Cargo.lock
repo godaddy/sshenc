@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-agent"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-agent-proto"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "byteorder",
  "bytes",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-cli"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-core"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-gitenc"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "dirs",
  "enclaveapp-core",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-keygen-cli"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-pkcs11"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "dirs",
  "sshenc-core",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-se"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "dirs",
  "enclaveapp-app-storage",
@@ -1409,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "sshenc-test-support"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "rand",
  "sshenc-core",

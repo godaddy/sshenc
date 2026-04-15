@@ -156,7 +156,7 @@ pub async fn run_agent(
         use socket2::{Domain, SockAddr, Socket, Type};
 
         let sock_dir = dirs::home_dir()
-            .expect("could not determine home directory; set USERPROFILE")
+            .ok_or_else(|| anyhow::anyhow!("could not determine home directory; set USERPROFILE"))?
             .join(".sshenc");
         let sock_path = sock_dir.join("agent.sock");
         let _unused = std::fs::create_dir_all(&sock_dir);
@@ -239,11 +239,10 @@ pub async fn run_agent(
     }
 
     // Clean up Unix socket on exit
-    let sock_path = dirs::home_dir()
-        .expect("could not determine home directory; set USERPROFILE")
-        .join(".sshenc")
-        .join("agent.sock");
-    let _unused = std::fs::remove_file(&sock_path);
+    if let Some(home) = dirs::home_dir() {
+        let sock_path = home.join(".sshenc").join("agent.sock");
+        let _unused = std::fs::remove_file(&sock_path);
+    }
 
     Ok(())
 }
@@ -256,6 +255,11 @@ fn signal_ready(path: Option<&Path>) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, b"ready\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -988,6 +992,62 @@ mod tests {
         assert!(conn_result.is_ok());
 
         writer.await.unwrap();
+    }
+
+    fn signal_ready_test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sshenc-signal-ready-test-{}-{name}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn signal_ready_creates_file() {
+        let path = signal_ready_test_path("creates-file");
+        let _unused = std::fs::remove_file(&path);
+
+        signal_ready(Some(&path)).unwrap();
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "ready\n");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn signal_ready_none_is_noop() {
+        assert!(signal_ready(None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_ready_sets_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = signal_ready_test_path("permissions");
+        let _unused = std::fs::remove_file(&path);
+
+        signal_ready(Some(&path)).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "signal_ready file should have 0o600 permissions"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn signal_ready_creates_parent_dirs() {
+        let base = signal_ready_test_path("nested-parent");
+        let _unused = std::fs::remove_dir_all(&base);
+        let path = base.join("nested").join("deep").join("ready");
+
+        signal_ready(Some(&path)).unwrap();
+        assert!(path.exists());
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[tokio::test]

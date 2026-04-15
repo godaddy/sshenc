@@ -90,23 +90,45 @@ pub fn require_home_dir() -> Result<PathBuf> {
 
 impl Default for Config {
     fn default() -> Self {
-        let home = dirs::home_dir().expect("could not determine home directory; set $HOME");
+        Self::new().unwrap_or_else(|_| {
+            // Fallback for environments without HOME set
+            let fallback = std::env::temp_dir().join("sshenc");
+            #[cfg(unix)]
+            let socket_path = fallback.join("agent.sock");
+            #[cfg(windows)]
+            let socket_path = PathBuf::from(r"\\.\pipe\openssh-ssh-agent");
+            Config {
+                socket_path,
+                allowed_labels: Vec::new(),
+                prompt_policy: PromptPolicy::default(),
+                pub_dir: fallback.join(".ssh"),
+                log_level: LogLevel::default(),
+                host_identities: Vec::new(),
+            }
+        })
+    }
+}
+
+impl Config {
+    /// Create a new `Config` with default values derived from the user's home directory.
+    ///
+    /// Returns an error if the home directory cannot be determined.
+    pub fn new() -> Result<Self> {
+        let home = require_home_dir()?;
         #[cfg(unix)]
         let socket_path = home.join(".sshenc").join("agent.sock");
         #[cfg(windows)]
         let socket_path = PathBuf::from(r"\\.\pipe\openssh-ssh-agent");
-        Config {
+        Ok(Config {
             socket_path,
             allowed_labels: Vec::new(),
             prompt_policy: PromptPolicy::default(),
             pub_dir: home.join(".ssh"),
             log_level: LogLevel::default(),
             host_identities: Vec::new(),
-        }
+        })
     }
-}
 
-impl Config {
     /// Returns the default config file path.
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
@@ -434,6 +456,34 @@ label = "gl"
         let re_serialized = toml::to_string_pretty(&config).unwrap();
         let re_parsed: Config = toml::from_str(&re_serialized).unwrap();
         assert_eq!(re_parsed.host_identities.len(), 2);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // Config::new() calls dirs::home_dir() -> FFI
+    fn config_new_succeeds_with_home_set() {
+        let config = Config::new();
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn config_default_does_not_panic() {
+        // This test documents that Default never panics, even if HOME is unset,
+        // because the implementation falls back to temp_dir.
+        let _config = Config::default();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // Config::new() calls dirs::home_dir() -> FFI
+    fn config_new_uses_home_for_paths() {
+        let config = Config::new().unwrap();
+        let home = dirs::home_dir().unwrap();
+        // pub_dir should be under the user's home directory
+        assert!(
+            config.pub_dir.starts_with(&home),
+            "pub_dir {:?} should start with home {:?}",
+            config.pub_dir,
+            home
+        );
     }
 
     #[test]

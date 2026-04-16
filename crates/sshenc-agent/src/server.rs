@@ -16,7 +16,7 @@ use sshenc_se::KeyBackend;
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::collections::VecDeque;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

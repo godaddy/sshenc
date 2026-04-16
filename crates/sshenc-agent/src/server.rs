@@ -34,7 +34,7 @@ pub async fn run_agent(
     prepare_socket_path(&socket_path)?;
 
     let backend: Arc<dyn KeyBackend> = Arc::new(
-        sshenc_se::SshencBackend::new(pub_dir)
+        sshenc_se::SshencBackend::new(pub_dir, false)
             .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 
@@ -136,7 +136,7 @@ pub async fn run_agent(
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let backend: Arc<dyn KeyBackend> = Arc::new(
-        sshenc_se::SshencBackend::new(pub_dir)
+        sshenc_se::SshencBackend::new(pub_dir, false)
             .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 

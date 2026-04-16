@@ -57,6 +57,7 @@ impl SshencBackend {
     /// Create a new sshenc backend with automatic platform detection.
     pub fn new(
         pub_dir: PathBuf,
+        force_keyring: bool,
     ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
         let keys_dir = sshenc_keys_dir();
         let backend = AppSigningBackend::init(StorageConfig {
@@ -65,6 +66,7 @@ impl SshencBackend {
             access_policy: AccessPolicy::None, // per-key policy, not global
             extra_bridge_paths: vec![],
             keys_dir: Some(keys_dir.clone()),
+            force_keyring,
         })?;
 
         Ok(Self {
@@ -272,6 +274,7 @@ mod tests {
             access_policy: AccessPolicy::None,
             extra_bridge_paths: vec![],
             keys_dir: None,
+            force_keyring: false,
         })
         .ok()?;
         Some(SshencBackend {

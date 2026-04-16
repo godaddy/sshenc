@@ -55,7 +55,7 @@ fn main() -> Result<()> {
 
     let pub_dir = Config::load_default()?.pub_dir;
 
-    let backend = sshenc_se::SshencBackend::new(pub_dir.clone())
+    let backend = sshenc_se::SshencBackend::new(pub_dir.clone(), false)
         .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?;
 
     let write_pub = if cli.no_pub_file {

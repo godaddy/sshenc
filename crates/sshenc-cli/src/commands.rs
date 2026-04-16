@@ -1195,7 +1195,7 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     }
 
     let ssh_dir = config.pub_dir.clone();
-    let backend = SshencBackend::new(ssh_dir.clone())
+    let backend = SshencBackend::new(ssh_dir.clone(), false)
         .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
     let invocation =
         build_ssh_wrapper_invocation(&backend, &config.socket_path, label, ssh_args, &ssh_dir)?;
@@ -1658,7 +1658,7 @@ fn ssh_sign_with_backend(
 pub fn ssh_sign(args: &[String]) -> Result<()> {
     let config = Config::load_default()?;
     let ssh_dir = config.pub_dir;
-    let backend = SshencBackend::new(ssh_dir)
+    let backend = SshencBackend::new(ssh_dir, false)
         .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
     ssh_sign_with_backend(&backend, args, config.prompt_policy)
 }

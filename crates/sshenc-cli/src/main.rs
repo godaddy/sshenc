@@ -28,6 +28,11 @@ mod wsl;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Force the system keyring backend (Linux only). Bypasses WSL bridge
+    /// and TPM detection. Requires an unlocked keyring session.
+    #[arg(long, global = true)]
+    keyring: bool,
 }
 
 #[derive(Subcommand)]
@@ -264,7 +269,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let pub_dir = Config::load_default()?.pub_dir;
 
-    let backend = sshenc_se::SshencBackend::new(pub_dir)
+    let backend = sshenc_se::SshencBackend::new(pub_dir, cli.keyring)
         .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?;
 
     run_command(cli.command, &backend)

@@ -248,6 +248,8 @@ enum OpensshAction {
 
 #[allow(clippy::print_stderr)]
 fn main() -> Result<()> {
+    enclaveapp_core::process::harden_process();
+
     // Intercept ssh-keygen-compatible mode before clap parsing.
     // Git calls us with -Y sign, -Y verify, -Y find-principals, etc.
     // We only handle -Y sign ourselves; everything else passes to real ssh-keygen.

@@ -14,12 +14,112 @@ use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::AccessPolicy;
 use sshenc_se::KeyBackend;
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(unix)]
+use std::time::Instant;
 use tokio::signal;
 
 #[cfg(unix)]
 use tokio::net::UnixListener;
+
+/// Verify the connecting process has the same UID as the agent.
+///
+/// Uses `getpeereid` on macOS/BSDs, falling back to `SO_PEERCRED` on Linux.
+/// Returns `false` (reject) if peer credentials cannot be determined.
+///
+/// # Safety rationale
+///
+/// The unsafe blocks call well-defined POSIX C functions (`getuid`,
+/// `getpeereid`, `getsockopt`) with correct argument types. The fd comes
+/// from an owned `UnixStream` so it is guaranteed valid for the duration
+/// of this call.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn verify_peer_uid(stream: &tokio::net::UnixStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    let our_uid = unsafe { libc::getuid() };
+    let fd = stream.as_raw_fd();
+
+    // getpeereid works on macOS and BSDs
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut peer_uid: libc::uid_t = 0;
+        let mut peer_gid: libc::gid_t = 0;
+        let result = unsafe { libc::getpeereid(fd, &mut peer_uid, &mut peer_gid) };
+        if result == 0 {
+            return peer_uid == our_uid;
+        }
+    }
+
+    // SO_PEERCRED on Linux
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                #[allow(trivial_casts, clippy::ptr_as_ptr)]
+                (&mut cred as *mut libc::ucred as *mut libc::c_void),
+                &mut len,
+            )
+        };
+        if result == 0 {
+            return cred.uid == our_uid;
+        }
+    }
+
+    // If we can't verify, reject
+    false
+}
+
+/// Simple sliding-window rate limiter for connection acceptance.
+///
+/// Tracks timestamps of recent connections and rejects when the count
+/// in the last second exceeds the configured maximum.
+#[cfg(unix)]
+struct RateLimiter {
+    window: VecDeque<Instant>,
+    max_per_second: usize,
+}
+
+#[cfg(unix)]
+impl RateLimiter {
+    fn new(max_per_second: usize) -> Self {
+        Self {
+            window: VecDeque::new(),
+            max_per_second,
+        }
+    }
+
+    /// Returns `true` if the connection is allowed, `false` if rate-limited.
+    fn check(&mut self) -> bool {
+        let now = Instant::now();
+        let one_second_ago = now - std::time::Duration::from_secs(1);
+
+        // Remove entries older than 1 second
+        while self.window.front().is_some_and(|t| *t < one_second_ago) {
+            self.window.pop_front();
+        }
+
+        if self.window.len() >= self.max_per_second {
+            return false;
+        }
+
+        self.window.push_back(now);
+        true
+    }
+}
+
+/// Default maximum connections per second before rate limiting kicks in.
+#[cfg(unix)]
+const DEFAULT_MAX_CONNECTIONS_PER_SECOND: usize = 50;
 
 /// Run the SSH agent server on a Unix socket.
 #[cfg(unix)]
@@ -53,11 +153,25 @@ pub async fn run_agent(
     println!("SSH_AUTH_SOCK={}", socket_path.display());
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
+    let mut rate_limiter = RateLimiter::new(DEFAULT_MAX_CONNECTIONS_PER_SECOND);
 
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
                 let (stream, _addr) = accept_result?;
+
+                if !verify_peer_uid(&stream) {
+                    tracing::warn!("rejected connection from different user");
+                    drop(stream);
+                    continue;
+                }
+
+                if !rate_limiter.check() {
+                    tracing::warn!("connection rate limited");
+                    drop(stream);
+                    continue;
+                }
+
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
                 tokio::spawn(async move {
@@ -1093,5 +1207,69 @@ mod tests {
             }
             other => panic!("expected SignResponse, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rate_limiter_allows_within_limit() {
+        let mut rl = RateLimiter::new(5);
+        for _ in 0..5 {
+            assert!(rl.check());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rate_limiter_rejects_over_limit() {
+        let mut rl = RateLimiter::new(3);
+        assert!(rl.check());
+        assert!(rl.check());
+        assert!(rl.check());
+        assert!(!rl.check());
+        assert!(!rl.check());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rate_limiter_allows_after_window_expires() {
+        let mut rl = RateLimiter::new(2);
+        assert!(rl.check());
+        assert!(rl.check());
+        assert!(!rl.check());
+
+        // Manually expire the window entries by replacing them with old timestamps
+        let old = Instant::now() - std::time::Duration::from_secs(2);
+        rl.window.clear();
+        rl.window.push_back(old);
+        rl.window.push_back(old);
+
+        // Now the limiter should allow new connections
+        assert!(rl.check());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rate_limiter_zero_max_rejects_all() {
+        let mut rl = RateLimiter::new(0);
+        assert!(!rl.check());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_verify_peer_uid_accepts_same_user() {
+        let socket_path = test_socket_path("peer-uid");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let connect = tokio::net::UnixStream::connect(&socket_path);
+        let accept = listener.accept();
+
+        let (connect_result, accept_result) = tokio::join!(connect, accept);
+        let _client = connect_result.unwrap();
+        let (server_stream, _addr) = accept_result.unwrap();
+
+        // Connection from our own process should be accepted
+        assert!(verify_peer_uid(&server_stream));
+
+        drop(std::fs::remove_file(&socket_path));
     }
 }

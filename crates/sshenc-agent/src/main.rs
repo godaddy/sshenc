@@ -135,6 +135,12 @@ fn wait_for_ready_file(path: &Path, timeout: Duration) -> Result<()> {
             if let Some(error) = trimmed.strip_prefix("error:") {
                 anyhow::bail!("{error}");
             }
+            // File exists but content is empty or not yet fully written —
+            // keep polling until the deadline.
+            if trimmed.is_empty() {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
             anyhow::bail!("invalid readiness marker in {}", path.display());
         }
 

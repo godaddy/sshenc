@@ -51,6 +51,8 @@ struct Cli {
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn main() -> Result<()> {
+    enclaveapp_core::process::harden_process();
+
     let cli = Cli::parse();
 
     let pub_dir = Config::load_default()?.pub_dir;

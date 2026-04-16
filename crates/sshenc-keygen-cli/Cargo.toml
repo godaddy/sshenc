@@ -12,6 +12,7 @@ name = "sshenc-keygen"
 path = "src/main.rs"
 
 [dependencies]
+enclaveapp-core = { workspace = true }
 sshenc-core = { workspace = true }
 sshenc-se = { workspace = true }
 clap = { workspace = true }

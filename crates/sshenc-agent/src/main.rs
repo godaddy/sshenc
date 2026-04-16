@@ -186,6 +186,8 @@ fn start_new_session() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    enclaveapp_core::process::harden_process();
+
     let cli = Cli::parse();
 
     // Daemonize MUST happen before any threads are spawned (e.g., tokio runtime),

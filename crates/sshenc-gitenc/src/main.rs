@@ -22,6 +22,8 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    enclaveapp_core::process::harden_process();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = parse_args(&args);
 

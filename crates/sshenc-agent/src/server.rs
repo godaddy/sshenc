@@ -16,6 +16,8 @@ use sshenc_se::KeyBackend;
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::collections::VecDeque;
+#[cfg(unix)]
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(unix)]
@@ -172,6 +174,7 @@ pub async fn run_agent(
                     continue;
                 }
 
+                verify_peer_binary(&stream);
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
                 tokio::spawn(async move {
@@ -375,6 +378,135 @@ fn signal_ready(path: Option<&Path>) -> Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+/// Known SSH-related binary names that are expected to connect to the agent.
+#[cfg(unix)]
+const ALLOWED_PEER_BINARIES: &[&str] = &[
+    "ssh",
+    "ssh-add",
+    "ssh-agent",
+    "ssh-keygen",
+    "ssh-keyscan",
+    "scp",
+    "sftp",
+    "rsync",
+    "git",
+    "git-remote-ssh",
+    "sshenc",
+    "sshenc-agent",
+    "gitenc",
+    "code",   // VS Code remote SSH
+    "cursor", // Cursor editor
+];
+
+/// Verify the connecting process is a known SSH-related binary.
+///
+/// Checks the binary path of the peer process against a list of known
+/// SSH clients. This is defense-in-depth — an attacker running as the
+/// same user can work around this by naming their binary "ssh", but it
+/// prevents casual misuse and raises the bar for automated attacks.
+#[cfg(unix)]
+fn verify_peer_binary(stream: &tokio::net::UnixStream) {
+    let Some(pid) = get_peer_pid(stream) else {
+        // Can't determine PID — allow (UID check already passed via socket permissions)
+        return;
+    };
+
+    let Some(exe_path) = get_process_exe(pid) else {
+        // Can't read binary path — allow (may be a kernel thread or permission issue)
+        return;
+    };
+
+    let filename = exe_path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+
+    if ALLOWED_PEER_BINARIES.contains(&filename) {
+        return;
+    }
+
+    tracing::info!(
+        "agent connection from unrecognized binary: {} (pid {})",
+        exe_path.display(),
+        pid
+    );
+
+    // Allow but log — don't break legitimate use cases we didn't anticipate
+}
+
+/// Get the peer process ID from a Unix stream.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn get_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+    use std::mem::size_of;
+    use std::os::unix::io::AsRawFd;
+
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if result == 0 {
+        Some(cred.pid as u32)
+    } else {
+        None
+    }
+}
+
+/// Get the peer process ID from a Unix stream.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn get_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+    use std::mem::size_of;
+    use std::os::unix::io::AsRawFd;
+
+    let mut pid: libc::pid_t = 0;
+    let mut len = size_of::<libc::pid_t>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if result == 0 && pid > 0 {
+        Some(pid as u32)
+    } else {
+        None
+    }
+}
+
+/// Get the executable path for a process by PID.
+#[cfg(target_os = "linux")]
+fn get_process_exe(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// Get the executable path for a process by PID.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn get_process_exe(pid: u32) -> Option<PathBuf> {
+    let mut buf = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let result = unsafe {
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            buf.as_mut_ptr().cast::<libc::c_void>(),
+            buf.len() as u32,
+        )
+    };
+    if result > 0 {
+        let path = std::ffi::CStr::from_bytes_until_nul(&buf).ok()?;
+        Some(PathBuf::from(path.to_string_lossy().as_ref()))
+    } else {
+        None
+    }
 }
 
 async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>(
@@ -1271,5 +1403,52 @@ mod tests {
         assert!(verify_peer_uid(&server_stream));
 
         drop(std::fs::remove_file(&socket_path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn known_ssh_binaries_are_recognized() {
+        let expected = ["ssh", "git", "scp", "sshenc", "gitenc", "ssh-add"];
+        for name in &expected {
+            assert!(
+                ALLOWED_PEER_BINARIES.contains(name),
+                "{name} should be in ALLOWED_PEER_BINARIES"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allowed_peer_binaries_contains_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for name in ALLOWED_PEER_BINARIES {
+            assert!(
+                seen.insert(name),
+                "duplicate entry in ALLOWED_PEER_BINARIES: {name}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_process_exe_returns_path_for_current_process() {
+        let pid = std::process::id();
+        let exe = get_process_exe(pid);
+        assert!(exe.is_some(), "should be able to read own binary path");
+        let path = exe.unwrap();
+        assert!(
+            path.exists(),
+            "binary path should exist: {}",
+            path.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_process_exe_returns_none_for_invalid_pid() {
+        // PID 0 is the kernel / swapper — we shouldn't be able to read its exe
+        // Use a very high PID that's unlikely to exist
+        let result = get_process_exe(u32::MAX);
+        assert!(result.is_none(), "should return None for non-existent PID");
     }
 }

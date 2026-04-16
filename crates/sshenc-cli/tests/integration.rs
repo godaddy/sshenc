@@ -192,9 +192,10 @@ fn version_contains_semver() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Version should match semver pattern: digits.digits.digits
+    // Version should match semver pattern: digits.digits.digits[-prerelease]
     let has_version = stdout.split_whitespace().any(|word| {
-        let parts: Vec<&str> = word.split('.').collect();
+        let base = word.split('-').next().unwrap_or("");
+        let parts: Vec<&str> = base.split('.').collect();
         parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
     });
     assert!(

@@ -520,13 +520,11 @@ mod tests {
 
     #[cfg(unix)]
     fn test_socket_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sshenc-agent-socket-test-{}-{name}",
-            std::process::id()
-        ));
+        // Keep path short — macOS SUN_LEN is 104 bytes.
+        let dir = std::env::temp_dir().join(format!("se-{}-{name}", std::process::id()));
         drop(std::fs::remove_dir_all(&dir));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("agent.sock")
+        dir.join("a.sock")
     }
 
     fn setup_backend() -> MockKeyBackend {

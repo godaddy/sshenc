@@ -382,7 +382,28 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
         Commands::Default { label } => commands::promote_to_default(&label),
         Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
         Commands::Completions { shell } => {
-            clap_complete::generate(shell, &mut Cli::command(), "sshenc", &mut std::io::stdout());
+            if shell == clap_complete::Shell::Zsh {
+                // Wrap zsh completions: guard all compdef calls so they only
+                // run when the completion system is loaded. Avoids "compdef:
+                // command not found" when users source completions before compinit.
+                let mut buf = Vec::new();
+                clap_complete::generate(shell, &mut Cli::command(), "sshenc", &mut buf);
+                let script = String::from_utf8_lossy(&buf);
+                let guarded = script
+                    .replace("#compdef sshenc\n", "# sshenc zsh completions\n")
+                    .replace(
+                        "compdef _sshenc sshenc",
+                        "if (( $+functions[compdef] )); then compdef _sshenc sshenc; fi",
+                    );
+                print!("{guarded}");
+            } else {
+                clap_complete::generate(
+                    shell,
+                    &mut Cli::command(),
+                    "sshenc",
+                    &mut std::io::stdout(),
+                );
+            }
             Ok(())
         }
     }

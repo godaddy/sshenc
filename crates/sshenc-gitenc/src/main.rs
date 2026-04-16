@@ -254,7 +254,7 @@ fn configure_repo_entries(
     configs.extend([
         ("gpg.format".to_string(), "ssh".to_string()),
         ("gpg.ssh.program".to_string(), sshenc_bin.to_string()),
-        ("user.signingkey".to_string(), signing_key),
+        ("user.signingkey".to_string(), signing_key.clone()),
         ("commit.gpgsign".to_string(), "true".to_string()),
     ]);
 
@@ -267,7 +267,35 @@ fn configure_repo_entries(
         }
     }
 
+    // Set up allowed signers file for local signature verification.
+    let allowed_signers_path = Path::new(home).join(".ssh").join("allowed_signers");
+    if let Some(email) = metadata.and_then(|m| m.git_email.as_deref()) {
+        if let Ok(pubkey) = std::fs::read_to_string(&signing_key) {
+            let entry = format!("{email} {}", pubkey.trim());
+            update_allowed_signers(&allowed_signers_path, email, &entry);
+        }
+    }
+    configs.push((
+        "gpg.ssh.allowedSignersFile".to_string(),
+        allowed_signers_path.display().to_string(),
+    ));
+
     Ok(configs)
+}
+
+/// Add or update an entry in the allowed signers file.
+/// Replaces any existing entry for the same email.
+fn update_allowed_signers(path: &Path, email: &str, entry: &str) {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<&str> = existing
+        .lines()
+        .filter(|line| !line.starts_with(email))
+        .collect();
+    lines.push(entry);
+    if let Some(parent) = path.parent() {
+        drop(std::fs::create_dir_all(parent));
+    }
+    drop(std::fs::write(path, lines.join("\n") + "\n"));
 }
 
 #[allow(clippy::print_stderr, clippy::exit)]

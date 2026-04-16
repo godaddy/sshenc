@@ -392,7 +392,7 @@ fn query_windows_service_start_mode(service: &str) -> Result<Option<WindowsServi
         .args(["qc", service])
         .output()?;
     if !output.status.success() {
-        bail!("failed to query Windows service configuration for {service}");
+        return Ok(None);
     }
     Ok(parse_sc_start_mode(&String::from_utf8_lossy(
         &output.stdout,
@@ -405,7 +405,7 @@ fn query_windows_service_running(service: &str) -> Result<Option<bool>> {
         .args(["query", service])
         .output()?;
     if !output.status.success() {
-        bail!("failed to query Windows service state for {service}");
+        return Ok(None);
     }
     Ok(parse_sc_running_state(&String::from_utf8_lossy(
         &output.stdout,
@@ -803,45 +803,33 @@ pub fn install() -> Result<()> {
     )?;
 
     #[cfg(windows)]
-    let install_state = match capture_windows_install_state(git_ssh_command.is_some()).and_then(
-        |state| {
+    let install_state =
+        match capture_windows_install_state(git_ssh_command.is_some()).and_then(|state| {
             save_windows_install_state(&state)?;
             Ok(state)
-        },
-    ) {
-        Ok(state) => {
-            if let Err(error) = apply_windows_actions(&windows_prepare_install_actions()) {
-                if matches!(
-                    install_result,
-                    sshenc_core::ssh_config::InstallResult::Installed
-                ) {
-                    let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
+        }) {
+            Ok(state) => match apply_windows_actions(&windows_prepare_install_actions()) {
+                Err(error) => {
+                    eprintln!(
+                        "Warning: could not manage Windows ssh-agent service: {error}\n\
+                         The ssh-agent service may conflict with sshenc. \
+                         Run as administrator to disable it, or stop it manually."
+                    );
+                    None
                 }
-                let rollback_result = restore_windows_state_with(
-                    &state,
-                    apply_windows_actions,
-                    remove_windows_install_state,
+                Ok(()) => {
+                    println!("Configured Windows ssh-agent service for sshenc.");
+                    Some(state)
+                }
+            },
+            Err(error) => {
+                eprintln!(
+                    "Warning: could not capture Windows service state: {error}\n\
+                 Continuing without managing the ssh-agent service."
                 );
-                return match rollback_result {
-                    Ok(()) => Err(error),
-                    Err(rollback_error) => Err(anyhow!(
-                        "{error}; additionally failed to restore previous Windows state: {rollback_error}"
-                    )),
-                };
+                None
             }
-            println!("Configured Windows ssh-agent service for sshenc.");
-            Some(state)
-        }
-        Err(error) => {
-            if matches!(
-                install_result,
-                sshenc_core::ssh_config::InstallResult::Installed
-            ) {
-                let _unused = sshenc_core::ssh_config::uninstall_block(&ssh_config_path);
-            }
-            return Err(error);
-        }
-    };
+        };
 
     let agent_status = match start_agent_with_binary(
         &RealAgentLauncher,
@@ -1014,7 +1002,7 @@ fn find_agent_binary() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("sshenc-agent not found in trusted install locations"))
 }
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn uninstall() -> Result<()> {
     let ssh_config_path = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
@@ -1039,12 +1027,21 @@ pub fn uninstall() -> Result<()> {
     #[cfg(windows)]
     {
         if let Some(state) = load_windows_install_state()? {
-            restore_windows_state_with(
+            match restore_windows_state_with(
                 &state,
                 apply_windows_actions,
                 remove_windows_install_state,
-            )?;
-            println!("Restored the previous Windows SSH environment and ssh-agent service state.");
+            ) {
+                Ok(()) => {
+                    println!("Restored the previous Windows SSH environment and ssh-agent service state.");
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Warning: could not fully restore Windows service state: {error}\n\
+                         You may need to re-enable the ssh-agent service manually."
+                    );
+                }
+            }
         } else {
             println!(
                 "No saved Windows integration state found; left SSH_AUTH_SOCK, GIT_SSH_COMMAND, and ssh-agent service unchanged."

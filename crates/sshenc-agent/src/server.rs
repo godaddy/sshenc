@@ -437,6 +437,7 @@ fn verify_peer_binary(stream: &tokio::net::UnixStream) {
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn get_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+    use std::mem::size_of;
     use std::os::unix::io::AsRawFd;
 
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
@@ -461,6 +462,7 @@ fn get_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn get_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+    use std::mem::size_of;
     use std::os::unix::io::AsRawFd;
 
     let mut pid: libc::pid_t = 0;

@@ -120,10 +120,6 @@ pub struct KeyMetadata {
     pub algorithm: KeyAlgorithm,
     /// Persisted access policy for signing.
     pub access_policy: AccessPolicy,
-    /// Whether user presence (biometric/password) is required for signing.
-    /// Derived from `access_policy` — never serialized independently.
-    #[serde(skip, default)]
-    pub requires_user_presence: bool,
     /// Optional comment for the SSH public key line.
     pub comment: Option<String>,
 }
@@ -136,9 +132,12 @@ impl KeyMetadata {
             app_tag,
             algorithm: KeyAlgorithm::EcdsaP256,
             access_policy,
-            requires_user_presence: access_policy != AccessPolicy::None,
             comment,
         }
+    }
+
+    pub fn requires_user_presence(&self) -> bool {
+        self.access_policy != AccessPolicy::None
     }
 }
 
@@ -298,7 +297,7 @@ mod tests {
         assert_eq!(meta.label, label);
         assert_eq!(meta.app_tag, "com.sshenc.key.test");
         assert!(matches!(meta.algorithm, KeyAlgorithm::EcdsaP256));
-        assert!(meta.requires_user_presence);
+        assert!(meta.requires_user_presence());
         assert_eq!(meta.access_policy, AccessPolicy::Any);
         assert_eq!(meta.comment.as_deref(), Some("comment"));
     }
@@ -307,7 +306,7 @@ mod tests {
     fn test_key_metadata_no_comment() {
         let label = KeyLabel::new("bare").unwrap();
         let meta = KeyMetadata::new(label, AccessPolicy::None, None);
-        assert!(!meta.requires_user_presence);
+        assert!(!meta.requires_user_presence());
         assert_eq!(meta.access_policy, AccessPolicy::None);
         assert!(meta.comment.is_none());
     }
@@ -316,7 +315,7 @@ mod tests {
     fn test_key_metadata_preserves_specific_access_policy() {
         let label = KeyLabel::new("bio").unwrap();
         let meta = KeyMetadata::new(label, AccessPolicy::BiometricOnly, None);
-        assert!(meta.requires_user_presence);
+        assert!(meta.requires_user_presence());
         assert_eq!(meta.access_policy, AccessPolicy::BiometricOnly);
     }
 

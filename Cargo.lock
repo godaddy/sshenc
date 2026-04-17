@@ -506,7 +506,6 @@ dependencies = [
  "base64 0.22.1",
  "enclaveapp-bridge",
  "enclaveapp-core",
- "enclaveapp-windows",
  "serde",
  "serde_json",
 ]
@@ -1356,7 +1355,6 @@ dependencies = [
  "clap",
  "dirs",
  "enclaveapp-core",
- "enclaveapp-windows",
  "libc",
  "serde",
  "serde_json",

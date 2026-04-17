@@ -529,7 +529,7 @@ pub fn list(backend: &dyn KeyBackend, json: bool) -> Result<()> {
         );
         println!(
             "  User presence: {}",
-            if key.metadata.requires_user_presence {
+            if key.metadata.requires_user_presence() {
                 "required"
             } else {
                 "not required"
@@ -572,7 +572,7 @@ pub fn inspect(backend: &dyn KeyBackend, label: &str, json: bool, show_pub: bool
     );
     println!(
         "  User presence:   {}",
-        if info.metadata.requires_user_presence {
+        if info.metadata.requires_user_presence() {
             "required"
         } else {
             "not required"
@@ -1921,7 +1921,7 @@ mod tests {
         )
         .unwrap();
         let info = backend.get("up-key").unwrap();
-        assert!(info.metadata.requires_user_presence);
+        assert!(info.metadata.requires_user_presence());
     }
 
     #[test]
@@ -2842,7 +2842,7 @@ HKEY_CURRENT_USER\Environment
         let info = backend.get("verify-props").unwrap();
         assert_eq!(info.metadata.label.as_str(), "verify-props");
         assert_eq!(info.metadata.comment.as_deref(), Some("user@machine"));
-        assert!(info.metadata.requires_user_presence);
+        assert!(info.metadata.requires_user_presence());
         assert_eq!(
             info.metadata.algorithm.ssh_key_type(),
             "ecdsa-sha2-nistp256"

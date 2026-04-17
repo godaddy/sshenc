@@ -9,6 +9,7 @@ members = [
     "crates/sshenc-pkcs11",
     "crates/sshenc-test-support",
     "crates/sshenc-gitenc",
+    "crates/sshenc-tpm-bridge",
 ]
 resolver = "2"
 
@@ -36,6 +37,7 @@ enclaveapp-linux-tpm = { path = "../crates/enclaveapp-linux-tpm", features = ["s
 enclaveapp-wsl = { path = "../crates/enclaveapp-wsl" }
 enclaveapp-app-storage = { path = "../crates/enclaveapp-app-storage" }
 enclaveapp-build-support = { path = "../crates/enclaveapp-build-support" }
+enclaveapp-tpm-bridge = { path = "../crates/enclaveapp-tpm-bridge" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

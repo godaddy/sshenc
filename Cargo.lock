@@ -500,6 +500,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-tpm-bridge"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "enclaveapp-bridge",
+ "enclaveapp-core",
+ "enclaveapp-windows",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "enclaveapp-windows"
 version = "0.1.0"
 dependencies = [
@@ -1469,6 +1481,14 @@ dependencies = [
  "rand 0.8.5",
  "sshenc-core",
  "sshenc-se",
+]
+
+[[package]]
+name = "sshenc-tpm-bridge"
+version = "0.0.0-dev"
+dependencies = [
+ "enclaveapp-core",
+ "enclaveapp-tpm-bridge",
 ]
 
 [[package]]

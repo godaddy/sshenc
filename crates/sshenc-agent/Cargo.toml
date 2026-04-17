@@ -35,6 +35,11 @@ libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 socket2 = { version = "0.6", features = ["all"] }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }
 
 [dev-dependencies]
 sshenc-test-support = { workspace = true }

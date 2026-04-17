@@ -243,6 +243,7 @@ fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 /// Git for Windows' MINGW SSH (which cannot use named pipes) can connect
 /// via `SSH_AUTH_SOCK`.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 pub async fn run_agent(
     pipe_name: String,
     pub_dir: PathBuf,
@@ -259,9 +260,17 @@ pub async fn run_agent(
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
 
-    let mut server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&pipe_name)?;
+    // Restrict the named pipe's DACL to the current user ("creator owner") and
+    // SYSTEM only. The default pipe DACL also grants Administrators and
+    // Authenticated Users read access, which widens the attacker surface for
+    // any local privilege-escalation that lands in another account.
+    let pipe_sa = PipeSecurityAttributes::restricted()
+        .map_err(|e| anyhow::anyhow!("building pipe security descriptor: {e}"))?;
+    let mut server = unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(true)
+            .create_with_security_attributes_raw(&pipe_name, pipe_sa.as_ptr())?
+    };
 
     signal_ready(ready_file)?;
     tracing::info!(pipe = %pipe_name, "agent listening on named pipe");
@@ -336,7 +345,10 @@ pub async fn run_agent(
             connect_result = server.connect() => {
                 connect_result?;
                 let stream = server;
-                server = ServerOptions::new().create(&pipe_name)?;
+                server = unsafe {
+                    ServerOptions::new()
+                        .create_with_security_attributes_raw(&pipe_name, pipe_sa.as_ptr())?
+                };
 
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
@@ -747,6 +759,97 @@ fn handle_request(
         AgentRequest::Unknown(msg_type) => {
             tracing::debug!(msg_type, "unknown message type");
             Ok(AgentResponse::Failure)
+        }
+    }
+}
+
+/// Windows named-pipe security-attributes holder.
+///
+/// Owns the SECURITY_DESCRIPTOR returned by
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW` and the
+/// SECURITY_ATTRIBUTES struct that references it. Both must outlive the
+/// `CreateNamedPipeW` call that consumes the pointer; `Drop` calls
+/// `LocalFree` to release the descriptor.
+#[cfg(windows)]
+struct PipeSecurityAttributes {
+    attrs: windows::Win32::Security::SECURITY_ATTRIBUTES,
+    descriptor: windows::Win32::Security::PSECURITY_DESCRIPTOR,
+}
+
+#[cfg(windows)]
+impl PipeSecurityAttributes {
+    /// Build a DACL that grants full control to the pipe's creator-owner
+    /// and to SYSTEM, and denies everyone else. Protected (`P`) so parent
+    /// inheritance can't widen it.
+    ///
+    /// SDDL breakdown:
+    ///   D:P              Discretionary ACL, protected
+    ///   (A;;GA;;;OW)     Allow, Generic-All, Creator-Owner
+    ///   (A;;GA;;;SY)     Allow, Generic-All, Local-System
+    #[allow(unsafe_code)]
+    fn restricted() -> Result<Self> {
+        use std::ptr;
+        use windows::core::PCWSTR;
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+        use std::mem::size_of;
+
+        let sddl: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)\0".encode_utf16().collect();
+        let mut descriptor = PSECURITY_DESCRIPTOR(ptr::null_mut());
+
+        // Safety: SDDL is a NUL-terminated UTF-16 buffer; we pass a
+        // valid PSECURITY_DESCRIPTOR out-pointer and no size-out (None).
+        // The returned descriptor is owned by the caller and freed in
+        // Drop via LocalFree.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("ConvertStringSecurityDescriptor failed: {e}"))?;
+        }
+
+        let attrs = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: false.into(),
+        };
+
+        Ok(Self { attrs, descriptor })
+    }
+
+    /// Returns a pointer suitable for Tokio's
+    /// `ServerOptions::create_with_security_attributes_raw`. The
+    /// `PipeSecurityAttributes` must outlive the call.
+    fn as_ptr(&self) -> *mut std::ffi::c_void {
+        // Cast away the immutable borrow to a raw pointer. The
+        // Win32 API doesn't actually mutate the SECURITY_ATTRIBUTES
+        // struct, but the signature is historically *mut.
+        (&raw const self.attrs)
+            .cast_mut()
+            .cast::<std::ffi::c_void>()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PipeSecurityAttributes {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+
+        if !self.descriptor.0.is_null() {
+            // Safety: descriptor was allocated by
+            // ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            // which documents LocalFree as the correct release call.
+            // LocalFree's HLOCAL return (NULL on success) is
+            // discarded — no handle to release.
+            let _ = unsafe { LocalFree(HLOCAL(self.descriptor.0)) };
+            self.descriptor.0 = std::ptr::null_mut();
         }
     }
 }

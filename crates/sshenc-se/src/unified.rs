@@ -128,8 +128,16 @@ impl KeyBackend for SshencBackend {
     fn generate(&self, opts: &KeyGenOptions) -> Result<KeyInfo> {
         let label_str = opts.label.as_str();
 
-        // Check for duplicates
-        if self.key_manager().public_key(label_str).is_ok() {
+        // Check for duplicates. Must use `key_exists`, not
+        // `public_key().is_ok()`: on the WSL bridge, `public_key` invokes
+        // `init_signing` which creates the key as a side effect, so using
+        // it for the check would both falsely report "duplicate" and
+        // leave behind a TPM key.
+        if self
+            .key_manager()
+            .key_exists(label_str)
+            .map_err(|e| map_err("key_exists", e))?
+        {
             return Err(Error::DuplicateLabel {
                 label: label_str.to_string(),
             });

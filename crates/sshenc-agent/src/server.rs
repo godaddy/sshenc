@@ -842,7 +842,7 @@ impl Drop for PipeSecurityAttributes {
             // ConvertStringSecurityDescriptorToSecurityDescriptorW,
             // which documents LocalFree as the correct release call.
             unsafe {
-                drop(LocalFree(Some(HLOCAL(self.descriptor.0))));
+                drop(LocalFree(HLOCAL(self.descriptor.0)));
             }
             self.descriptor.0 = std::ptr::null_mut();
         }

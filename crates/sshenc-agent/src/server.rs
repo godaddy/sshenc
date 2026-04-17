@@ -243,6 +243,7 @@ fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 /// Git for Windows' MINGW SSH (which cannot use named pipes) can connect
 /// via `SSH_AUTH_SOCK`.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 pub async fn run_agent(
     pipe_name: String,
     pub_dir: PathBuf,
@@ -794,6 +795,8 @@ impl PipeSecurityAttributes {
         };
         use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
+        use std::mem::size_of;
+
         let sddl: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)\0".encode_utf16().collect();
         let mut descriptor = PSECURITY_DESCRIPTOR(ptr::null_mut());
 
@@ -805,14 +808,14 @@ impl PipeSecurityAttributes {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 PCWSTR(sddl.as_ptr()),
                 SDDL_REVISION_1,
-                &mut descriptor as *mut PSECURITY_DESCRIPTOR,
+                &mut descriptor,
                 None,
             )
             .map_err(|e| anyhow::anyhow!("ConvertStringSecurityDescriptor failed: {e}"))?;
         }
 
         let attrs = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
             lpSecurityDescriptor: descriptor.0,
             bInheritHandle: false.into(),
         };
@@ -827,7 +830,7 @@ impl PipeSecurityAttributes {
         // Cast away the immutable borrow to a raw pointer. The
         // Win32 API doesn't actually mutate the SECURITY_ATTRIBUTES
         // struct, but the signature is historically *mut.
-        &self.attrs as *const _ as *mut std::ffi::c_void
+        (&raw const self.attrs).cast_mut().cast::<std::ffi::c_void>()
     }
 }
 
@@ -841,9 +844,9 @@ impl Drop for PipeSecurityAttributes {
             // Safety: descriptor was allocated by
             // ConvertStringSecurityDescriptorToSecurityDescriptorW,
             // which documents LocalFree as the correct release call.
-            unsafe {
-                drop(LocalFree(HLOCAL(self.descriptor.0)));
-            }
+            // LocalFree's HLOCAL return (NULL on success) is
+            // discarded — no handle to release.
+            let _ = unsafe { LocalFree(HLOCAL(self.descriptor.0)) };
             self.descriptor.0 = std::ptr::null_mut();
         }
     }

@@ -386,21 +386,25 @@ that path to redirect the "ready" write.
   practical risk is limited. A future hardening could use `O_NOFOLLOW` or
   a user-private temp dir.
 
-## Threat: MSI Uninstall Blocking (`Return="check"`)
+## Threat: MSI Uninstall Resilience
 
-**Scenario**: The Windows installer's uninstall custom action currently
-uses `Return="check"`. If `sshenc uninstall` exits non-zero (agent still
-running, file locked, registry error), the entire MSI uninstall fails and
-rolls back, leaving the user unable to remove the software.
+**Scenario**: If `sshenc uninstall` exited non-zero during MSI removal
+(agent still running, file locked, registry error), a pedantic
+`Return="check"` custom action would fail the entire MSI uninstall and
+roll it back — leaving the user unable to remove the software.
 
 **Mitigations**:
-- `sshenc uninstall` is designed to be resilient, but failure modes are
-  not fully characterised.
+- The uninstall custom action in `installer/sshenc.wxs` uses
+  `Return="ignore"` so MSI uninstall always completes even if
+  `sshenc uninstall` reports an error.
+- The install custom action uses `Return="check"` so users learn about
+  installer failures up front.
 
 **Residual risk**:
-- Tracked as a known installer hardening item: switch to `Return="ignore"`
-  on uninstall so users can always remove the software, and make `sshenc
-  uninstall` best-effort internally.
+- `sshenc uninstall` is designed to be resilient, but residual non-fatal
+  errors may leave stale registry / service state. The `Return="ignore"`
+  posture is deliberate: a broken installer that cannot be removed is
+  worse than stale uninstall artefacts.
 
 ## Out of Scope
 

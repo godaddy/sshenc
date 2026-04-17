@@ -254,8 +254,20 @@ fn windows_restore_actions(state: &WindowsInstallState) -> Vec<WindowsAction> {
 
 #[cfg(windows)]
 fn apply_windows_actions(actions: &[WindowsAction]) -> Result<()> {
+    // sc.exe/reg.exe/schtasks.exe are normally instant, but sc.exe has been
+    // known to hang on wedged services. Cap at 30s so install/uninstall can
+    // never block the terminal indefinitely.
     fn command_output(program: &str, args: &[&str]) -> Result<std::process::Output> {
-        Ok(std::process::Command::new(program).args(args).output()?)
+        use enclaveapp_core::timeout::{run_with_timeout, TimeoutResult};
+        use std::time::Duration;
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args);
+        match run_with_timeout(cmd, Duration::from_secs(30))? {
+            TimeoutResult::Completed(o) => Ok(o),
+            TimeoutResult::TimedOut => Err(anyhow!(
+                "`{program}` did not respond within 30s — service or registry may be wedged"
+            )),
+        }
     }
 
     fn output_text(output: &std::process::Output) -> String {
@@ -374,10 +386,20 @@ fn parse_reg_query_value(text: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
+fn run_bounded(program: &str, args: &[&str]) -> Result<std::process::Output> {
+    use enclaveapp_core::timeout::{run_with_timeout, TimeoutResult};
+    use std::time::Duration;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    match run_with_timeout(cmd, Duration::from_secs(15))? {
+        TimeoutResult::Completed(o) => Ok(o),
+        TimeoutResult::TimedOut => Err(anyhow!("`{program}` did not respond within 15s")),
+    }
+}
+
+#[cfg(windows)]
 fn query_windows_user_env_var(key: &str) -> Result<Option<String>> {
-    let output = std::process::Command::new("reg")
-        .args(["query", "HKCU\\Environment", "/v", key])
-        .output()?;
+    let output = run_bounded("reg", &["query", "HKCU\\Environment", "/v", key])?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -388,9 +410,7 @@ fn query_windows_user_env_var(key: &str) -> Result<Option<String>> {
 
 #[cfg(windows)]
 fn query_windows_service_start_mode(service: &str) -> Result<Option<WindowsServiceStartMode>> {
-    let output = std::process::Command::new("sc")
-        .args(["qc", service])
-        .output()?;
+    let output = run_bounded("sc", &["qc", service])?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -401,9 +421,7 @@ fn query_windows_service_start_mode(service: &str) -> Result<Option<WindowsServi
 
 #[cfg(windows)]
 fn query_windows_service_running(service: &str) -> Result<Option<bool>> {
-    let output = std::process::Command::new("sc")
-        .args(["query", service])
-        .output()?;
+    let output = run_bounded("sc", &["query", service])?;
     if !output.status.success() {
         return Ok(None);
     }

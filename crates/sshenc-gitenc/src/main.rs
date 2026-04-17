@@ -286,18 +286,32 @@ fn configure_repo_entries(
 }
 
 /// Add or update an entry in the allowed signers file.
-/// Replaces any existing entry for the same email.
+/// Replaces any existing entry whose principals list names this email
+/// exactly. Lines whose first field `starts_with(email)` but is not an
+/// exact principal match (e.g. `alice@x.com.attacker ssh-ed25519 …`)
+/// are preserved, which is the safe behavior for an authentication
+/// trust file.
 fn update_allowed_signers(path: &Path, email: &str, entry: &str) {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut lines: Vec<&str> = existing
         .lines()
-        .filter(|line| !line.starts_with(email))
+        .filter(|line| !line_principals_contain(line, email))
         .collect();
     lines.push(entry);
     if let Some(parent) = path.parent() {
         drop(std::fs::create_dir_all(parent));
     }
     drop(std::fs::write(path, lines.join("\n") + "\n"));
+}
+
+/// Return true if the first whitespace-separated field on the line (the
+/// principals field per ssh-keygen(1) ALLOWED SIGNERS) contains an
+/// exact match for `email` among its comma-separated entries.
+fn line_principals_contain(line: &str, email: &str) -> bool {
+    let Some(first_field) = line.split_whitespace().next() else {
+        return false;
+    };
+    first_field.split(',').any(|principal| principal == email)
 }
 
 #[allow(clippy::print_stderr, clippy::exit)]
@@ -674,5 +688,97 @@ mod tests {
         let err = configure_repo_entries(Some("work"), "/tmp/home", "/tmp/sshenc", Some(&metadata))
             .unwrap_err();
         assert!(err.contains("does not have a recorded public key file"));
+    }
+
+    #[test]
+    fn line_principals_contain_exact_match() {
+        assert!(line_principals_contain(
+            "alice@example.com ssh-ed25519 AAAAC3...",
+            "alice@example.com"
+        ));
+    }
+
+    #[test]
+    fn line_principals_contain_matches_comma_separated() {
+        assert!(line_principals_contain(
+            "alice@example.com,alice@work.com ssh-ed25519 AAAAC3...",
+            "alice@work.com"
+        ));
+    }
+
+    #[test]
+    fn line_principals_contain_does_not_prefix_match() {
+        // Previously starts_with(email) would have matched this — the
+        // attacker could lose their entry when the real user rotated.
+        // Exact-match semantics keep the attacker's line intact.
+        assert!(!line_principals_contain(
+            "alice@example.com.attacker ssh-ed25519 AAAAC3...",
+            "alice@example.com"
+        ));
+    }
+
+    #[test]
+    fn line_principals_contain_ignores_comments_and_blank_lines() {
+        assert!(!line_principals_contain(
+            "# alice@example.com is the CEO",
+            "alice@example.com"
+        ));
+        assert!(!line_principals_contain("", "alice@example.com"));
+    }
+
+    #[test]
+    fn line_principals_contain_ignores_matching_keytype_field() {
+        // The email must appear in the first field (principals), not
+        // later fields such as key type / base64 / comment.
+        assert!(!line_principals_contain(
+            "bob@example.com ssh-ed25519 alice@example.com",
+            "alice@example.com"
+        ));
+    }
+
+    #[test]
+    fn update_allowed_signers_replaces_only_exact_match() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-allowed-signers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("allowed_signers");
+
+        let initial = concat!(
+            "alice@example.com ssh-ed25519 AAAA-old-key\n",
+            "alice@example.com.attacker ssh-ed25519 AAAA-attacker-key\n",
+            "alice@example.com,alice@work.com ssh-ed25519 AAAA-multi-principal-key\n",
+            "# alice@example.com is not actually here\n",
+            "bob@example.com ssh-ed25519 AAAA-bob-key\n",
+        );
+        std::fs::write(&path, initial).unwrap();
+
+        update_allowed_signers(
+            &path,
+            "alice@example.com",
+            "alice@example.com ssh-ed25519 AAAA-new-key",
+        );
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        // Old alice exact-match line is gone.
+        assert!(!result.contains("AAAA-old-key"));
+        // Attacker prefix-collision line is preserved.
+        assert!(result.contains("AAAA-attacker-key"));
+        // Multi-principal line containing alice@example.com IS removed —
+        // we matched alice@example.com exactly within the principals.
+        assert!(!result.contains("AAAA-multi-principal-key"));
+        // Unrelated bob line is preserved.
+        assert!(result.contains("AAAA-bob-key"));
+        // Comment line is preserved.
+        assert!(result.contains("# alice@example.com is not actually here"));
+        // New entry is appended.
+        assert!(result.contains("AAAA-new-key"));
+
+        drop(std::fs::remove_dir_all(&dir));
     }
 }

@@ -835,7 +835,7 @@ impl PipeSecurityAttributes {
 impl Drop for PipeSecurityAttributes {
     #[allow(unsafe_code)]
     fn drop(&mut self) {
-        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
 
         if !self.descriptor.0.is_null() {
             // Safety: descriptor was allocated by

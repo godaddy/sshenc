@@ -383,11 +383,43 @@ fn signal_ready(path: Option<&Path>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, b"ready\n")?;
+    // Use create-new + O_NOFOLLOW so a pre-planted symlink at `path`
+    // (shared `/tmp`, multi-user system, etc.) cannot redirect the
+    // "ready" write to an attacker-chosen target. If the path already
+    // exists the open fails with EEXIST; if it's a symlink the open
+    // fails with ELOOP. Either way we surface the error rather than
+    // silently following the link. See sshenc THREAT_MODEL.md
+    // "Ready-File Symlink in $TMPDIR".
+    //
+    // The parent process (`daemonize` in `main.rs`) is responsible
+    // for unlinking the ready-file path before and after spawning
+    // the agent, so we always start from a clean slate here and can
+    // safely demand create_new semantics.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(b"ready\n")?;
+        file.sync_all()?;
+        // `mode(0o600)` at open time is load-bearing on umask-0000 systems;
+        // the explicit set_permissions is belt-and-suspenders for the
+        // umask-permissive case.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(b"ready\n")?;
     }
     Ok(())
 }
@@ -1383,6 +1415,43 @@ mod tests {
         );
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_ready_refuses_preplanted_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let path = signal_ready_test_path("symlink-refused");
+        let decoy = signal_ready_test_path("symlink-refused-target");
+        let _unused = std::fs::remove_file(&path);
+        let _unused = std::fs::remove_file(&decoy);
+
+        // Pre-plant a symlink at `path` pointing at a decoy file an
+        // attacker wants us to write to. The decoy need not exist —
+        // O_NOFOLLOW refuses the open before we ever dereference.
+        symlink(&decoy, &path).unwrap();
+
+        let err = signal_ready(Some(&path)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Too many levels of symbolic links")
+                || msg.contains("symbolic link")
+                || msg.contains("ELOOP")
+                || msg.contains("File exists")
+                || msg.contains("EEXIST")
+                || msg.to_lowercase().contains("symlink"),
+            "unexpected error message for symlink refusal: {msg}"
+        );
+
+        // The decoy file must NOT have been created.
+        assert!(
+            !decoy.exists(),
+            "signal_ready followed the symlink — decoy was written"
+        );
+
+        let _unused = std::fs::remove_file(&path);
+        let _unused = std::fs::remove_file(&decoy);
     }
 
     #[test]

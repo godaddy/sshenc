@@ -794,9 +794,7 @@ impl PipeSecurityAttributes {
         };
         use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
-        let sddl: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)\0"
-            .encode_utf16()
-            .collect();
+        let sddl: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)\0".encode_utf16().collect();
         let mut descriptor = PSECURITY_DESCRIPTOR(ptr::null_mut());
 
         // Safety: SDDL is a NUL-terminated UTF-16 buffer; we pass a

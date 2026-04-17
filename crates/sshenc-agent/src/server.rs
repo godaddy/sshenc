@@ -830,7 +830,9 @@ impl PipeSecurityAttributes {
         // Cast away the immutable borrow to a raw pointer. The
         // Win32 API doesn't actually mutate the SECURITY_ATTRIBUTES
         // struct, but the signature is historically *mut.
-        (&raw const self.attrs).cast_mut().cast::<std::ffi::c_void>()
+        (&raw const self.attrs)
+            .cast_mut()
+            .cast::<std::ffi::c_void>()
     }
 }
 

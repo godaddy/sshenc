@@ -6,7 +6,7 @@
 //! When `sshenc install` runs on Windows, it detects installed WSL distros
 //! and configures them for sshenc via the shared enclaveapp-wsl library.
 
-#![cfg(target_os = "windows")]
+#![cfg(windows)]
 
 use enclaveapp_wsl::install::WslInstallConfig;
 

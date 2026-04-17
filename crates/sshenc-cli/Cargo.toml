@@ -33,7 +33,7 @@ sshenc-agent-proto = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 enclaveapp-apple = { workspace = true }
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(windows)'.dependencies]
 enclaveapp-windows = { workspace = true }
 enclaveapp-wsl = { workspace = true }
 

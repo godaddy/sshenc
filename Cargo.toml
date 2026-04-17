@@ -29,15 +29,15 @@ sshenc-agent = { path = "crates/sshenc-agent" }
 sshenc-test-support = { path = "crates/sshenc-test-support" }
 
 # libenclaveapp (shared hardware-backed key management)
-enclaveapp-core = { path = "../crates/enclaveapp-core" }
-enclaveapp-apple = { path = "../crates/enclaveapp-apple", features = ["signing"] }
-enclaveapp-windows = { path = "../crates/enclaveapp-windows", features = ["signing"] }
-enclaveapp-keyring = { path = "../crates/enclaveapp-keyring", features = ["signing"] }
-enclaveapp-linux-tpm = { path = "../crates/enclaveapp-linux-tpm", features = ["signing"] }
-enclaveapp-wsl = { path = "../crates/enclaveapp-wsl" }
-enclaveapp-app-storage = { path = "../crates/enclaveapp-app-storage" }
-enclaveapp-build-support = { path = "../crates/enclaveapp-build-support" }
-enclaveapp-tpm-bridge = { path = "../crates/enclaveapp-tpm-bridge" }
+enclaveapp-core = { path = "../libenclaveapp/crates/enclaveapp-core" }
+enclaveapp-apple = { path = "../libenclaveapp/crates/enclaveapp-apple", features = ["signing"] }
+enclaveapp-windows = { path = "../libenclaveapp/crates/enclaveapp-windows", features = ["signing"] }
+enclaveapp-keyring = { path = "../libenclaveapp/crates/enclaveapp-keyring", features = ["signing"] }
+enclaveapp-linux-tpm = { path = "../libenclaveapp/crates/enclaveapp-linux-tpm", features = ["signing"] }
+enclaveapp-wsl = { path = "../libenclaveapp/crates/enclaveapp-wsl" }
+enclaveapp-app-storage = { path = "../libenclaveapp/crates/enclaveapp-app-storage" }
+enclaveapp-build-support = { path = "../libenclaveapp/crates/enclaveapp-build-support" }
+enclaveapp-tpm-bridge = { path = "../libenclaveapp/crates/enclaveapp-tpm-bridge" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

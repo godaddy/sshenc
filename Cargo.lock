@@ -506,6 +506,7 @@ dependencies = [
  "base64 0.22.1",
  "enclaveapp-bridge",
  "enclaveapp-core",
+ "enclaveapp-windows",
  "serde",
  "serde_json",
 ]

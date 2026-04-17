@@ -8,18 +8,19 @@ Private key material never leaves the hardware security module.
 
 ## Architecture
 
-Rust workspace with 9 crates under `crates/`:
+Rust workspace with 10 crates under `crates/`:
 
 | Crate | Purpose |
 |---|---|
-| `sshenc-core` | Domain models, SSH public key encoding, fingerprints, config |
+| `sshenc-core` | Domain models, SSH public key encoding, fingerprints, config, trusted binary discovery, transactional backup/rollback |
 | `sshenc-se` | Hardware key backend via `KeyBackend` trait (macOS, Windows, Linux) |
 | `sshenc-agent-proto` | SSH agent protocol: message parsing, DER-to-SSH signature conversion |
 | `sshenc-agent` | Async SSH agent daemon (tokio), Unix socket / named pipe server |
-| `sshenc-cli` | Main CLI (`sshenc`): keygen, list, inspect, delete, export-pub, agent, install |
+| `sshenc-cli` | Main CLI (`sshenc`): keygen, list, inspect, delete, export-pub, agent, config, openssh, install, uninstall, identity, default, ssh, completions |
 | `sshenc-keygen-cli` | Standalone `sshenc-keygen` binary |
 | `sshenc-gitenc` | `gitenc` binary for git+SSH with per-key identity selection and commit signing |
 | `sshenc-pkcs11` | PKCS#11 provider (cdylib) for agent auto-start via SSH's PKCS11Provider |
+| `sshenc-tpm-bridge` | Windows-side JSON-RPC bridge that serves TPM operations to the WSL agent |
 | `sshenc-test-support` | Mock key backend for testing without hardware |
 
 ### Platform Backends
@@ -33,8 +34,8 @@ the `signing` feature of each platform crate:
 | macOS | `enclaveapp-apple` | Secure Enclave (CryptoKit) |
 | Windows | `enclaveapp-windows` | TPM 2.0 (CNG) |
 | Linux | `enclaveapp-linux-tpm` | TPM 2.0 (tss-esapi) |
-| Linux (no TPM) | `enclaveapp-software` | Software P-256 (fallback) |
-| WSL | `enclaveapp-wsl` + bridge | Windows TPM via socat/npiperelay |
+| Linux (no TPM) | `enclaveapp-software` + `enclaveapp-keyring` | Software P-256 wrapped by an OS keyring key |
+| WSL | `enclaveapp-wsl` + `sshenc-tpm-bridge` | Windows TPM via JSON-RPC over stdio |
 
 The `KeyBackend` trait in `sshenc-se` wraps libenclaveapp's `EnclaveSigner`
 into sshenc's domain model. Platform selection happens at runtime based on
@@ -62,8 +63,22 @@ implements the SSH agent protocol for identity enumeration and signing. The
 PKCS#11 provider acts as a lightweight launcher -- if SSH loads it and the
 agent isn't running, it starts the agent automatically.
 
+On Windows the named pipe is created with an explicit DACL
+(`D:P(A;;GA;;;OW)(A;;GA;;;SY)`) via
+`ConvertStringSecurityDescriptorToSecurityDescriptorW` so that only the pipe
+owner and SYSTEM can open it. On Unix the socket directory is restricted to
+`0700` and the socket to `0600`.
+
 `sshenc install` configures `~/.ssh/config` with `IdentityAgent` and
-`PKCS11Provider` directives.
+`PKCS11Provider` directives. `sshenc uninstall` removes them.
+
+### WSL Bridge
+
+On WSL, the agent cannot talk to the Windows TPM directly. Instead, the Linux
+side spawns `sshenc-tpm-bridge.exe` (installed on the Windows host) and
+communicates with it over stdin/stdout using the JSON-RPC protocol defined in
+`enclaveapp-tpm-bridge`. The bridge binary is discovered via a fixed allowlist
+of installation directories (no `$PATH` lookup).
 
 ### Git Integration
 
@@ -89,9 +104,9 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 | macOS (Apple Silicon / T2) | Full support | CryptoKit Secure Enclave |
 | Windows (native) | Full support | TPM 2.0 via CNG, named pipe agent |
 | Windows (Git Bash) | Full support | GIT_SSH_COMMAND bypass for MINGW SSH |
-| WSL | Full support | socat + npiperelay bridge to Windows agent |
+| WSL | Full support | JSON-RPC bridge (`sshenc-tpm-bridge.exe`) to Windows TPM |
 | Linux (with TPM) | Full support | TPM 2.0 via tss-esapi |
-| Linux (no TPM) | Software fallback | P-256 keys on disk, one-time warning |
+| Linux (no TPM) | Software fallback | P-256 keys on disk, wrapped by OS keyring key via `enclaveapp-keyring` |
 
 ## Binaries
 
@@ -100,3 +115,4 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 3. `sshenc-agent` -- ssh-agent-compatible daemon
 4. `gitenc` -- git wrapper with per-key identity and commit signing
 5. `libsshenc_pkcs11.dylib` -- PKCS#11 provider (agent auto-start)
+6. `sshenc-tpm-bridge` -- Windows-side JSON-RPC bridge invoked by the WSL agent

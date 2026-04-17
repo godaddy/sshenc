@@ -242,12 +242,15 @@ descriptor) can accept SSH clients' signing requests.
   before starting `sshenc-agent`, so clients connect to `sshenc`.
 - `sshenc-agent` uses `ServerOptions::first_pipe_instance(true)` and
   refuses to attach to an existing pipe.
+- The named pipe is created with an explicit DACL
+  (`ConvertStringSecurityDescriptorToSecurityDescriptorW`) that grants
+  full control only to the creator-owner (the current user) and
+  `SYSTEM`, cutting off `Administrators` and `Everyone` who would
+  otherwise have default read/write access (`sshenc-agent/src/server.rs`
+  `SecurityDescriptor`).
 - The CLI surfaces an actionable error when the pipe is in use.
 
 **Residual risk**:
-- The named pipe is currently created with the default security
-  descriptor. A best-practice hardening is an explicit DACL that grants
-  only the owner user and `SYSTEM`; that work is not yet in place.
 - An attacker with admin rights can always create the pipe first; admin
   rights on Windows already implies full control over the TPM.
 
@@ -263,20 +266,31 @@ fields.
   the hardware's enforcement — Touch ID / Windows Hello still fires on
   sign regardless of what the metadata file claims.
 - Metadata files are written 0600 via `atomic_write`.
+- On the Linux keyring / software backend, `.meta` now has an HMAC
+  sidecar `<label>.meta.hmac` generated at key-creation time. The
+  HMAC key is a random per-app 32-byte value stored in the system
+  keyring (`enclaveapp-keyring::meta_hmac_key`). `enclaveapp-app-storage`
+  verifies the sidecar on load and rejects HMAC-mismatched reads with
+  a hard error (`meta_hmac_verify`). An attacker who rewrites `.meta`
+  without also having keyring access is caught.
 
 **Residual risk**:
 - UI and library-level policy checks (`sshenc list`, `sshenc inspect`,
-  `PromptPolicy::KeyDefault`) trust the metadata file. An attacker can
-  **mislead** the user into believing a key is unprotected (or vice
-  versa).
-- On the Linux software backend there is no hardware enforcement. Metadata
-  tamper there is a full downgrade: the key signs without any prompt.
+  `PromptPolicy::KeyDefault`) still trust the metadata file on
+  hardware backends, where the sidecar is not written (hardware-side
+  enforcement makes the check redundant). An attacker who rewrites
+  `.meta` on a hardware backend can still **mislead** the user into
+  believing a key is unprotected — but signing will still prompt.
+- On the keyring / software backend, a same-UID attacker who also has
+  keyring access can still rewrite both `.meta` and the sidecar. This
+  is the same threshold as decrypting the key material itself, so no
+  net loss of protection.
 - The migration from the legacy `biometric: bool` field to `AccessPolicy`
   is handled by compatibility code; a missing `access_policy` field is
   treated per the legacy bool. A same-UID attacker who strips the new
   field from `.meta` can rely on the legacy-compat path behaving
   intuitively but should not gain anything the hardware does not already
-  allow.
+  allow (and on the keyring backend the HMAC check catches the edit).
 
 ## Threat: `SSH_AUTH_SOCK` / `IdentityAgent` Trust
 
@@ -377,14 +391,28 @@ that path to redirect the "ready" write.
 **Mitigations**:
 - The filename includes PID and nanosecond timestamp so collisions are
   unlikely.
-- `signal_ready` writes with 0600 after close.
+- `signal_ready` opens the file with
+  `OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o600)`
+  (`sshenc-agent/src/server.rs`). `create_new` atomically fails with
+  `EEXIST` if anything already exists at the path (file, symlink,
+  directory); `O_NOFOLLOW` additionally refuses to dereference a
+  pre-planted symlink and fails with `ELOOP`. Either way the write
+  never lands on an attacker-chosen target, and the error is surfaced
+  to the parent process via the daemonize handshake instead of being
+  silently followed.
+- `mode(0o600)` at open time (load-bearing on umask-permissive
+  systems) + an explicit `set_permissions(0o600)` for belt-and-
+  suspenders.
+- A `signal_ready_refuses_preplanted_symlink` unit test locks in the
+  symlink-refusal semantics.
 
 **Residual risk**:
-- `std::fs::write` follows symlinks. A race between timestamp selection
-  and write is theoretically exploitable on multi-user systems with a
-  shared `/tmp`. `$TMPDIR` is per-user on macOS and modern Linux so the
-  practical risk is limited. A future hardening could use `O_NOFOLLOW` or
-  a user-private temp dir.
+- None for the symlink-redirect vector. An attacker who can predict
+  the path and win a TOCTOU between our `remove_file` (performed by
+  the parent before spawn) and our `create_new` (in the child) still
+  loses — the attacker's file is created, then our `create_new` fails
+  with `EEXIST`, and the parent daemonize handshake surfaces the
+  failure.
 
 ## Threat: MSI Uninstall Resilience
 

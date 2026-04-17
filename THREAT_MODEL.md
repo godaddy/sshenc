@@ -76,15 +76,17 @@ to make unauthorized signing requests.
 
 **Mitigations**:
 - The socket is created with mode 0600 (owner-only read/write).
-- The OS enforces Unix socket permissions.
-- The agent supports an allowlist (`allowed_labels`) to limit which keys are
-  exposed through the socket.
+- The socket's parent directory is enforced to mode 0700 (`sshenc-agent/src/server.rs` `prepare_socket_path`).
+- Each accepted connection is verified against the peer UID via `SO_PEERCRED` / `getpeereid`; connections from other UIDs are rejected.
+- A per-connection rate limiter (`server.rs`) throttles signing-request floods.
+- The peer process binary is checked against an allowlist of trusted `sshenc` install paths (`server.rs`), limiting which local binaries can drive the agent.
+- The agent supports an allowlist (`allowed_labels`) to limit which keys are exposed through the socket.
+- `Config::default()` and the agent fall back to `$TMPDIR/sshenc` when `$HOME` is unset. This is a narrower fallback than the historical `/tmp` — the subdirectory is created at 0700 — but `$TMPDIR` / `/tmp` on shared systems is still a less isolated location than the home directory.
 
 **Residual risk**:
 - Root can bypass socket permissions.
-- If the socket path is in a world-writable directory, a race condition could
-  allow socket replacement before permissions are set. The default path
-  (`~/.sshenc/agent.sock`) is in a user-owned directory.
+- A same-UID attacker process can pass all UID / allowlist / rate-limit checks and drive the agent normally. Hardware user-presence (Touch ID / Windows Hello) is the only defense against this case.
+- If `$HOME` is unset and `$TMPDIR` is shared with other users, the parent-dir-0700 hardening holds only while nothing else in `$TMPDIR` is adversarial.
 
 ## Threat: Malicious Local Processes
 
@@ -131,9 +133,8 @@ is hardware-protected.
 approve signing requests without verifying the context.
 
 **Mitigations**:
-- The prompt policy is configurable (`always`, `never`, `keydefault`).
-  It controls sshenc-managed pre-sign verification where supported, and
-  `keydefault` follows the key's own access policy.
+- The prompt policy is configurable (`Always`, `Never`, `KeyDefault`).
+  `KeyDefault` follows the key's own `AccessPolicy`.
 - Keys can be created with or without user-presence requirements.
   Different keys can have different policies (e.g., user-presence for
   production servers, none for personal GitHub).
@@ -144,6 +145,21 @@ approve signing requests without verifying the context.
   authenticated to or what specific operation is requested.
 - Users who enable user-presence and then approve every prompt without
   thought get no security benefit from the feature.
+- **Important:** `PromptPolicy` is advisory. The real user-presence
+  enforcement lives in the hardware — the Secure Enclave triggers Touch ID
+  inside `SecKeyCreateSignature` when the key was created with a non-`None`
+  access policy, and Windows CNG triggers Windows Hello via
+  `NCRYPT_UI_POLICY` at key creation time. `sshenc`'s in-process
+  `maybe_verify_user_presence` path is a no-op on macOS and Windows (it
+  relies on the hardware to enforce) and a stderr confirmation prompt on
+  Linux software backend. A key created with `AccessPolicy::None` **will
+  never prompt**, even with `PromptPolicy::Always`, because the hardware
+  was not told to require presence.
+- The Windows NCRYPT UI policy is set only at key-create time (see the
+  libenclaveapp threat model on CNG policy verification); `sshenc` does
+  not re-read the policy before signing, so an attacker-planted TPM key
+  with the expected CNG name would bypass presence. Integration testing
+  against real Windows TPM hardware is a known gap.
 
 ## Threat: Backup and Migration Limitations
 
@@ -174,6 +190,217 @@ The private key exists on disk and in process memory.
 
 **Residual risk**: Any process running as the same user can read the key
 file. This is a known limitation of Linux environments without TPM.
+
+## Threat: SSH Agent Forwarding
+
+**Scenario**: The user runs `ssh -A` or has `ForwardAgent yes` in their SSH
+config. Agent requests are forwarded to the remote host. Any user with the
+forwarded socket on the remote host — including root on that host — can sign
+authentication challenges using the user's hardware-backed key.
+
+**Mitigations**:
+- `sshenc openssh print-config` emits `IdentitiesOnly yes` but does not
+  disable `ForwardAgent`. `ForwardAgent` is a user-facing SSH decision.
+- Documentation should recommend `IdentitiesOnly yes` and explicit per-host
+  `ForwardAgent no`.
+
+**Residual risk**:
+- Forwarding remains a user-controlled feature. `sshenc` cannot prevent
+  keys from being used for authentication while a forwarded connection is
+  live. Users who forward agents to untrusted hosts give those hosts the
+  ability to log into anything the key can reach.
+
+## Threat: Key Enumeration via `SSH_AGENTC_REQUEST_IDENTITIES`
+
+**Scenario**: Any process that passes the agent's peer-UID and
+allowlist checks can issue `SSH_AGENTC_REQUEST_IDENTITIES` and receive the
+full list of enrolled keys — public key blob plus comment — regardless of
+`AccessPolicy`. The listing is unauthenticated per request.
+
+**Mitigations**:
+- The agent's peer-UID and binary allowlist (see "Agent Socket Abuse")
+  reject non-user or non-trusted callers.
+- Labels and comments should not themselves contain secrets.
+
+**Residual risk**:
+- A same-UID attacker that reaches the socket learns exactly which
+  services the user has SSH keys for (from fingerprints and comments).
+  This is an information-disclosure threat even for keys that require
+  Touch ID / Windows Hello to sign.
+
+## Threat: Windows Named-Pipe Hijack
+
+**Scenario**: `sshenc-agent` reuses Microsoft OpenSSH's named pipe
+(`\\.\pipe\openssh-ssh-agent`) so existing SSH clients connect
+transparently. If Microsoft's OpenSSH `ssh-agent` service is running when
+`sshenc-agent` starts, `sshenc-agent` fails to bind. Conversely, an
+attacker process that creates the pipe first (with a malicious security
+descriptor) can accept SSH clients' signing requests.
+
+**Mitigations**:
+- `sshenc install` stops and disables the Windows `ssh-agent` service
+  before starting `sshenc-agent`, so clients connect to `sshenc`.
+- `sshenc-agent` uses `ServerOptions::first_pipe_instance(true)` and
+  refuses to attach to an existing pipe.
+- The CLI surfaces an actionable error when the pipe is in use.
+
+**Residual risk**:
+- The named pipe is currently created with the default security
+  descriptor. A best-practice hardening is an explicit DACL that grants
+  only the owner user and `SYSTEM`; that work is not yet in place.
+- An attacker with admin rights can always create the pipe first; admin
+  rights on Windows already implies full control over the TPM.
+
+## Threat: Metadata File Tamper (`.meta`)
+
+**Scenario**: A same-UID attacker edits `~/.sshenc/keys/<label>.meta` to
+change the stored `AccessPolicy` (e.g. `BiometricOnly` → `None`) or other
+fields.
+
+**Mitigations**:
+- The hardware key's real access policy is fixed at **key creation time**
+  on macOS Secure Enclave and Windows CNG. Editing `.meta` cannot relax
+  the hardware's enforcement — Touch ID / Windows Hello still fires on
+  sign regardless of what the metadata file claims.
+- Metadata files are written 0600 via `atomic_write`.
+
+**Residual risk**:
+- UI and library-level policy checks (`sshenc list`, `sshenc inspect`,
+  `PromptPolicy::KeyDefault`) trust the metadata file. An attacker can
+  **mislead** the user into believing a key is unprotected (or vice
+  versa).
+- On the Linux software backend there is no hardware enforcement. Metadata
+  tamper there is a full downgrade: the key signs without any prompt.
+- The migration from the legacy `biometric: bool` field to `AccessPolicy`
+  is handled by compatibility code; a missing `access_policy` field is
+  treated per the legacy bool. A same-UID attacker who strips the new
+  field from `.meta` can rely on the legacy-compat path behaving
+  intuitively but should not gain anything the hardware does not already
+  allow.
+
+## Threat: `SSH_AUTH_SOCK` / `IdentityAgent` Trust
+
+**Scenario**: The user's shell profile, an attacker-modified dotfile, or a
+supply-chain compromise sets `SSH_AUTH_SOCK` (or `IdentityAgent` in
+`~/.ssh/config`) to point at an attacker-controlled socket. SSH clients
+trust whatever signs, so all authentications happen against the attacker's
+agent — the hardware-backed guarantee is silently bypassed.
+
+**Mitigations**:
+- `sshenc openssh print-config` emits an explicit `IdentityAgent` line
+  that points at the managed socket path.
+- Documentation should call out that a user's `.bashrc` / `.zshrc` is a
+  credential-sensitive file.
+
+**Residual risk**:
+- This is a user-environment-trust threat that `sshenc` cannot fully
+  close. If the attacker has write access to shell startup files, they
+  can redirect agent traffic at will.
+
+## Threat: `AccessPolicy::None` Keys Are Hardware-Non-Exportable but Present-less
+
+**Scenario**: The user creates a key with `AccessPolicy::None` (the default
+for `sshenc keygen` when `--require-user-presence` is not set) expecting
+some protection from hardware backing.
+
+**Mitigations**:
+- Non-exportability still holds: the private key material cannot be read
+  out of the Secure Enclave or TPM.
+- `sshenc list` / `inspect` clearly display whether user presence is
+  required.
+
+**Residual risk**:
+- Any same-UID process can sign with the key at any time without a
+  prompt. Functionally equivalent to a loaded `ssh-agent` with a password-
+  less file key, with the single added benefit that the key itself cannot
+  be exfiltrated.
+- Users who want Touch ID / Windows Hello prompts must explicitly create
+  keys with `--access-policy any` (or `biometric` / `password`) at keygen
+  time.
+
+## Threat: Git Signing Configuration Tamper (`gitenc`)
+
+**Scenario**: `gitenc --config` writes:
+- `gpg.format = ssh`
+- `gpg.ssh.program = /path/to/sshenc`
+- `user.signingkey = ...`
+- `gpg.ssh.allowedSignersFile` pointing at `~/.ssh/allowed_signers`
+
+All four values live in user-writable files (`~/.gitconfig` and the
+allowed-signers file). Malware running as the user can redirect
+`gpg.ssh.program` to its own binary, swap the signing key, or authorise
+the attacker's own keys for commit verification.
+
+**Mitigations**:
+- `gitenc` validates label and email inputs before writing.
+- File locations are standard git / OpenSSH paths so they are not
+  themselves surprising.
+
+**Residual risk**:
+- A same-UID attacker with write access to `~/.gitconfig` or
+  `~/.ssh/allowed_signers` can defeat the integrity of `git log --show-signature`
+  and `ssh-keygen -Y sign` / `-Y verify` end-to-end. This is a user-side
+  dotfile-integrity threat that `sshenc` cannot fully mitigate from inside
+  its own process.
+
+## Threat: PKCS#11 Dylib / Agent Binary Tamper
+
+**Scenario**: `sshenc-pkcs11` is installed to a user-writable location
+(e.g. `%LOCALAPPDATA%\sshenc\bin\` on Windows, or the user's
+`~/.cargo/bin` / `~/.local/bin` on Unix). Same-user malware replaces the
+dylib with a lookalike that signs with its own key or exfiltrates signing
+requests.
+
+**Mitigations**:
+- `sshenc-core::bin_discovery::find_trusted_binary` canonicalizes paths
+  and restricts lookups to a trusted install-directory list, preventing
+  PATH-based planting of the sshenc CLI itself.
+- The PKCS#11 provider path in `~/.ssh/config` is written as an absolute
+  path, so planting a lookalike requires write access to that exact path.
+- Distribution via signed Homebrew bottles / MSI installers is the
+  recommended channel; code-signing status applies end-to-end.
+
+**Residual risk**:
+- If the PKCS#11 dylib or the `sshenc-agent` binary is installed into a
+  user-writable directory (common for per-user installs), same-user
+  malware can replace it. This is a subset of the generic "malware-as-
+  user" threat but worth naming because SSH loads the PKCS#11 provider
+  implicitly on every session.
+
+## Threat: Ready-File Symlink in `$TMPDIR`
+
+**Scenario**: `sshenc-agent` writes a ready-file in `$TMPDIR`
+(`sshenc-agent-ready-<pid>-<nanos>.tmp`, 0600) as part of the daemonize
+handshake. On a shared `/tmp`, an attacker can pre-create a symlink at
+that path to redirect the "ready" write.
+
+**Mitigations**:
+- The filename includes PID and nanosecond timestamp so collisions are
+  unlikely.
+- `signal_ready` writes with 0600 after close.
+
+**Residual risk**:
+- `std::fs::write` follows symlinks. A race between timestamp selection
+  and write is theoretically exploitable on multi-user systems with a
+  shared `/tmp`. `$TMPDIR` is per-user on macOS and modern Linux so the
+  practical risk is limited. A future hardening could use `O_NOFOLLOW` or
+  a user-private temp dir.
+
+## Threat: MSI Uninstall Blocking (`Return="check"`)
+
+**Scenario**: The Windows installer's uninstall custom action currently
+uses `Return="check"`. If `sshenc uninstall` exits non-zero (agent still
+running, file locked, registry error), the entire MSI uninstall fails and
+rolls back, leaving the user unable to remove the software.
+
+**Mitigations**:
+- `sshenc uninstall` is designed to be resilient, but failure modes are
+  not fully characterised.
+
+**Residual risk**:
+- Tracked as a known installer hardening item: switch to `Return="ignore"`
+  on uninstall so users can always remove the software, and make `sshenc
+  uninstall` best-effort internally.
 
 ## Out of Scope
 

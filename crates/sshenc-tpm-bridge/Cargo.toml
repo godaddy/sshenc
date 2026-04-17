@@ -1,0 +1,16 @@
+[package]
+name = "sshenc-tpm-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sshenc-tpm-bridge"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+enclaveapp-tpm-bridge = { workspace = true }

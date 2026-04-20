@@ -892,6 +892,20 @@ pub fn install() -> Result<()> {
                 println!("  PKCS11Provider {} (agent launcher)", dylib.display());
             }
         }
+        sshenc_core::ssh_config::InstallResult::Repaired => {
+            println!(
+                "Updated sshenc block in {} (dylib or socket path had changed)",
+                ssh_config_path.display()
+            );
+            println!("  IdentityAgent {}", config.socket_path.display());
+            if let Some(ref dylib) = dylib_path {
+                println!("  PKCS11Provider {} (agent launcher)", dylib.display());
+            } else {
+                println!(
+                    "  (no PKCS11Provider — dylib not found; agent auto-launch via SSH disabled)"
+                );
+            }
+        }
         sshenc_core::ssh_config::InstallResult::AlreadyPresent => {
             println!("sshenc already configured in {}", ssh_config_path.display());
         }
@@ -951,6 +965,19 @@ pub fn install() -> Result<()> {
 }
 
 /// Find the PKCS#11 launcher library, if installed.
+///
+/// Search order, each checked for file existence before returning:
+/// 1. `<prefix>/lib/<dylib>` based on the *as-invoked* exe path. For a
+///    Homebrew install this resolves to `/opt/homebrew/lib/<dylib>`, the
+///    stable symlink maintained by `brew`, rather than the versioned
+///    Cellar path that changes on upgrade.
+/// 2. Next to the *canonical* exe path (follows symlinks). Handles a
+///    developer install where `/opt/homebrew/bin/sshenc` is a symlink into
+///    the cargo build tree — the dylib lives next to the real binary at
+///    `target/release/<dylib>`.
+/// 3. `<prefix>/lib/<dylib>` based on the canonical exe path, for any
+///    FHS-style install where the binary is a symlink across prefixes.
+/// 4. Well-known Homebrew locations, as a final fallback.
 #[cfg(not(windows))]
 fn find_launcher_dylib() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
@@ -958,30 +985,32 @@ fn find_launcher_dylib() -> Option<PathBuf> {
     #[cfg(not(target_os = "macos"))]
     let lib_name = "libsshenc_pkcs11.so";
 
-    // Next to the current executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(lib_name);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            // Homebrew (macOS): binary in bin/, dylib in lib/
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(parent) = dir.parent() {
-                    let lib_candidate = parent.join("lib").join(lib_name);
-                    if lib_candidate.exists() {
-                        return Some(lib_candidate);
-                    }
-                }
+    let exe = std::env::current_exe().ok()?;
+
+    if let Some(parent) = exe.parent().and_then(Path::parent) {
+        let candidate = parent.join("lib").join(lib_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let exe_real = std::fs::canonicalize(&exe).unwrap_or_else(|_| exe.clone());
+    if let Some(dir) = exe_real.parent() {
+        let candidate = dir.join(lib_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if let Some(parent) = dir.parent() {
+            let lib_candidate = parent.join("lib").join(lib_name);
+            if lib_candidate.exists() {
+                return Some(lib_candidate);
             }
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        let common = ["/opt/homebrew/lib", "/usr/local/lib"];
-        for dir in &common {
+        for dir in ["/opt/homebrew/lib", "/usr/local/lib"] {
             let candidate = PathBuf::from(dir).join(lib_name);
             if candidate.exists() {
                 return Some(candidate);

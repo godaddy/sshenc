@@ -21,6 +21,10 @@ fn markers() -> BlockMarkers {
 pub enum InstallResult {
     Installed,
     AlreadyPresent,
+    /// The managed block already existed but its rendered content was stale
+    /// (e.g. the `PKCS11Provider` dylib path has moved); the block was
+    /// rewritten with the current values.
+    Repaired,
 }
 
 /// Result of an uninstall operation.
@@ -65,10 +69,6 @@ pub fn install_block(
         .map_err(|e| Error::Config(e.to_string()))?
         .unwrap_or_default();
 
-    if content.contains(&markers.begin) {
-        return Ok(InstallResult::AlreadyPresent);
-    }
-
     // Build the SSH config body.
     let socket_quoted = quote_ssh_path(socket_path);
     let mut body = format!("Host *\n    IdentityAgent {socket_quoted}\n");
@@ -78,11 +78,22 @@ pub fn install_block(
     }
 
     let block = config_block::build_block(&markers, &body);
+    let had_block = content.contains(&markers.begin);
     let new_content = config_block::upsert_block(&content, &markers, &block);
+
+    // If nothing would change, leave the file untouched. This keeps the
+    // operation cheap and idempotent even when run repeatedly.
+    if new_content == content {
+        return Ok(InstallResult::AlreadyPresent);
+    }
 
     write_ssh_config(ssh_config_path, &new_content)?;
 
-    Ok(InstallResult::Installed)
+    Ok(if had_block {
+        InstallResult::Repaired
+    } else {
+        InstallResult::Installed
+    })
 }
 
 /// Remove the sshenc managed block from the SSH config file.
@@ -414,6 +425,90 @@ mod tests {
         assert!(content.contains(&markers().end));
         // No blank separator line at the start (no prior content)
         assert!(!content.starts_with('\n'));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
+    fn test_install_repairs_stale_dylib_path() {
+        let dir = temp_dir("repair-dylib");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+        let old_dylib = PathBuf::from("/opt/homebrew/lib/libsshenc_pkcs11.dylib");
+        let new_dylib = PathBuf::from("/Users/dev/sshenc/target/release/libsshenc_pkcs11.dylib");
+
+        let first = install_block(&config_path, &socket, Some(&old_dylib)).unwrap();
+        assert_eq!(first, InstallResult::Installed);
+        let content_first = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content_first.contains("/opt/homebrew/lib/libsshenc_pkcs11.dylib"));
+
+        // Re-running with a different dylib path should rewrite the block.
+        let second = install_block(&config_path, &socket, Some(&new_dylib)).unwrap();
+        assert_eq!(second, InstallResult::Repaired);
+
+        let content_second = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !content_second.contains("/opt/homebrew/lib/libsshenc_pkcs11.dylib"),
+            "stale dylib path should be gone"
+        );
+        assert!(content_second.contains(&new_dylib.display().to_string()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
+    fn test_install_repairs_by_dropping_dylib_when_gone() {
+        let dir = temp_dir("repair-drop-dylib");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+        let stale_dylib = PathBuf::from("/opt/homebrew/lib/libsshenc_pkcs11.dylib");
+
+        install_block(&config_path, &socket, Some(&stale_dylib)).unwrap();
+
+        // User rebuilt / reinstalled without a locatable dylib: second call
+        // omits the PKCS11Provider line, which is a content change.
+        let second = install_block(&config_path, &socket, None).unwrap();
+        assert_eq!(second, InstallResult::Repaired);
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!content.contains("PKCS11Provider"));
+        assert!(content.contains("IdentityAgent"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::chmod not supported by Miri
+    fn test_install_idempotent_leaves_file_alone() {
+        use std::time::SystemTime;
+
+        let dir = temp_dir("idempotent-mtime");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+        let dylib = PathBuf::from("/opt/homebrew/lib/libsshenc_pkcs11.dylib");
+
+        install_block(&config_path, &socket, Some(&dylib)).unwrap();
+        let mtime_before = std::fs::metadata(&config_path)
+            .unwrap()
+            .modified()
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        // Sleep long enough that a rewrite would be observable.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let result = install_block(&config_path, &socket, Some(&dylib)).unwrap();
+        assert_eq!(result, InstallResult::AlreadyPresent);
+
+        let mtime_after = std::fs::metadata(&config_path)
+            .unwrap()
+            .modified()
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            mtime_before, mtime_after,
+            "AlreadyPresent must not rewrite the file"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

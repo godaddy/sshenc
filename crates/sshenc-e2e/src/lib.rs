@@ -28,6 +28,7 @@ pub const IMAGE_TAG: &str = "sshenc-e2e-sshd:latest";
 pub const REQUIRED_BINS: &[(&str, &str)] = &[
     ("sshenc", "sshenc-cli"),
     ("sshenc-agent", "sshenc-agent"),
+    ("sshenc-keygen", "sshenc-keygen-cli"),
     ("gitenc", "sshenc-gitenc"),
 ];
 
@@ -130,7 +131,10 @@ fn build_binaries() -> Result<()> {
         // gitenc binary doesn't link sshenc-se and therefore doesn't
         // take the feature, so we can't pass `sshenc-gitenc/force-software`.
         cmd.arg("--features");
-        cmd.arg("sshenc-cli/force-software,sshenc-agent/force-software");
+        cmd.arg(
+            "sshenc-cli/force-software,sshenc-agent/force-software,\
+             sshenc-keygen-cli/force-software",
+        );
     }
     let output = cmd
         .stdout(Stdio::piped())

@@ -10,6 +10,7 @@ use anyhow::Result;
 use sshenc_agent_proto::message::{self, AgentRequest, AgentResponse, Identity};
 use sshenc_agent_proto::signature;
 use sshenc_core::config::PromptPolicy;
+use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::AccessPolicy;
 use sshenc_se::KeyBackend;
@@ -790,6 +791,85 @@ fn handle_request(
                 signature_blob: ssh_sig,
             })
         }
+        AgentRequest::GenerateKey {
+            label,
+            comment,
+            access_policy,
+        } => {
+            let label_str = match std::str::from_utf8(&label) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("generate_key: label not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            tracing::debug!(label = label_str, "handling generate request");
+
+            // Same allowed_labels gate as sign / delete. An agent
+            // started with `--labels a,b` won't generate keys outside
+            // that set; CLI falls back to local keygen in that case.
+            if !allowed_labels.is_empty() && !allowed_labels.contains(label_str) {
+                tracing::warn!(
+                    label = label_str,
+                    "generate_key: label not in agent's allowed list"
+                );
+                return Ok(AgentResponse::Failure);
+            }
+
+            let label_owned = match KeyLabel::new(label_str) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(label = label_str, error = %e, "generate_key: invalid label");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+
+            let comment_opt = if comment.is_empty() {
+                None
+            } else {
+                match String::from_utf8(comment) {
+                    Ok(c) => Some(c),
+                    Err(_) => {
+                        tracing::warn!("generate_key: comment not valid UTF-8");
+                        return Ok(AgentResponse::Failure);
+                    }
+                }
+            };
+
+            let policy = match access_policy {
+                0 => AccessPolicy::None,
+                1 => AccessPolicy::Any,
+                2 => AccessPolicy::BiometricOnly,
+                3 => AccessPolicy::PasswordOnly,
+                other => {
+                    tracing::warn!(
+                        access_policy = other,
+                        "generate_key: unknown access_policy discriminant"
+                    );
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+
+            let opts = KeyGenOptions {
+                label: label_owned,
+                comment: comment_opt,
+                access_policy: policy,
+                write_pub_path: None,
+            };
+
+            match backend.generate(&opts) {
+                Ok(info) => {
+                    tracing::info!(label = label_str, "generate_key: succeeded");
+                    Ok(AgentResponse::GenerateResponse {
+                        public_key: info.public_key_bytes,
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!(label = label_str, error = %e, "generate_key: failed");
+                    Ok(AgentResponse::Failure)
+                }
+            }
+        }
         AgentRequest::DeleteKey { label } => {
             let label_str = match std::str::from_utf8(&label) {
                 Ok(s) => s,
@@ -1170,6 +1250,108 @@ mod tests {
             1,
             "filter must prevent the delete from reaching the backend"
         );
+    }
+
+    #[test]
+    fn test_generate_key_succeeds_and_returns_public_key() {
+        let backend = setup_backend();
+        assert_eq!(backend.list().unwrap().len(), 1);
+
+        let resp = handle_request(
+            AgentRequest::GenerateKey {
+                label: b"generated-by-agent".to_vec(),
+                comment: b"test-comment".to_vec(),
+                access_policy: 0,
+            },
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        match resp {
+            AgentResponse::GenerateResponse { public_key } => {
+                assert_eq!(public_key.len(), 65, "SEC1 uncompressed P-256 is 65 bytes");
+                assert_eq!(public_key[0], 0x04, "SEC1 uncompressed prefix");
+            }
+            other => panic!("expected GenerateResponse, got {other:?}"),
+        }
+        assert_eq!(
+            backend.list().unwrap().len(),
+            2,
+            "backend should now hold both the setup key and the new one"
+        );
+    }
+
+    #[test]
+    fn test_generate_key_rejects_invalid_access_policy() {
+        let backend = setup_backend();
+        let resp = handle_request(
+            AgentRequest::GenerateKey {
+                label: b"bad-policy".to_vec(),
+                comment: Vec::new(),
+                access_policy: 99,
+            },
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+        assert_eq!(backend.list().unwrap().len(), 1, "backend untouched");
+    }
+
+    #[test]
+    fn test_generate_key_blocked_by_label_filter() {
+        let backend = setup_backend();
+        let allowed: HashSet<String> = ["other-key".to_string()].into_iter().collect();
+
+        let resp = handle_request(
+            AgentRequest::GenerateKey {
+                label: b"not-on-allow-list".to_vec(),
+                comment: Vec::new(),
+                access_policy: 0,
+            },
+            &backend,
+            &allowed,
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+        assert_eq!(backend.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_generate_key_rejects_non_utf8_label() {
+        let backend = setup_backend();
+        let resp = handle_request(
+            AgentRequest::GenerateKey {
+                label: vec![0xFF, 0xFE],
+                comment: Vec::new(),
+                access_policy: 0,
+            },
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+    }
+
+    #[test]
+    fn test_generate_key_empty_comment_is_accepted() {
+        let backend = setup_backend();
+        let resp = handle_request(
+            AgentRequest::GenerateKey {
+                label: b"no-comment-key".to_vec(),
+                comment: Vec::new(),
+                access_policy: 0,
+            },
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::GenerateResponse { .. }));
     }
 
     #[test]

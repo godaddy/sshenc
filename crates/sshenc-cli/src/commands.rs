@@ -494,14 +494,35 @@ pub fn keygen(
 ) -> Result<()> {
     let key_label = KeyLabel::new(label)?;
 
-    let opts = KeyGenOptions {
-        label: key_label,
-        comment,
-        access_policy,
-        write_pub_path: write_pub.clone(),
+    // Prefer proxying through the agent: a running `sshenc-agent`
+    // is the designated keychain-toucher. When it both creates the
+    // wrapping-key entry (here) AND later reads it (sign/delete),
+    // the legacy keychain ACL is satisfied without a cross-binary
+    // approval prompt. We fall back to local generation only if the
+    // agent is unreachable, refuses, or errors — same shape as the
+    // sign and delete proxies.
+    let info = if let Some(public_bytes) = sshenc_agent_proto::client::try_generate_via_agent(
+        label,
+        comment.as_deref(),
+        access_policy.as_ffi_value() as u32,
+    ) {
+        tracing::debug!(label, "keygen: generated via agent proxy");
+        build_keyinfo_agent_side(
+            key_label.clone(),
+            comment.clone(),
+            access_policy,
+            write_pub.clone(),
+            public_bytes,
+        )?
+    } else {
+        let opts = KeyGenOptions {
+            label: key_label,
+            comment,
+            access_policy,
+            write_pub_path: write_pub.clone(),
+        };
+        backend.generate(&opts)?
     };
-
-    let info = backend.generate(&opts)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&info)?);
@@ -522,6 +543,45 @@ pub fn keygen(
         }
     }
     Ok(())
+}
+
+/// Reconstruct a [`sshenc_core::key::KeyInfo`] client-side from the
+/// public-key bytes the agent returned. The agent already wrote the
+/// `.handle`/`.meta`/`.pub` files into its keys_dir and stored the
+/// wrapping-key entry in the keychain; the CLI's only remaining
+/// responsibility is the OpenSSH `.pub` file at `write_pub` (if the
+/// caller passed one) and the fingerprint / metadata block the
+/// human-readable output reports.
+fn build_keyinfo_agent_side(
+    label: KeyLabel,
+    comment: Option<String>,
+    access_policy: AccessPolicy,
+    write_pub: Option<PathBuf>,
+    public_key_bytes: Vec<u8>,
+) -> Result<sshenc_core::key::KeyInfo> {
+    use sshenc_core::fingerprint;
+    use sshenc_core::key::{KeyInfo, KeyMetadata};
+
+    let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_key_bytes, comment.clone())?;
+    let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
+
+    let pub_file_path = if let Some(ref path) = write_pub {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, format!("{}\n", ssh_pubkey.to_openssh_line()))?;
+        Some(path.clone())
+    } else {
+        None
+    };
+
+    Ok(KeyInfo {
+        metadata: KeyMetadata::new(label, access_policy, comment),
+        public_key_bytes,
+        fingerprint_sha256: fp_sha256,
+        fingerprint_md5: fp_md5,
+        pub_file_path,
+    })
 }
 
 #[allow(clippy::print_stdout)]
@@ -647,7 +707,7 @@ pub fn delete(
 
     for key in &keys_to_delete {
         let label = key.metadata.label.as_str();
-        if crate::agent_client::try_delete_via_agent(label).is_some() {
+        if sshenc_agent_proto::client::try_delete_via_agent(label).is_some() {
             tracing::debug!(label, "delete: routed through agent proxy");
         } else {
             backend.delete(label)?;
@@ -1757,7 +1817,9 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let requested_pub = read_pubkey_from_openssh_file(&sign_args.key_file)?;
     let pubkey_blob = requested_pub.wire_blob();
 
-    if let Some(ssh_sig) = crate::agent_client::try_sign_via_agent(&pubkey_blob, &signed_data) {
+    if let Some(ssh_sig) =
+        sshenc_agent_proto::client::try_sign_via_agent(&pubkey_blob, &signed_data)
+    {
         tracing::debug!("ssh_sign: signed via agent proxy");
         let sig_blob =
             build_ssh_signature_from_ssh_sig(&requested_pub, &sign_args.namespace, &ssh_sig);

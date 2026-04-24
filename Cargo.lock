@@ -1478,6 +1478,7 @@ dependencies = [
  "clap",
  "dirs",
  "enclaveapp-core",
+ "sshenc-agent-proto",
  "sshenc-core",
  "sshenc-se",
  "tracing",

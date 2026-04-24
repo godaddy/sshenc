@@ -9,6 +9,7 @@
 //! - Signing (SSH_AGENTC_SIGN_REQUEST / SSH_AGENT_SIGN_RESPONSE)
 //! - Failure (SSH_AGENT_FAILURE)
 
+pub mod client;
 pub mod message;
 pub mod signature;
 pub mod wire;

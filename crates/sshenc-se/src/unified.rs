@@ -33,6 +33,19 @@ pub struct SshencBackend {
     backend: AppSigningBackend,
 }
 
+/// Resolve the effective wrapping-key cache TTL, honoring the
+/// `SSHENC_WRAPPING_KEY_CACHE_TTL_SECS` env override when set.
+/// Returns 5 minutes if neither the env var nor a caller supplies a
+/// value.
+pub fn default_wrapping_key_cache_ttl() -> std::time::Duration {
+    if let Some(value) = std::env::var_os("SSHENC_WRAPPING_KEY_CACHE_TTL_SECS") {
+        if let Ok(secs) = value.to_string_lossy().parse::<u64>() {
+            return std::time::Duration::from_secs(secs);
+        }
+    }
+    std::time::Duration::from_secs(300)
+}
+
 /// Return the sshenc keys directory (~/.sshenc/keys/).
 ///
 /// Respects the `SSHENC_KEYS_DIR` environment variable if set. That override
@@ -63,9 +76,27 @@ pub fn sshenc_keys_dir() -> PathBuf {
 
 impl SshencBackend {
     /// Create a new sshenc backend with automatic platform detection.
+    ///
+    /// Uses `macOS` keychain wrapping-key user-presence (biometric or
+    /// device passcode) with the 5-minute default cache TTL. Callers
+    /// that need a different TTL (notably the agent, which reads the
+    /// sshenc config) should call [`SshencBackend::with_cache_ttl`].
     pub fn new(
         pub_dir: PathBuf,
         force_keyring: bool,
+    ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
+        Self::with_cache_ttl(pub_dir, force_keyring, default_wrapping_key_cache_ttl())
+    }
+
+    /// Create a backend with an explicit wrapping-key cache TTL. On
+    /// macOS this also sets the keychain-item access control to
+    /// `.userPresence` so the authentication mechanism is tied to the
+    /// user (Touch ID or passcode) rather than to the binary's
+    /// ad-hoc signature.
+    pub fn with_cache_ttl(
+        pub_dir: PathBuf,
+        force_keyring: bool,
+        cache_ttl: std::time::Duration,
     ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
         let keys_dir = sshenc_keys_dir();
         let backend = AppSigningBackend::init(StorageConfig {
@@ -75,6 +106,8 @@ impl SshencBackend {
             extra_bridge_paths: vec![],
             keys_dir: Some(keys_dir.clone()),
             force_keyring,
+            wrapping_key_user_presence: true,
+            wrapping_key_cache_ttl: cache_ttl,
         })?;
 
         Ok(Self {
@@ -299,6 +332,8 @@ mod tests {
             extra_bridge_paths: vec![],
             keys_dir: None,
             force_keyring: false,
+            wrapping_key_user_presence: false,
+            wrapping_key_cache_ttl: std::time::Duration::ZERO,
         })
         .ok()?;
         Some(SshencBackend {

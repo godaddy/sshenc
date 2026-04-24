@@ -7,6 +7,11 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Test-only: enables the software backend in sshenc-se.
+force-software = ["sshenc-se/force-software"]
+
 [[bin]]
 name = "sshenc-keygen"
 path = "src/main.rs"

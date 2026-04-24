@@ -39,6 +39,9 @@ enclaveapp-wsl = { path = "../libenclaveapp/crates/enclaveapp-wsl" }
 enclaveapp-app-storage = { path = "../libenclaveapp/crates/enclaveapp-app-storage" }
 enclaveapp-build-support = { path = "../libenclaveapp/crates/enclaveapp-build-support" }
 enclaveapp-tpm-bridge = { path = "../libenclaveapp/crates/enclaveapp-tpm-bridge" }
+# Test-only software signer. Gated into sshenc by the `force-software`
+# Cargo feature; never compiled into production builds.
+enclaveapp-test-software = { path = "../libenclaveapp/crates/enclaveapp-test-software", features = ["signing"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

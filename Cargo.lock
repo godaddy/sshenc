@@ -506,6 +506,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-test-software"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "dirs",
+ "elliptic-curve",
+ "enclaveapp-core",
+ "p256",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "enclaveapp-tpm-bridge"
 version = "0.1.0"
 dependencies = [
@@ -1440,6 +1456,7 @@ name = "sshenc-e2e"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
+ "serde_json",
 ]
 
 [[package]]
@@ -1481,6 +1498,7 @@ dependencies = [
  "dirs",
  "enclaveapp-app-storage",
  "enclaveapp-core",
+ "enclaveapp-test-software",
  "serde_json",
  "sshenc-core",
  "thiserror",

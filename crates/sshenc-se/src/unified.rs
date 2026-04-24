@@ -19,6 +19,28 @@ use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyLabel, KeyMetadata};
 use sshenc_core::pubkey::SshPublicKey;
 use std::path::PathBuf;
 
+/// Environment variable that opts into the software signing backend.
+///
+/// Only honored when sshenc-se is compiled with the `force-software`
+/// feature. Otherwise ignored. Exists so the e2e suite can exercise the
+/// software code path on any developer machine without needing Linux +
+/// TPM-absent conditions to flip auto-detection.
+#[cfg(feature = "force-software")]
+pub const FORCE_SOFTWARE_ENV: &str = "SSHENC_FORCE_SOFTWARE";
+
+#[cfg(feature = "force-software")]
+#[derive(Debug)]
+enum BackendImpl {
+    Platform(AppSigningBackend),
+    Software(enclaveapp_test_software::SoftwareSigner),
+}
+
+#[cfg(not(feature = "force-software"))]
+#[derive(Debug)]
+enum BackendImpl {
+    Platform(AppSigningBackend),
+}
+
 /// Unified sshenc backend using `AppSigningBackend` for platform dispatch.
 ///
 /// Handles SSH-specific concerns (pub file writing, fingerprinting, metadata
@@ -29,8 +51,10 @@ pub struct SshencBackend {
     pub_dir: PathBuf,
     /// Keys directory (typically ~/.sshenc/keys/).
     keys_dir: PathBuf,
-    /// The platform-detected signing backend.
-    backend: AppSigningBackend,
+    /// The platform-detected signing backend, or the test-software
+    /// backend when `SSHENC_FORCE_SOFTWARE` is set and the
+    /// `force-software` feature is compiled in.
+    backend: BackendImpl,
 }
 
 /// Return the sshenc keys directory (~/.sshenc/keys/).
@@ -39,6 +63,11 @@ pub struct SshencBackend {
 /// exists to let e2e tests share one persistent SE key across runs instead
 /// of creating a fresh one per-run — on macOS each new SE key gets its own
 /// keychain ACL, so per-run keys produce per-run "Always Allow" prompts.
+#[cfg(feature = "force-software")]
+fn force_software_selected() -> bool {
+    std::env::var_os(FORCE_SOFTWARE_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 pub fn sshenc_keys_dir() -> PathBuf {
     if let Some(override_path) = std::env::var_os("SSHENC_KEYS_DIR") {
         return PathBuf::from(override_path);
@@ -63,11 +92,41 @@ pub fn sshenc_keys_dir() -> PathBuf {
 
 impl SshencBackend {
     /// Create a new sshenc backend with automatic platform detection.
+    ///
+    /// If the `force-software` feature is compiled in and
+    /// `SSHENC_FORCE_SOFTWARE=1` is set at runtime, constructs the
+    /// test-only software backend instead. The env var is only consulted
+    /// when the feature is enabled; production builds never see it.
     pub fn new(
         pub_dir: PathBuf,
         force_keyring: bool,
     ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
         let keys_dir = sshenc_keys_dir();
+
+        #[cfg(feature = "force-software")]
+        {
+            if force_software_selected() {
+                metadata::ensure_dir(&keys_dir).map_err(|e| {
+                    enclaveapp_app_storage::StorageError::KeyInitFailed(format!(
+                        "prepare keys_dir for force-software: {e}"
+                    ))
+                })?;
+                let signer = enclaveapp_test_software::SoftwareSigner::with_keys_dir(
+                    "sshenc",
+                    keys_dir.clone(),
+                );
+                tracing::debug!(
+                    keys_dir = %keys_dir.display(),
+                    "sshenc using test-software signing backend (SSHENC_FORCE_SOFTWARE)"
+                );
+                return Ok(Self {
+                    pub_dir,
+                    keys_dir,
+                    backend: BackendImpl::Software(signer),
+                });
+            }
+        }
+
         let backend = AppSigningBackend::init(StorageConfig {
             app_name: "sshenc".into(),
             key_label: String::new(), // sshenc manages multiple keys, no single label
@@ -80,21 +139,33 @@ impl SshencBackend {
         Ok(Self {
             pub_dir,
             keys_dir,
-            backend,
+            backend: BackendImpl::Platform(backend),
         })
     }
 
     /// Which platform backend is in use.
     pub fn backend_kind(&self) -> BackendKind {
-        self.backend.backend_kind()
+        match &self.backend {
+            BackendImpl::Platform(b) => b.backend_kind(),
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(_) => BackendKind::Keyring,
+        }
     }
 
     fn signer(&self) -> &dyn EnclaveSigner {
-        self.backend.signer()
+        match &self.backend {
+            BackendImpl::Platform(b) => b.signer(),
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(s) => s,
+        }
     }
 
     fn key_manager(&self) -> &dyn EnclaveKeyManager {
-        self.backend.key_manager()
+        match &self.backend {
+            BackendImpl::Platform(b) => b.key_manager(),
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(s) => s,
+        }
     }
 
     fn find_pub_file(&self, label: &str) -> Option<PathBuf> {
@@ -304,7 +375,7 @@ mod tests {
         Some(SshencBackend {
             pub_dir,
             keys_dir: sshenc_keys_dir(),
-            backend,
+            backend: BackendImpl::Platform(backend),
         })
     }
 

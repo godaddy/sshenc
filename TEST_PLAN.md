@@ -94,6 +94,28 @@ cargo fmt --all -- --check
   rebuild. After Always Allow, subsequent test runs against the same
   binaries are silent. See `docs/e2e-design.md` for design.
 
+## macOS wrapping-key cache
+
+See `docs/wrapping-key-cache.md`. New sshenc keys on macOS are stored
+with `SecAccessControl(.userPresence)` on their keychain wrapping-key
+entry. The agent caches the unlocked key in `mlock`ed,
+`zeroize`-on-drop memory for `wrapping_key_cache_ttl_secs` seconds
+(default 300) so subsequent signs within the window are silent.
+
+Manual verification (macOS laptop with Touch ID):
+
+```sh
+# With a fresh enclave key created on this branch, the FIRST sign
+# via the agent prompts for Touch ID; subsequent signs within 5 min
+# are silent. After the TTL expires, the next sign re-prompts.
+sshenc keygen --label cache-test --no-pub-file
+sshenc agent -f &
+ssh -o IdentityAgent=~/.sshenc/agent.sock user@host true  # Touch ID
+ssh -o IdentityAgent=~/.sshenc/agent.sock user@host true  # silent
+sleep 301
+ssh -o IdentityAgent=~/.sshenc/agent.sock user@host true  # Touch ID
+```
+
 ## Fuzz Targets
 
 Run with: `cd fuzz && cargo +nightly fuzz run <target>`

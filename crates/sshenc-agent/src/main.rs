@@ -250,6 +250,15 @@ fn main() -> Result<()> {
         }
     };
 
+    // Wrapping-key cache TTL precedence:
+    //   1. SSHENC_WRAPPING_KEY_CACHE_TTL_SECS env (test/ad-hoc override)
+    //   2. config.toml `wrapping_key_cache_ttl_secs`
+    //   3. compiled-in default (300s)
+    let wrapping_key_cache_ttl = std::env::var_os("SSHENC_WRAPPING_KEY_CACHE_TTL_SECS")
+        .and_then(|v| v.to_string_lossy().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(config.wrapping_key_cache_ttl_secs));
+
     #[cfg(unix)]
     {
         let socket_path = PathBuf::from(&cli.socket);
@@ -258,6 +267,7 @@ fn main() -> Result<()> {
             config.pub_dir.clone(),
             allowed_labels,
             config.prompt_policy,
+            wrapping_key_cache_ttl,
             ready_file.as_deref(),
         ));
         if let Err(ref error) = result {
@@ -273,6 +283,7 @@ fn main() -> Result<()> {
             config.pub_dir.clone(),
             allowed_labels,
             config.prompt_policy,
+            wrapping_key_cache_ttl,
             ready_file.as_deref(),
         ));
         if let Err(ref error) = result {

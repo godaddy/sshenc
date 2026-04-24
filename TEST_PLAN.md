@@ -59,6 +59,40 @@ cargo fmt --all -- --check
 - **sshenc-gitenc** (~15 tests): Arg parsing (label/config/short flags/empty/passthrough), build_ssh_command validation, configure_repo_entries (default/named label/recorded pub path/missing pub path), git key metadata parsing (app_specific/legacy), signing_key_path validation
 - **sshenc-pkcs11** (~4 tests): Session management, slot/token info
 - **sshenc-test-support** (~8 tests): Mock backend key lifecycle (generate/list/get/delete/sign), deterministic key generation, pub file write, comment handling
+- **sshenc-e2e** (22 scenarios total, `#[ignore]` by default): sshenc
+  against a real OpenSSH server in a Docker container. Covers:
+  - **drop-in compatibility** (`tests/drop_in.rs`, 6 scenarios):
+    `sshenc install` + plain ssh, empty-agent fallback, both-keys-unlabeled
+    (on-disk and enclave variants), `--label` enclave-only restriction,
+    and plain `ssh` with `IdentityAgent`.
+  - **ssh function coverage** (`tests/ssh_functions.rs`, 14 scenarios):
+    scp/sftp/rsync data transfer, `ssh -L` / `-A` forwarding, `ssh-add -l`
+    enumeration, `sshenc -Y sign` + verify, concurrent signing, legacy
+    on-disk RSA + ECDSA keys, exit-code propagation, binary stdin/stdout
+    roundtrip, `ssh -tt` pty allocation, and `ssh-copy-id` key deposit.
+  - **extended** (`tests/extended.rs`, 2 scenarios, gated behind
+    `SSHENC_E2E_EXTENDED=1`): multi-label enclave-key selection and
+    `sshenc default` promotion. Gated because each extra SE key on macOS
+    adds one keychain ACL prompt per binary per rebuild.
+
+  Run with:
+  ```sh
+  make e2e                                                        # baseline 13 scenarios
+  SSHENC_E2E_EXTENDED=1 cargo test -p sshenc-e2e -- --ignored --test-threads=1  # all 15
+  ```
+
+  **Backend coverage.** The suite is backend-agnostic: assertions are on
+  observable SSH behavior, not on which backend signed. On developer
+  macOS machines the Secure Enclave backend runs; on Linux CI runners
+  without TPM, the software keyring backend runs. Both paths pass the
+  same scenarios.
+
+  **macOS prompt budget.** Per rebuild of either `sshenc` or
+  `sshenc-agent`, each persistent enclave key prompts once for keychain
+  ACL. Baseline mode uses one shared key → 2 prompts per rebuild (one
+  per binary). Extended mode uses three keys → up to 6 prompts per
+  rebuild. After Always Allow, subsequent test runs against the same
+  binaries are silent. See `docs/e2e-design.md` for design.
 
 ## Fuzz Targets
 

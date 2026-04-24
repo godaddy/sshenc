@@ -27,6 +27,16 @@ pub trait KeyBackend: Send + Sync {
     /// Delete a key by label.
     fn delete(&self, label: &str) -> Result<()>;
 
+    /// Rename a key from `old_label` to `new_label`.
+    ///
+    /// Must be atomic enough that the key remains usable under exactly
+    /// one label at all times from the perspective of subsequent
+    /// `get`/`sign` calls. Backends with label-keyed side state (macOS
+    /// keychain wrapping entries, keyring KEKs) must move that state
+    /// together with the on-disk metadata — otherwise a plain metadata
+    /// rename leaves the new label unable to decrypt.
+    fn rename(&self, old_label: &str, new_label: &str) -> Result<()>;
+
     /// Sign data using the key identified by label.
     /// Returns the raw signature bytes (DER-encoded ECDSA for the real backend).
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>>;

@@ -4,10 +4,16 @@ LIBDIR = $(PREFIX)/lib
 
 DYLIB = libsshenc_pkcs11.dylib
 
-.PHONY: build install uninstall clean
+.PHONY: build install uninstall clean e2e
 
 build:
 	cargo build --workspace --release
+
+# End-to-end tests against a Docker OpenSSH server. Requires Docker.
+# On macOS the first run after each rebuild of sshenc or sshenc-agent
+# will prompt twice for keychain "Always Allow" (one per binary).
+e2e:
+	cargo test -p sshenc-e2e -- --ignored --test-threads=1
 
 install: build
 	install -d $(BINDIR) $(LIBDIR)

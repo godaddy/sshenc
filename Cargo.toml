@@ -10,6 +10,7 @@ members = [
     "crates/sshenc-test-support",
     "crates/sshenc-gitenc",
     "crates/sshenc-tpm-bridge",
+    "crates/sshenc-e2e",
 ]
 resolver = "2"
 

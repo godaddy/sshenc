@@ -1,0 +1,30 @@
+[package]
+name = "sshenc-e2e"
+description = "End-to-end tests for sshenc against a containerized OpenSSH server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+
+[[test]]
+name = "drop_in"
+path = "tests/drop_in.rs"
+
+[[test]]
+name = "ssh_functions"
+path = "tests/ssh_functions.rs"
+
+[[test]]
+name = "extended"
+path = "tests/extended.rs"
+
+[lints]
+workspace = true

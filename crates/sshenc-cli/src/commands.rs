@@ -1306,18 +1306,18 @@ fn key_files_exist(keys_dir: &Path, label: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-fn promote_to_default_with_dirs<F>(
+fn promote_to_default_with_dirs<F, R>(
     keys_dir: &Path,
     ssh_dir: &Path,
     label: &str,
     allow_pub_overwrite: bool,
     write_file: F,
+    rename_key: R,
 ) -> Result<Option<PromoteDefaultResult>>
 where
-    F: Fn(&Path, &[u8]) -> Result<()> + Copy,
+    F: Fn(&Path, &[u8]) -> Result<()>,
+    R: Fn(&str, &str) -> Result<()>,
 {
-    use enclaveapp_core::metadata;
-
     if label == "default" {
         bail!("key is already named 'default'");
     }
@@ -1352,13 +1352,12 @@ where
 
         if key_files_exist(keys_dir, "default") {
             let renamed_default = format!("default-backup-{}", std::process::id());
-            metadata::rename_key_files(keys_dir, "default", &renamed_default)
+            rename_key("default", &renamed_default)
                 .map_err(|e| anyhow!("failed to rename default key: {e}"))?;
             backup_label = Some(renamed_default);
         }
 
-        metadata::rename_key_files(keys_dir, label, "default")
-            .map_err(|e| anyhow!("failed to rename key: {e}"))?;
+        rename_key(label, "default").map_err(|e| anyhow!("failed to rename key: {e}"))?;
         source_renamed = true;
 
         let ssh_pubkey = load_label_public_key(keys_dir, "default")
@@ -1395,16 +1394,13 @@ where
             let mut rollback_failures = Vec::new();
 
             if source_renamed && key_files_exist(keys_dir, "default") {
-                if let Err(rollback_error) = metadata::rename_key_files(keys_dir, "default", label)
-                {
+                if let Err(rollback_error) = rename_key("default", label) {
                     rollback_failures.push(format!("restore source label: {rollback_error}"));
                 }
             }
             if let Some(ref backup_label) = backup_label {
                 if key_files_exist(keys_dir, backup_label) {
-                    if let Err(rollback_error) =
-                        metadata::rename_key_files(keys_dir, backup_label, "default")
-                    {
+                    if let Err(rollback_error) = rename_key(backup_label, "default") {
                         rollback_failures.push(format!("restore default label: {rollback_error}"));
                     }
                 }
@@ -1453,9 +1449,21 @@ pub fn promote_to_default(label: &str) -> Result<()> {
     {
         let keys_dir = sshenc_keys_dir();
         let ssh_dir = default_ssh_dir()?;
-        let promotion = if let Some(promotion) =
-            promote_to_default_with_dirs(&keys_dir, &ssh_dir, label, false, write_atomic_file)?
-        {
+        let backend = SshencBackend::new(ssh_dir.clone(), false)
+            .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
+        let rename_via_backend = |old: &str, new: &str| -> Result<()> {
+            backend
+                .rename(old, new)
+                .map_err(|e| anyhow!("backend rename failed: {e}"))
+        };
+        let promotion = if let Some(promotion) = promote_to_default_with_dirs(
+            &keys_dir,
+            &ssh_dir,
+            label,
+            false,
+            write_atomic_file,
+            rename_via_backend,
+        )? {
             promotion
         } else {
             let id_ecdsa_pub = ssh_dir.join("id_ecdsa.pub");
@@ -1468,8 +1476,15 @@ pub fn promote_to_default(label: &str) -> Result<()> {
                 println!("Cancelled.");
                 return Ok(());
             }
-            promote_to_default_with_dirs(&keys_dir, &ssh_dir, label, true, write_atomic_file)?
-                .ok_or_else(|| anyhow!("default-key promotion confirmation was not applied"))?
+            promote_to_default_with_dirs(
+                &keys_dir,
+                &ssh_dir,
+                label,
+                true,
+                write_atomic_file,
+                rename_via_backend,
+            )?
+            .ok_or_else(|| anyhow!("default-key promotion confirmation was not applied"))?
         };
 
         println!("Promoted '{label}' to default key.");
@@ -2713,11 +2728,20 @@ HKEY_CURRENT_USER\Environment
         std::fs::write(ssh_dir.join("id_ecdsa"), "old private").unwrap();
         std::fs::write(ssh_dir.join("id_ecdsa.pub"), "old public").unwrap();
 
-        let error =
-            promote_to_default_with_dirs(&keys_dir, &ssh_dir, "work", true, |_path, _data| {
-                Err(anyhow!("disk full"))
-            })
-            .unwrap_err();
+        let keys_dir_for_rename = keys_dir.clone();
+        let rename_on_disk = move |old: &str, new: &str| -> Result<()> {
+            enclaveapp_core::metadata::rename_key_files(&keys_dir_for_rename, old, new)
+                .map_err(|e| anyhow!("metadata rename: {e}"))
+        };
+        let error = promote_to_default_with_dirs(
+            &keys_dir,
+            &ssh_dir,
+            "work",
+            true,
+            |_path, _data| Err(anyhow!("disk full")),
+            rename_on_disk,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("disk full"));
 
         assert!(key_files_exist(&keys_dir, "work"));
@@ -2747,12 +2771,23 @@ HKEY_CURRENT_USER\Environment
         std::fs::write(ssh_dir.join("id_ecdsa"), "old private").unwrap();
         std::fs::write(ssh_dir.join("id_ecdsa.pub"), "old public").unwrap();
 
-        let error =
-            promote_to_default_with_dirs(&keys_dir, &ssh_dir, "work", true, |path, _data| {
+        let keys_dir_for_rename = keys_dir.clone();
+        let rename_on_disk = move |old: &str, new: &str| -> Result<()> {
+            enclaveapp_core::metadata::rename_key_files(&keys_dir_for_rename, old, new)
+                .map_err(|e| anyhow!("metadata rename: {e}"))
+        };
+        let error = promote_to_default_with_dirs(
+            &keys_dir,
+            &ssh_dir,
+            "work",
+            true,
+            |path, _data| {
                 std::fs::create_dir(path.with_extension("")).unwrap();
                 Err(anyhow!("disk full"))
-            })
-            .unwrap_err();
+            },
+            rename_on_disk,
+        )
+        .unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("disk full"));

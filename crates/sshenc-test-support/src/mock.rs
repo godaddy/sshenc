@@ -128,6 +128,37 @@ impl KeyBackend for MockKeyBackend {
         }
     }
 
+    fn rename(&self, old_label: &str, new_label: &str) -> Result<()> {
+        let mut keys = self.keys.lock().map_err(|_| lock_err())?;
+        if old_label == new_label {
+            return Ok(());
+        }
+        if !keys.contains_key(old_label) {
+            return Err(Error::KeyNotFound {
+                label: old_label.to_string(),
+            });
+        }
+        if keys.contains_key(new_label) {
+            return Err(Error::DuplicateLabel {
+                label: new_label.to_string(),
+            });
+        }
+        let entry = keys
+            .remove(old_label)
+            .expect("existence checked above under the same lock");
+        let label = sshenc_core::key::KeyLabel::new(new_label)?;
+        let mut renamed_info = entry.info.clone();
+        renamed_info.metadata.label = label;
+        keys.insert(
+            new_label.to_string(),
+            MockKey {
+                info: renamed_info,
+                seed: entry.seed,
+            },
+        );
+        Ok(())
+    }
+
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         let keys = self.keys.lock().map_err(|_| lock_err())?;
         let key = keys.get(label).ok_or_else(|| Error::KeyNotFound {

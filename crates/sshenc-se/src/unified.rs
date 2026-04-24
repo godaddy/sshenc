@@ -34,7 +34,15 @@ pub struct SshencBackend {
 }
 
 /// Return the sshenc keys directory (~/.sshenc/keys/).
+///
+/// Respects the `SSHENC_KEYS_DIR` environment variable if set. That override
+/// exists to let e2e tests share one persistent SE key across runs instead
+/// of creating a fresh one per-run — on macOS each new SE key gets its own
+/// keychain ACL, so per-run keys produce per-run "Always Allow" prompts.
 pub fn sshenc_keys_dir() -> PathBuf {
+    if let Some(override_path) = std::env::var_os("SSHENC_KEYS_DIR") {
+        return PathBuf::from(override_path);
+    }
     // sshenc uses ~/.sshenc/keys/ on Unix, %APPDATA%\sshenc\keys\ on Windows.
     #[cfg(windows)]
     {

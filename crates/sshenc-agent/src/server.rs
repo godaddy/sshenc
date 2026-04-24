@@ -790,6 +790,41 @@ fn handle_request(
                 signature_blob: ssh_sig,
             })
         }
+        AgentRequest::DeleteKey { label } => {
+            let label_str = match std::str::from_utf8(&label) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("delete_key: label was not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            tracing::debug!(label = label_str, "handling delete request");
+
+            // Apply the same `allowed_labels` gate as SignRequest:
+            // an agent started with `--labels a,b` won't delete keys
+            // outside that set. `sshenc delete` falls back to a local
+            // deletion path when it sees FAILURE, which lets the user
+            // manage keys outside the allowed set interactively
+            // without loosening the agent's run-time scope.
+            if !allowed_labels.is_empty() && !allowed_labels.contains(label_str) {
+                tracing::warn!(
+                    label = label_str,
+                    "delete_key: label not in agent's allowed list"
+                );
+                return Ok(AgentResponse::Failure);
+            }
+
+            match backend.delete(label_str) {
+                Ok(()) => {
+                    tracing::info!(label = label_str, "delete_key: succeeded");
+                    Ok(AgentResponse::Success)
+                }
+                Err(e) => {
+                    tracing::warn!(label = label_str, error = %e, "delete_key: failed");
+                    Ok(AgentResponse::Failure)
+                }
+            }
+        }
         AgentRequest::Unknown(msg_type) => {
             tracing::debug!(msg_type, "unknown message type");
             Ok(AgentResponse::Failure)
@@ -1070,6 +1105,88 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
+    }
+
+    #[test]
+    fn test_delete_key_succeeds_for_existing_label() {
+        let backend = setup_backend();
+        assert_eq!(backend.list().unwrap().len(), 1);
+
+        let resp = handle_request(
+            AgentRequest::DeleteKey {
+                label: b"test-key".to_vec(),
+            },
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Success));
+        assert_eq!(
+            backend.list().unwrap().len(),
+            0,
+            "delete should have removed the key from the backend"
+        );
+    }
+
+    #[test]
+    fn test_delete_key_fails_for_missing_label() {
+        let backend = setup_backend();
+
+        let resp = handle_request(
+            AgentRequest::DeleteKey {
+                label: b"no-such-label".to_vec(),
+            },
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+        assert_eq!(
+            backend.list().unwrap().len(),
+            1,
+            "backend must be untouched"
+        );
+    }
+
+    #[test]
+    fn test_delete_key_blocked_by_label_filter() {
+        let backend = setup_backend();
+        let allowed: HashSet<String> = ["other-key".to_string()].into_iter().collect();
+
+        let resp = handle_request(
+            AgentRequest::DeleteKey {
+                label: b"test-key".to_vec(),
+            },
+            &backend,
+            &allowed,
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+        assert_eq!(
+            backend.list().unwrap().len(),
+            1,
+            "filter must prevent the delete from reaching the backend"
+        );
+    }
+
+    #[test]
+    fn test_delete_key_rejects_non_utf8_label() {
+        let backend = setup_backend();
+        // 0xFF is never valid UTF-8 start byte.
+        let resp = handle_request(
+            AgentRequest::DeleteKey {
+                label: vec![0xFF, 0xFE, 0xFD],
+            },
+            &backend,
+            &empty_labels(),
+            PromptPolicy::KeyDefault,
+        )
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+        assert_eq!(backend.list().unwrap().len(), 1);
     }
 
     #[test]

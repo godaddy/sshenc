@@ -20,6 +20,16 @@ pub const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
 pub const SSH_AGENT_FAILURE: u8 = 5;
 pub const SSH_AGENT_SUCCESS: u8 = 6;
 
+// sshenc-specific extension: delete a key by label.
+//
+// Type number 0xF0 is well outside OpenSSH's assigned range (0-29),
+// so any standard ssh-agent receiving this value will respond with
+// `SSH_AGENT_FAILURE` per the draft-miller-ssh-agent rule for unknown
+// message types. sshenc clients treat that as "agent doesn't support
+// delete RPC" and fall back to local deletion — same pattern used
+// for the sign-via-agent proxy.
+pub const SSH_AGENTC_SSHENC_DELETE_KEY: u8 = 0xF0;
+
 // Sign request flags
 pub const SSH_AGENT_RSA_SHA2_256: u32 = 0x02;
 pub const SSH_AGENT_RSA_SHA2_512: u32 = 0x04;
@@ -46,6 +56,15 @@ pub enum AgentRequest {
         data: Vec<u8>,
         /// Flags (e.g., for RSA signature algorithm selection).
         flags: u32,
+    },
+    /// `SSH_AGENTC_SSHENC_DELETE_KEY` (sshenc extension): destroy a
+    /// Secure-Enclave / TPM / software key and its wrapping-key
+    /// keychain entry. Used by `sshenc delete` so the agent's warm
+    /// wrapping-key cache is reused instead of cold-starting a fresh
+    /// `SshencBackend` per invocation.
+    DeleteKey {
+        /// The key label as UTF-8 bytes.
+        label: Vec<u8>,
     },
     /// An unrecognized message type.
     Unknown(u8),
@@ -96,6 +115,11 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
                 flags,
             })
         }
+        SSH_AGENTC_SSHENC_DELETE_KEY => {
+            let mut cursor = Cursor::new(body);
+            let label = wire::read_string(&mut cursor)?;
+            Ok(AgentRequest::DeleteKey { label })
+        }
         other => Ok(AgentRequest::Unknown(other)),
     }
 }
@@ -139,6 +163,11 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
             wire::write_string(&mut buf, key_blob);
             wire::write_string(&mut buf, data);
             buf.extend_from_slice(&flags.to_be_bytes());
+            buf
+        }
+        AgentRequest::DeleteKey { label } => {
+            let mut buf = vec![SSH_AGENTC_SSHENC_DELETE_KEY];
+            wire::write_string(&mut buf, label);
             buf
         }
         AgentRequest::Unknown(t) => vec![*t],
@@ -548,5 +577,48 @@ mod tests {
     fn test_serialize_failure_is_single_byte() {
         let payload = serialize_response(&AgentResponse::Failure);
         assert_eq!(payload, vec![SSH_AGENT_FAILURE]);
+    }
+
+    // --- sshenc DeleteKey extension ---
+
+    #[test]
+    fn roundtrip_delete_key_request() {
+        let original = AgentRequest::DeleteKey {
+            label: b"my-key".to_vec(),
+        };
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_DELETE_KEY);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::DeleteKey { label } => assert_eq!(label, b"my-key"),
+            other => panic!("expected DeleteKey, got {other:?}"),
+        }
+    }
+
+    // OpenSSH's assigned range is 0..=29; a compile-time guard keeps
+    // our extension forward-compatible if the OpenSSH protocol grows.
+    const _: () = assert!(SSH_AGENTC_SSHENC_DELETE_KEY >= 0xF0);
+
+    #[test]
+    fn parse_rejects_truncated_delete_key_request() {
+        // Just the type byte, no label string — should surface as a
+        // protocol error, not be silently treated as empty-label.
+        let payload = vec![SSH_AGENTC_SSHENC_DELETE_KEY];
+        let result = parse_request(&payload);
+        assert!(result.is_err(), "truncated DeleteKey should error");
+    }
+
+    #[test]
+    fn delete_key_request_preserves_unicode_label() {
+        // Labels are UTF-8 — make sure we don't re-encode or mangle.
+        let label = "キー-42".as_bytes().to_vec();
+        let original = AgentRequest::DeleteKey {
+            label: label.clone(),
+        };
+        let parsed = parse_request(&serialize_request(&original)).unwrap();
+        match parsed {
+            AgentRequest::DeleteKey { label: got } => assert_eq!(got, label),
+            other => panic!("expected DeleteKey, got {other:?}"),
+        }
     }
 }

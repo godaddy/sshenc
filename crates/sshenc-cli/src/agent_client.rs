@@ -1,24 +1,34 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Proxy `sshenc -Y sign` through a running SSH agent.
+//! Proxy secret-touching operations through a running `sshenc-agent`.
 //!
-//! `sshenc -Y sign` is invoked by `git commit -S` once per commit.
-//! A freshly constructed `SshencBackend` always starts with a cold
-//! wrapping-key cache, so with `wrapping_key_user_presence = true`
-//! every commit triggers a fresh Touch ID / passcode prompt. A running
-//! `sshenc-agent` already holds a warm cache for the TTL configured
-//! in `~/.config/sshenc/config.toml`, so proxying the signature through
-//! `SSH_AUTH_SOCK` collapses the per-commit prompts into one per TTL
-//! window.
+//! The agent holds the wrapping-key cache for its configured TTL; by
+//! routing operations through it the CLI reuses that warm cache
+//! instead of cold-starting a fresh `SshencBackend` (and a fresh
+//! Touch ID / passcode prompt) per invocation. This module is the
+//! client half of that proxy — the server side lives in
+//! `sshenc-agent`.
 //!
-//! The proxy is strictly an optimization:
+//! Two operations are proxied today:
+//!
+//! - **Sign** (`SSH_AGENTC_SIGN_REQUEST`): used by `sshenc -Y sign`
+//!   so `git commit -S` collapses into one prompt per TTL.
+//! - **DeleteKey** (`SSH_AGENTC_SSHENC_DELETE_KEY`, sshenc-specific
+//!   extension at message type `0xF0`): used by `sshenc delete` so
+//!   destructive key management goes through the same cache. The
+//!   custom type is outside OpenSSH's assigned range, so foreign
+//!   agents cleanly reply with `SSH_AGENT_FAILURE` and the CLI falls
+//!   back to local deletion.
+//!
+//! Every proxy is strictly an optimization:
 //! - If `SSH_AUTH_SOCK` isn't set or points to a missing socket, we
 //!   fall back immediately.
-//! - If the agent doesn't advertise a matching identity, we fall back.
-//! - If the sign request fails or yields an empty blob, we fall back.
+//! - If the agent doesn't advertise / accept the target, we fall
+//!   back.
+//! - If the RPC fails, we fall back.
 //!
-//! Only the successful path short-circuits local signing.
+//! Only the successful path short-circuits local execution.
 //!
 //! Windows is not covered: `sshenc-agent` on Windows uses a named
 //! pipe and `SSH_AUTH_SOCK` is typically not set — the fallback path
@@ -27,6 +37,7 @@
 #[cfg(unix)]
 use sshenc_agent_proto::message::{
     self, AgentRequest, AgentResponse, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENTC_SIGN_REQUEST,
+    SSH_AGENTC_SSHENC_DELETE_KEY,
 };
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -73,7 +84,48 @@ pub(crate) fn try_sign_via_socket(
     pubkey_blob: &[u8],
     data: &[u8],
 ) -> Option<Vec<u8>> {
-    let mut stream = match UnixStream::connect(sock_path) {
+    let mut stream = connect_agent(sock_path)?;
+
+    if !agent_has_identity(&mut stream, pubkey_blob)? {
+        tracing::debug!("agent proxy: no matching identity, falling back");
+        return None;
+    }
+
+    request_signature(&mut stream, pubkey_blob, data)
+}
+
+/// Try to delete the key with the given `label` through
+/// `SSH_AUTH_SOCK`. Returns `Some(())` when the agent confirms the
+/// delete; `None` for every fall-back reason (no socket, agent
+/// doesn't support the extension, label not allowed, backend
+/// reported an error). Falling back to local deletion is the
+/// caller's responsibility.
+#[must_use]
+pub fn try_delete_via_agent(label: &str) -> Option<()> {
+    #[cfg(unix)]
+    {
+        let sock_path = std::env::var_os("SSH_AUTH_SOCK")?;
+        if sock_path.is_empty() {
+            return None;
+        }
+        try_delete_via_socket(Path::new(&sock_path), label)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = label;
+        None
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn try_delete_via_socket(sock_path: &Path, label: &str) -> Option<()> {
+    let mut stream = connect_agent(sock_path)?;
+    request_delete(&mut stream, label)
+}
+
+#[cfg(unix)]
+fn connect_agent(sock_path: &Path) -> Option<UnixStream> {
+    let stream = match UnixStream::connect(sock_path) {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!(error = %e, "agent proxy: connect failed, falling back");
@@ -86,13 +138,7 @@ pub(crate) fn try_sign_via_socket(
         tracing::debug!("agent proxy: failed to set socket timeouts, falling back");
         return None;
     }
-
-    if !agent_has_identity(&mut stream, pubkey_blob)? {
-        tracing::debug!("agent proxy: no matching identity, falling back");
-        return None;
-    }
-
-    request_signature(&mut stream, pubkey_blob, data)
+    Some(stream)
 }
 
 #[cfg(unix)]
@@ -136,6 +182,27 @@ fn request_signature(stream: &mut UnixStream, pubkey_blob: &[u8], data: &[u8]) -
         }
         other => {
             tracing::debug!(?other, "agent proxy: unexpected response to sign request");
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+fn request_delete(stream: &mut UnixStream, label: &str) -> Option<()> {
+    let payload = message::serialize_request(&AgentRequest::DeleteKey {
+        label: label.as_bytes().to_vec(),
+    });
+    debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_DELETE_KEY);
+    send_framed(stream, &payload)?;
+
+    match recv_response(stream)? {
+        AgentResponse::Success => Some(()),
+        AgentResponse::Failure => {
+            tracing::debug!("agent proxy: delete returned FAILURE, falling back");
+            None
+        }
+        other => {
+            tracing::debug!(?other, "agent proxy: unexpected response to delete request");
             None
         }
     }
@@ -386,5 +453,49 @@ mod tests {
             }
             other => panic!("expected SignRequest, got {other:?}"),
         }
+    }
+
+    // ---- delete path ----
+
+    #[test]
+    fn delete_returns_some_on_success_and_label_reaches_agent() {
+        let sock_path = unique_socket_path("del-ok");
+        let handle = spawn_fake_agent(&sock_path, vec![AgentResponse::Success]);
+
+        let got = try_delete_via_socket(&sock_path, "my-label");
+        let captured = handle.join().unwrap().expect("agent thread");
+        drop(std::fs::remove_file(&sock_path));
+
+        assert_eq!(got, Some(()));
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            AgentRequest::DeleteKey { label } => assert_eq!(label, b"my-label"),
+            other => panic!("expected DeleteKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_falls_back_on_failure_response() {
+        // Simulates either "label not allowed", "backend reported
+        // error", or "agent doesn't know DeleteKey" — all surface as
+        // FAILURE on the wire, and all should signal local fallback.
+        let sock_path = unique_socket_path("del-fail");
+        let handle = spawn_fake_agent(&sock_path, vec![AgentResponse::Failure]);
+
+        let got = try_delete_via_socket(&sock_path, "x");
+        drop(handle.join().ok());
+        drop(std::fs::remove_file(&sock_path));
+
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn delete_falls_back_when_socket_missing() {
+        let bogus = std::env::temp_dir().join(format!(
+            "sshenc-cli-agentproxy-del-nope-{}.sock",
+            std::process::id()
+        ));
+        drop(std::fs::remove_file(&bogus));
+        assert!(try_delete_via_socket(&bogus, "any").is_none());
     }
 }

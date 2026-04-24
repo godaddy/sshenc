@@ -647,7 +647,11 @@ pub fn delete(
 
     for key in &keys_to_delete {
         let label = key.metadata.label.as_str();
-        backend.delete(label)?;
+        if crate::agent_client::try_delete_via_agent(label).is_some() {
+            tracing::debug!(label, "delete: routed through agent proxy");
+        } else {
+            backend.delete(label)?;
+        }
         println!("Deleted key: {label}");
 
         if delete_pub {
@@ -1753,7 +1757,7 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let requested_pub = read_pubkey_from_openssh_file(&sign_args.key_file)?;
     let pubkey_blob = requested_pub.wire_blob();
 
-    if let Some(ssh_sig) = crate::agent_sign::try_sign_via_agent(&pubkey_blob, &signed_data) {
+    if let Some(ssh_sig) = crate::agent_client::try_sign_via_agent(&pubkey_blob, &signed_data) {
         tracing::debug!("ssh_sign: signed via agent proxy");
         let sig_blob =
             build_ssh_signature_from_ssh_sig(&requested_pub, &sign_args.namespace, &ssh_sig);

@@ -22,11 +22,12 @@
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
 
 use sshenc_e2e::{
-    docker_skip_reason, generate_on_disk_ed25519, pick_free_port, run, shared_enclave_pubkey,
-    SshdContainer, SshencEnv,
+    docker_skip_reason, generate_on_disk_ed25519, generate_on_disk_key, pick_free_port, run,
+    shared_enclave_pubkey, OnDiskKeyKind, SshdContainer, SshencEnv,
 };
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -424,4 +425,351 @@ fn concurrent_ssh_invocations_via_enclave_agent() {
         "concurrent ssh failures:\n{}",
         errors.join("\n")
     );
+}
+
+/// `rsync -e ssh` through the sshenc agent.
+///
+/// Real-world workflow: `rsync -av -e 'ssh …' src/ user@host:dst/`. Proves
+/// that rsync's double-ssh invocation (local rsync → ssh child → remote
+/// rsync --server) authenticates through the sshenc agent and the ssh
+/// client's environment is preserved across the fork.
+#[test]
+#[ignore = "requires docker"]
+fn rsync_over_ssh_via_enclave_agent() {
+    if skip_if_no_docker("rsync_over_ssh_via_enclave_agent") {
+        return;
+    }
+    let (env, _on_disk, _enclave, container) = env_with_enclave_trusted_container();
+
+    // Source tree with a couple of files.
+    let src = env.home().join("rsync_src");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::write(src.join("a.txt"), b"alpha\n").expect("write a");
+    std::fs::write(src.join("b.bin"), (0_u8..=200).collect::<Vec<u8>>()).expect("write b");
+    std::fs::create_dir_all(src.join("nested")).expect("mkdir nested");
+    std::fs::write(src.join("nested/c.txt"), b"gamma\n").expect("write c");
+
+    let ssh_cmd = format!(
+        "ssh -F /dev/null -o Port={port} -o StrictHostKeyChecking=accept-new \
+         -o UserKnownHostsFile={known} -o ConnectTimeout=10 \
+         -o NumberOfPasswordPrompts=0 -o PreferredAuthentications=publickey \
+         -o IdentityAgent={sock}",
+        port = container.host_port,
+        known = env.known_hosts().display(),
+        sock = env.socket_path().display(),
+    );
+
+    // Upload.
+    let up = run(env
+        .scrubbed_command("rsync")
+        .arg("-av")
+        .arg("-e")
+        .arg(&ssh_cmd)
+        .arg(format!("{}/", src.display()))
+        .arg("sshtest@127.0.0.1:/home/sshtest/rsync_dst/"))
+    .expect("rsync upload");
+    assert!(
+        up.succeeded(),
+        "rsync upload failed; stdout:\n{}\nstderr:\n{}",
+        up.stdout,
+        up.stderr
+    );
+
+    // Download to a new local path and compare.
+    let back = env.home().join("rsync_back");
+    std::fs::create_dir_all(&back).expect("mkdir back");
+    let down = run(env
+        .scrubbed_command("rsync")
+        .arg("-av")
+        .arg("-e")
+        .arg(&ssh_cmd)
+        .arg("sshtest@127.0.0.1:/home/sshtest/rsync_dst/")
+        .arg(format!("{}/", back.display())))
+    .expect("rsync download");
+    assert!(
+        down.succeeded(),
+        "rsync download failed; stderr:\n{}",
+        down.stderr
+    );
+
+    assert_eq!(
+        std::fs::read(back.join("a.txt")).expect("read a"),
+        b"alpha\n"
+    );
+    assert_eq!(
+        std::fs::read(back.join("b.bin")).expect("read b"),
+        (0_u8..=200).collect::<Vec<u8>>()
+    );
+    assert_eq!(
+        std::fs::read(back.join("nested/c.txt")).expect("read c"),
+        b"gamma\n"
+    );
+}
+
+/// Existing on-disk RSA keys continue to authenticate when sshenc-agent
+/// is in the picture. Proves drop-in compatibility for the most common
+/// legacy enterprise key type.
+#[test]
+#[ignore = "requires docker"]
+fn on_disk_rsa_key_still_works_with_sshenc_agent() {
+    on_disk_legacy_key_works(OnDiskKeyKind::Rsa, "on-disk-rsa@e2e");
+}
+
+/// Existing on-disk ECDSA keys continue to authenticate when sshenc-agent
+/// is in the picture. Separate from the RSA case because ECDSA and RSA
+/// traverse different client-side negotiation paths.
+#[test]
+#[ignore = "requires docker"]
+fn on_disk_ecdsa_key_still_works_with_sshenc_agent() {
+    on_disk_legacy_key_works(OnDiskKeyKind::Ecdsa, "on-disk-ecdsa@e2e");
+}
+
+fn on_disk_legacy_key_works(kind: OnDiskKeyKind, comment: &str) {
+    let tag = kind.default_filename();
+    if skip_if_no_docker(tag) {
+        return;
+    }
+    let mut env = SshencEnv::new().expect("env");
+    env.use_ephemeral_keys_dir().expect("ephemeral keys dir");
+    let pubkey = generate_on_disk_key(&env, kind, comment).expect("on-disk keygen");
+    env.start_agent().expect("agent start");
+    let container = SshdContainer::start(&[&pubkey]).expect("sshd container");
+
+    let outcome = run(env
+        .ssh_cmd(&container)
+        .arg("-o")
+        .arg(format!("IdentityAgent={}", env.socket_path().display()))
+        .arg("-i")
+        .arg(env.ssh_dir().join(kind.default_filename()))
+        .arg("sshtest@127.0.0.1")
+        .arg("true"))
+    .expect("ssh");
+    assert!(
+        outcome.succeeded(),
+        "{tag}: expected ssh to succeed; stderr:\n{}",
+        outcome.stderr
+    );
+}
+
+/// Exit codes from the remote command must reach the local caller.
+///
+/// `sshenc ssh host 'exit 42'` must exit 42. Critical for CI/build
+/// scripts that rely on SSH exit codes for flow control.
+#[test]
+#[ignore = "requires docker"]
+fn exit_code_propagates_through_sshenc_ssh() {
+    if skip_if_no_docker("exit_code_propagates_through_sshenc_ssh") {
+        return;
+    }
+    let (env, _on_disk, _enclave, container) = env_with_enclave_trusted_container();
+
+    for expected in [0, 1, 17, 42, 127] {
+        let mut cmd = env.sshenc_cmd().expect("sshenc cmd");
+        cmd.arg("ssh").arg("--");
+        SshencEnv::apply_ssh_isolation(&mut cmd, container.host_port, &env.known_hosts());
+        cmd.arg("-o")
+            .arg(format!("IdentityAgent={}", env.socket_path().display()))
+            .arg("sshtest@127.0.0.1")
+            .arg(format!("exit {expected}"));
+        let outcome = run(&mut cmd).expect("sshenc ssh");
+        assert_eq!(
+            outcome.status.code(),
+            Some(expected),
+            "exit {expected}: expected code {expected}, got {:?}; stderr:\n{}",
+            outcome.status.code(),
+            outcome.stderr
+        );
+    }
+}
+
+/// Binary-safe stdin/stdout piping through `sshenc ssh host 'cat'`.
+///
+/// Many admin workflows pipe binary data through ssh (tar, dd, compression
+/// streams). This verifies the channel does not mangle bytes — no CR/LF
+/// translation, no truncation on null bytes, no local buffering quirks.
+#[test]
+#[ignore = "requires docker"]
+fn stdin_stdout_binary_roundtrip_via_sshenc_ssh() {
+    if skip_if_no_docker("stdin_stdout_binary_roundtrip_via_sshenc_ssh") {
+        return;
+    }
+    let (env, _on_disk, _enclave, container) = env_with_enclave_trusted_container();
+
+    // Build a 16 KiB payload that spans the full byte range and includes
+    // NUL, CR, LF specifically so we catch the common breakage modes.
+    let mut payload = Vec::with_capacity(16 * 1024);
+    for i in 0..16 * 1024_usize {
+        payload.push((i % 256) as u8);
+    }
+
+    let mut cmd = env.sshenc_cmd().expect("sshenc cmd");
+    cmd.arg("ssh").arg("--");
+    SshencEnv::apply_ssh_isolation(&mut cmd, container.host_port, &env.known_hosts());
+    cmd.arg("-o")
+        .arg(format!("IdentityAgent={}", env.socket_path().display()))
+        .arg("sshtest@127.0.0.1")
+        .arg("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn ssh");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(&payload)
+        .expect("write payload");
+    // Close stdin so `cat` sees EOF and exits.
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("wait ssh");
+    assert!(
+        output.status.success(),
+        "ssh cat failed; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        payload,
+        "binary roundtrip mismatch: got {} bytes back, expected {}",
+        output.stdout.len(),
+        payload.len()
+    );
+}
+
+/// `ssh -t` forces pty allocation so remote interactive commands work
+/// (sudo-over-ssh, curses, anything checking `isatty`).
+#[test]
+#[ignore = "requires docker"]
+fn ssh_tt_allocates_pty_through_sshenc_agent() {
+    if skip_if_no_docker("ssh_tt_allocates_pty_through_sshenc_agent") {
+        return;
+    }
+    let (env, _on_disk, _enclave, container) = env_with_enclave_trusted_container();
+
+    // `-tt` (double) forces pty allocation even when stdin is not a tty
+    // in the local parent (which is true under cargo test).
+    let mut cmd = env.sshenc_cmd().expect("sshenc cmd");
+    cmd.arg("ssh").arg("--");
+    SshencEnv::apply_ssh_isolation(&mut cmd, container.host_port, &env.known_hosts());
+    cmd.arg("-tt")
+        .arg("-o")
+        .arg(format!("IdentityAgent={}", env.socket_path().display()))
+        .arg("sshtest@127.0.0.1")
+        .arg("tty < /dev/tty");
+    let outcome = run(&mut cmd).expect("sshenc ssh -tt");
+    assert!(
+        outcome.succeeded(),
+        "sshenc ssh -tt failed; stderr:\n{}",
+        outcome.stderr
+    );
+    // `tty` prints the pty device name when connected to a tty.
+    assert!(
+        outcome.stdout.contains("/dev/pts/") || outcome.stdout.contains("/dev/tty"),
+        "expected pty path in output; stdout:\n{}",
+        outcome.stdout
+    );
+}
+
+/// `ssh-copy-id` deposits a pubkey into the remote authorized_keys using
+/// existing credentials. Critical end-user workflow: user has a working
+/// key (on-disk), wants to also authorize their enclave key.
+#[test]
+#[ignore = "requires docker"]
+fn ssh_copy_id_authorizes_new_key_via_existing_credentials() {
+    if skip_if_no_docker("ssh_copy_id_authorizes_new_key_via_existing_credentials") {
+        return;
+    }
+    // Skip if ssh-copy-id isn't on PATH (it ships with OpenSSH but some
+    // minimal Linux installs strip it).
+    if !is_in_path("ssh-copy-id") {
+        eprintln!("skip ssh_copy_id: ssh-copy-id not found in PATH");
+        return;
+    }
+
+    let mut env = SshencEnv::new().expect("env");
+    let on_disk = generate_on_disk_ed25519(&env, "on-disk@e2e").expect("on-disk keygen");
+    let enclave = shared_enclave_pubkey(&env).expect("shared enclave");
+    env.start_agent().expect("agent start");
+
+    // Container initially trusts only the on-disk key.
+    let container = SshdContainer::start(&[&on_disk]).expect("sshd container");
+
+    // Sanity: enclave key should NOT be trusted yet.
+    let mut fail_cmd = env.sshenc_cmd().expect("sshenc cmd");
+    fail_cmd
+        .arg("ssh")
+        .arg("--label")
+        .arg("e2e-shared")
+        .arg("--");
+    SshencEnv::apply_ssh_isolation(&mut fail_cmd, container.host_port, &env.known_hosts());
+    fail_cmd.arg("sshtest@127.0.0.1").arg("true");
+    let before = run(&mut fail_cmd).expect("pre-copy ssh");
+    assert!(
+        !before.succeeded(),
+        "pre-condition failed: enclave key was already trusted"
+    );
+
+    // Write the enclave pubkey to a file and feed it to ssh-copy-id.
+    let enclave_pub = env.ssh_dir().join("enclave_to_copy.pub");
+    std::fs::write(&enclave_pub, format!("{enclave}\n")).expect("write enclave pub");
+
+    // ssh-copy-id uses the current credentials (our on-disk key) to
+    // authenticate, then appends the supplied pubkey to
+    // ~/.ssh/authorized_keys on the remote.
+    let mut copy = env.scrubbed_command("ssh-copy-id");
+    copy.arg("-f") // skip the pre-check ssh probe
+        .arg("-i")
+        .arg(&enclave_pub)
+        .arg("-p")
+        .arg(container.host_port.to_string())
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!(
+            "UserKnownHostsFile={}",
+            env.known_hosts().display()
+        ))
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-o")
+        .arg("NumberOfPasswordPrompts=0")
+        .arg("-o")
+        .arg("PreferredAuthentications=publickey")
+        .arg("-o")
+        .arg(format!(
+            "IdentityFile={}",
+            env.ssh_dir().join("id_ed25519").display()
+        ))
+        .arg("sshtest@127.0.0.1");
+    let outcome = run(&mut copy).expect("ssh-copy-id");
+    assert!(
+        outcome.succeeded(),
+        "ssh-copy-id failed; stdout:\n{}\nstderr:\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+
+    // Now the enclave key should authenticate.
+    let mut ok_cmd = env.sshenc_cmd().expect("sshenc cmd");
+    ok_cmd.arg("ssh").arg("--label").arg("e2e-shared").arg("--");
+    SshencEnv::apply_ssh_isolation(&mut ok_cmd, container.host_port, &env.known_hosts());
+    ok_cmd.arg("sshtest@127.0.0.1").arg("true");
+    let after = run(&mut ok_cmd).expect("post-copy ssh");
+    assert!(
+        after.succeeded(),
+        "enclave key should work after ssh-copy-id; stderr:\n{}",
+        after.stderr
+    );
+}
+
+fn is_in_path(binary: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let candidate = Path::new(&dir).join(binary);
+                candidate.exists()
+            })
+        })
+        .unwrap_or(false)
 }

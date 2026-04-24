@@ -240,22 +240,38 @@ separate job that provides Docker. Failures in the e2e job should block merge.
 5. `label_forces_enclave_and_refuses_on_disk_fallback`
 6. `plain_ssh_with_identity_agent_accepts_both_key_paths`
 
-### `tests/ssh_functions.rs` — seven function-coverage scenarios (baseline)
+### `tests/ssh_functions.rs` — fourteen function-coverage scenarios (baseline)
 
-1. `scp_roundtrips_file_via_enclave_agent` — scp upload + download + byte
-   comparison.
-2. `sftp_lists_remote_directory_via_enclave_agent` — sftp batch-mode
-   `ls` sees files placed via scp.
-3. `ssh_local_port_forward_through_enclave_agent` — `ssh -L` forwards
-   to container sshd; local connect reads `SSH-2.0` banner.
-4. `ssh_a_forwards_sshenc_agent_to_remote` — `ssh -A`; running
-   `ssh-add -l` in the container enumerates forwarded identities.
-5. `ssh_add_l_enumerates_sshenc_agent` — direct `SSH_AUTH_SOCK=<sock>
-   ssh-add -l` lists enclave identities.
-6. `sshenc_y_sign_produces_valid_signature` — `sshenc -Y sign` →
-   `ssh-keygen -Y verify` with an allowed_signers file.
-7. `concurrent_ssh_invocations_via_enclave_agent` — four parallel ssh
-   runs against the same agent all succeed.
+ 1. `scp_roundtrips_file_via_enclave_agent` — scp upload + download + byte
+    comparison.
+ 2. `sftp_lists_remote_directory_via_enclave_agent` — sftp batch-mode
+    `ls` sees files placed via scp.
+ 3. `ssh_local_port_forward_through_enclave_agent` — `ssh -L` forwards
+    to container sshd; local connect reads `SSH-2.0` banner.
+ 4. `ssh_a_forwards_sshenc_agent_to_remote` — `ssh -A`; running
+    `ssh-add -l` in the container enumerates forwarded identities.
+ 5. `ssh_add_l_enumerates_sshenc_agent` — direct `SSH_AUTH_SOCK=<sock>
+    ssh-add -l` lists enclave identities.
+ 6. `sshenc_y_sign_produces_valid_signature` — `sshenc -Y sign` →
+    `ssh-keygen -Y verify` with an allowed_signers file.
+ 7. `concurrent_ssh_invocations_via_enclave_agent` — four parallel ssh
+    runs against the same agent all succeed.
+ 8. `rsync_over_ssh_via_enclave_agent` — `rsync -e ssh` uploads and
+    downloads a directory tree authenticated through the agent; file
+    contents byte-compared.
+ 9. `on_disk_rsa_key_still_works_with_sshenc_agent` — legacy on-disk
+    RSA key authenticates when sshenc-agent is running.
+10. `on_disk_ecdsa_key_still_works_with_sshenc_agent` — same for ECDSA.
+11. `exit_code_propagates_through_sshenc_ssh` — remote exit codes
+    (0, 1, 17, 42, 127) reach the local caller through the wrapper.
+12. `stdin_stdout_binary_roundtrip_via_sshenc_ssh` — 16 KiB of
+    full-range bytes (including NUL/CR/LF) piped through `ssh host cat`
+    and byte-compared.
+13. `ssh_tt_allocates_pty_through_sshenc_agent` — `ssh -tt` produces a
+    working pty on the remote (critical for sudo-over-ssh, curses apps).
+14. `ssh_copy_id_authorizes_new_key_via_existing_credentials` — user
+    with an on-disk key runs `ssh-copy-id` to authorize their enclave
+    pubkey; the enclave key works afterward.
 
 ### `tests/extended.rs` — two scenarios gated behind `SSHENC_E2E_EXTENDED=1`
 

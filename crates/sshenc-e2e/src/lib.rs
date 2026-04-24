@@ -556,24 +556,75 @@ impl Drop for SshencEnv {
     }
 }
 
+/// On-disk key types supported by [`generate_on_disk_key`].
+#[derive(Debug, Clone, Copy)]
+pub enum OnDiskKeyKind {
+    Ed25519,
+    Rsa,
+    Ecdsa,
+}
+
+impl OnDiskKeyKind {
+    fn keygen_type(self) -> &'static str {
+        match self {
+            OnDiskKeyKind::Ed25519 => "ed25519",
+            OnDiskKeyKind::Rsa => "rsa",
+            OnDiskKeyKind::Ecdsa => "ecdsa",
+        }
+    }
+
+    /// Private-key filename. ECDSA uses a non-default name to avoid
+    /// colliding with sshenc's promoted `id_ecdsa` on macOS.
+    pub fn default_filename(self) -> &'static str {
+        match self {
+            OnDiskKeyKind::Ed25519 => "id_ed25519",
+            OnDiskKeyKind::Rsa => "id_rsa",
+            OnDiskKeyKind::Ecdsa => "id_ecdsa_legacy",
+        }
+    }
+
+    fn bits(self) -> Option<u32> {
+        match self {
+            OnDiskKeyKind::Ed25519 => None,
+            OnDiskKeyKind::Rsa => Some(2048),
+            OnDiskKeyKind::Ecdsa => Some(256),
+        }
+    }
+}
+
 /// Generate an on-disk ed25519 key pair at `$HOME/.ssh/id_ed25519`.
 /// Returns the OpenSSH pubkey line.
 pub fn generate_on_disk_ed25519(env: &SshencEnv, comment: &str) -> Result<String> {
-    let priv_path = env.ssh_dir().join("id_ed25519");
+    generate_on_disk_key(env, OnDiskKeyKind::Ed25519, comment)
+}
+
+/// Generate an on-disk SSH key of the given kind at the default
+/// filename for that kind. Returns the OpenSSH pubkey line.
+pub fn generate_on_disk_key(env: &SshencEnv, kind: OnDiskKeyKind, comment: &str) -> Result<String> {
+    let priv_path = env.ssh_dir().join(kind.default_filename());
     if priv_path.exists() {
         drop(fs::remove_file(&priv_path));
     }
-    let pub_path = env.ssh_dir().join("id_ed25519.pub");
-    let status = env
-        .scrubbed_command("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-C", comment, "-f"])
+    let pub_path = priv_path.with_extension("pub");
+    if pub_path.exists() {
+        drop(fs::remove_file(&pub_path));
+    }
+    let mut cmd = env.scrubbed_command("ssh-keygen");
+    cmd.arg("-t").arg(kind.keygen_type());
+    if let Some(bits) = kind.bits() {
+        cmd.arg("-b").arg(bits.to_string());
+    }
+    cmd.arg("-N")
+        .arg("")
+        .arg("-C")
+        .arg(comment)
+        .arg("-f")
         .arg(&priv_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .context("spawn ssh-keygen")?;
+        .stderr(Stdio::piped());
+    let status = cmd.status().context("spawn ssh-keygen")?;
     if !status.success() {
-        bail!("ssh-keygen -t ed25519 failed: {status}");
+        bail!("ssh-keygen -t {} failed: {status}", kind.keygen_type());
     }
     let line =
         fs::read_to_string(&pub_path).with_context(|| format!("reading {}", pub_path.display()))?;

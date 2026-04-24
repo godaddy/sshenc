@@ -7,6 +7,8 @@ RUN apk add --no-cache \
         bash \
         ca-certificates \
         netcat-openbsd \
+        rsync \
+        coreutils \
     && adduser -D -s /bin/bash sshtest \
     && passwd -u sshtest \
     && mkdir -p /home/sshtest/.ssh \

@@ -1669,6 +1669,34 @@ fn maybe_verify_user_presence(
     }
 }
 
+/// Build the SSHSIG pre-signed buffer — the exact bytes fed to the
+/// signing key. Both the local backend and a remote agent receive
+/// this same byte sequence, so the resulting signature embeds
+/// identically.
+fn ssh_sign_presigned_data(namespace: &str, file_data: &[u8]) -> Vec<u8> {
+    use sshenc_core::pubkey::write_ssh_string;
+    let message_hash = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(file_data)
+    };
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"SSHSIG");
+    write_ssh_string(&mut buf, namespace.as_bytes());
+    write_ssh_string(&mut buf, b"");
+    write_ssh_string(&mut buf, b"sha256");
+    write_ssh_string(&mut buf, &message_hash);
+    buf
+}
+
+fn write_sshsig_pem_file(sig_blob: &[u8], data_file: &Path) -> Result<()> {
+    let sig_path = PathBuf::from(format!("{}.sig", data_file.display()));
+    let pem = format!(
+        "-----BEGIN SSH SIGNATURE-----\n{}\n-----END SSH SIGNATURE-----\n",
+        base64_wrap(sig_blob, 70)
+    );
+    write_atomic_file(&sig_path, pem.as_bytes())
+}
+
 fn ssh_sign_with_backend(
     backend: &dyn KeyBackend,
     args: &[String],
@@ -1680,20 +1708,7 @@ fn ssh_sign_with_backend(
     maybe_verify_user_presence(&info, prompt_policy)?;
 
     let file_data = std::fs::read(&sign_args.data_file)?;
-    let message_hash = {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(&file_data)
-    };
-    let signed_data = {
-        use sshenc_core::pubkey::write_ssh_string;
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"SSHSIG");
-        write_ssh_string(&mut buf, sign_args.namespace.as_bytes());
-        write_ssh_string(&mut buf, b"");
-        write_ssh_string(&mut buf, b"sha256");
-        write_ssh_string(&mut buf, &message_hash);
-        buf
-    };
+    let signed_data = ssh_sign_presigned_data(&sign_args.namespace, &file_data);
 
     let der_sig = backend
         .sign(&label, &signed_data)
@@ -1702,19 +1717,35 @@ fn ssh_sign_with_backend(
         SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
     let sig_blob = build_ssh_signature(&ssh_pubkey, &sign_args.namespace, &der_sig)?;
 
-    let sig_path = PathBuf::from(format!("{}.sig", sign_args.data_file.display()));
-    let pem = format!(
-        "-----BEGIN SSH SIGNATURE-----\n{}\n-----END SSH SIGNATURE-----\n",
-        base64_wrap(&sig_blob, 70)
-    );
-    write_atomic_file(&sig_path, pem.as_bytes())?;
-    Ok(())
+    write_sshsig_pem_file(&sig_blob, &sign_args.data_file)
 }
 
 /// Handle ssh-keygen-compatible signing mode.
+///
 /// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
-/// We sign via the hardware backend and write an SSH signature to <data_file>.sig.
+///
+/// We first try to proxy the signature through the running SSH agent
+/// pointed to by `SSH_AUTH_SOCK`. On macOS with
+/// `wrapping_key_user_presence = true` the agent already holds a
+/// warm wrapping-key cache, so proxying collapses what would be a
+/// fresh Touch ID prompt per `git commit -S` into one prompt per
+/// cache TTL. If no agent is reachable, no matching identity is
+/// advertised, or the sign fails, we fall back to the local hardware
+/// backend — which is where the biometric prompt would fire normally.
 pub fn ssh_sign(args: &[String]) -> Result<()> {
+    let sign_args = parse_ssh_sign_args(args)?;
+    let file_data = std::fs::read(&sign_args.data_file)?;
+    let signed_data = ssh_sign_presigned_data(&sign_args.namespace, &file_data);
+    let requested_pub = read_pubkey_from_openssh_file(&sign_args.key_file)?;
+    let pubkey_blob = requested_pub.wire_blob();
+
+    if let Some(ssh_sig) = crate::agent_sign::try_sign_via_agent(&pubkey_blob, &signed_data) {
+        tracing::debug!("ssh_sign: signed via agent proxy");
+        let sig_blob =
+            build_ssh_signature_from_ssh_sig(&requested_pub, &sign_args.namespace, &ssh_sig);
+        return write_sshsig_pem_file(&sig_blob, &sign_args.data_file);
+    }
+
     let config = Config::load_default()?;
     let ssh_dir = config.pub_dir;
     let backend = SshencBackend::new(ssh_dir, false)
@@ -1722,37 +1753,45 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     ssh_sign_with_backend(&backend, args, config.prompt_policy)
 }
 
-/// Build an SSH signature blob per the SSH signature format spec.
-fn build_ssh_signature(pubkey: &SshPublicKey, namespace: &str, der_sig: &[u8]) -> Result<Vec<u8>> {
+fn read_pubkey_from_openssh_file(path: &Path) -> Result<SshPublicKey> {
+    let contents = std::fs::read_to_string(path)?;
+    let line = contents
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("public key file is empty: {}", path.display()))?;
+    Ok(SshPublicKey::from_openssh_line(line)?)
+}
+
+/// Build an SSH signature blob from an already-SSH-formatted
+/// signature (`string(algo) || string(mpint(r) || mpint(s))`). The
+/// agent proxy path uses this directly; the local-backend path goes
+/// through [`build_ssh_signature`] first to convert DER.
+fn build_ssh_signature_from_ssh_sig(
+    pubkey: &SshPublicKey,
+    namespace: &str,
+    ssh_sig: &[u8],
+) -> Vec<u8> {
     use sshenc_core::pubkey::write_ssh_string;
 
     let mut buf = Vec::new();
-
-    // Magic preamble
     buf.extend_from_slice(b"SSHSIG");
-
-    // Version (uint32)
     buf.extend_from_slice(&1_u32.to_be_bytes());
-
-    // Public key blob
     let pubkey_blob = pubkey.wire_blob();
     write_ssh_string(&mut buf, &pubkey_blob);
-
-    // Namespace
     write_ssh_string(&mut buf, namespace.as_bytes());
-
-    // Reserved (empty string)
     write_ssh_string(&mut buf, b"");
-
-    // Hash algorithm
     write_ssh_string(&mut buf, b"sha256");
+    write_ssh_string(&mut buf, ssh_sig);
+    buf
+}
 
-    // Signature: string(algo) || string(sig_data)
-    // Convert DER to SSH signature format
+/// Build an SSH signature blob from a DER-encoded ECDSA signature.
+fn build_ssh_signature(pubkey: &SshPublicKey, namespace: &str, der_sig: &[u8]) -> Result<Vec<u8>> {
     let ssh_sig = sshenc_agent_proto::signature::der_to_ssh_signature(der_sig)?;
-    write_ssh_string(&mut buf, &ssh_sig);
-
-    Ok(buf)
+    Ok(build_ssh_signature_from_ssh_sig(
+        pubkey, namespace, &ssh_sig,
+    ))
 }
 
 /// Base64-encode with line wrapping.

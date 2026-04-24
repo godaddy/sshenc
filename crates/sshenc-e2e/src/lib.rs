@@ -470,6 +470,22 @@ impl SshencEnv {
 impl Drop for SshencEnv {
     fn drop(&mut self) {
         self.stop_agent();
+        // `sshenc install` spawns a detached daemon that isn't tracked by
+        // our child handle; kill it via its pidfile so the test doesn't
+        // leave orphaned processes.
+        let pid_file = self.home.join(".sshenc").join("agent.pid");
+        if let Ok(contents) = fs::read_to_string(&pid_file) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                drop(
+                    Command::new("kill")
+                        .arg("-TERM")
+                        .arg(pid.to_string())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status(),
+                );
+            }
+        }
         drop(fs::remove_dir_all(&self.home));
     }
 }

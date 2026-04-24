@@ -67,23 +67,78 @@ fn sshenc_ssh_to(env: &SshencEnv, container: &SshdContainer, label: Option<&str>
     cmd
 }
 
-/// Scenario 1: bare drop-in.
+/// Scenario 1: the `sshenc install` flow is drop-in for on-disk keys.
 ///
-/// A fresh sshenc install with no enclave keys yet. The user has an existing
-/// on-disk ed25519 key. The container trusts that on-disk key. `sshenc` is
-/// not involved in this connection path other than being installed.
+/// Simulates the user's actual install path:
+///   - fresh sshenc install with no enclave keys yet,
+///   - `sshenc install` writes the managed `Host *` block with
+///     `IdentityAgent` into `~/.ssh/config` and starts the agent daemon,
+///   - the user continues to run plain `ssh`, expecting their existing
+///     on-disk key to keep working.
+///
+/// Proves `sshenc install` + plain `ssh` preserves drop-in semantics
+/// without any additional flags or wrapper invocation.
 #[test]
 #[ignore = "requires docker"]
-fn on_disk_only_succeeds() {
-    if skip_if_no_docker("on_disk_only_succeeds") {
+fn sshenc_install_preserves_plain_ssh_with_on_disk_keys() {
+    if skip_if_no_docker("sshenc_install_preserves_plain_ssh_with_on_disk_keys") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    // No enclave keys — agent has nothing to offer, so success must come
+    // from OpenSSH's fallback to the on-disk IdentityFile.
+    env.use_ephemeral_keys_dir().expect("ephemeral keys dir");
     let on_disk = generate_on_disk_ed25519(&env, "on-disk@e2e").expect("on-disk keygen");
+
+    // Run the real install flow. This writes ~/.ssh/config and daemonizes
+    // the agent; the SshencEnv drop impl cleans up the pidfile-tracked
+    // daemon at test teardown.
+    let install =
+        run(env.sshenc_cmd().expect("sshenc cmd").arg("install")).expect("sshenc install");
+    assert!(
+        install.succeeded(),
+        "sshenc install failed; stderr:\n{}",
+        install.stderr
+    );
+
+    // The install must have produced a ~/.ssh/config with the managed
+    // block pointing at the isolated socket.
+    let config_path = env.ssh_dir().join("config");
+    let config_text = std::fs::read_to_string(&config_path).expect("read ssh config");
+    assert!(
+        config_text.contains("IdentityAgent"),
+        "expected IdentityAgent directive in {}; got:\n{config_text}",
+        config_path.display()
+    );
+    assert!(
+        config_text.contains(&env.socket_path().display().to_string()),
+        "IdentityAgent should reference the isolated socket; got:\n{config_text}",
+    );
+
     let container = SshdContainer::start(&[&on_disk]).expect("sshd container");
 
+    // Plain `ssh -F <written-config> …` — no sshenc wrapper, no manual
+    // IdentityAgent. The only way this succeeds is if the managed config
+    // + running agent + on-disk IdentityFile fallback all cooperate.
     let outcome = run(env
-        .ssh_cmd(&container)
+        .scrubbed_command("ssh")
+        .arg("-F")
+        .arg(&config_path)
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!(
+            "UserKnownHostsFile={}",
+            env.known_hosts().display()
+        ))
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-o")
+        .arg("NumberOfPasswordPrompts=0")
+        .arg("-o")
+        .arg("PreferredAuthentications=publickey")
+        .arg("-p")
+        .arg(container.host_port.to_string())
         .arg("-i")
         .arg(env.ssh_dir().join("id_ed25519"))
         .arg("sshtest@127.0.0.1")
@@ -91,7 +146,7 @@ fn on_disk_only_succeeds() {
     .expect("ssh");
     assert!(
         outcome.succeeded(),
-        "expected ssh to succeed; stderr:\n{}",
+        "expected plain ssh via sshenc-installed config to succeed; stderr:\n{}",
         outcome.stderr
     );
 }

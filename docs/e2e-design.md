@@ -169,11 +169,17 @@ impl Drop for SshencEnv { /* stop_agent, rm_rf home */ }
 Each test names what it proves. Every test runs in a fresh `SshencEnv` and
 its own `SshdContainer` (parallel-safe: random ports, disjoint tempdirs).
 
-1. `on_disk_only_succeeds`
-   - No enclave keys. On-disk `id_ed25519` generated in `$HOME/.ssh/`.
+1. `sshenc_install_preserves_plain_ssh_with_on_disk_keys`
+   - No enclave keys (ephemeral keys dir). On-disk `id_ed25519` generated
+     in `$HOME/.ssh/`.
+   - Run `sshenc install`, which writes the managed `Host *` block with
+     `IdentityAgent` into `$HOME/.ssh/config` and daemonizes the agent.
+   - Verify the config file actually contains `IdentityAgent` and the
+     isolated socket path.
    - Container `authorized_keys` trusts the on-disk pubkey.
-   - Expect: `ssh -F … sshtest@127.0.0.1 -p <port> true` exits 0.
-   - Proves drop-in works with zero sshenc state.
+   - Expect: plain `ssh -F <written-config> -i <on-disk> sshtest@…` exits 0.
+   - Proves the real install flow (not just the `sshenc ssh` wrapper) is
+     drop-in for users with existing on-disk keys.
 
 2. `agent_running_zero_enclave_keys`
    - Same as 1, but `sshenc-agent` is running with an empty backend.

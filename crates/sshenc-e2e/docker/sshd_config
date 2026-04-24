@@ -13,4 +13,6 @@ AuthorizedKeysFile .ssh/authorized_keys
 StrictModes yes
 
 LogLevel VERBOSE
+AllowAgentForwarding yes
+AllowTcpForwarding yes
 Subsystem sftp /usr/lib/ssh/sftp-server

@@ -1,6 +1,12 @@
 FROM alpine:3.20
 
-RUN apk add --no-cache openssh-server bash ca-certificates \
+RUN apk add --no-cache \
+        openssh-server \
+        openssh-client \
+        openssh-sftp-server \
+        bash \
+        ca-certificates \
+        netcat-openbsd \
     && adduser -D -s /bin/bash sshtest \
     && passwd -u sshtest \
     && mkdir -p /home/sshtest/.ssh \

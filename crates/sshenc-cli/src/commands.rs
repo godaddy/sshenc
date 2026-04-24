@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
+#[allow(unused_imports)] // KeyGenOptions used on Windows prod path and by Unix tests.
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::{AccessPolicy, Config, PromptPolicy};
@@ -494,35 +495,19 @@ pub fn keygen(
 ) -> Result<()> {
     let key_label = KeyLabel::new(label)?;
 
-    // Prefer proxying through the agent: a running `sshenc-agent`
-    // is the designated keychain-toucher. When it both creates the
-    // wrapping-key entry (here) AND later reads it (sign/delete),
-    // the legacy keychain ACL is satisfied without a cross-binary
-    // approval prompt. We fall back to local generation only if the
-    // agent is unreachable, refuses, or errors — same shape as the
-    // sign and delete proxies.
-    let info = if let Some(public_bytes) = sshenc_agent_proto::client::try_generate_via_agent(
-        label,
-        comment.as_deref(),
-        access_policy.as_ffi_value() as u32,
-    ) {
-        tracing::debug!(label, "keygen: generated via agent proxy");
-        build_keyinfo_agent_side(
-            key_label.clone(),
-            comment.clone(),
-            access_policy,
-            write_pub.clone(),
-            public_bytes,
-        )?
-    } else {
-        let opts = KeyGenOptions {
-            label: key_label,
-            comment,
-            access_policy,
-            write_pub_path: write_pub.clone(),
-        };
-        backend.generate(&opts)?
+    // Keep the backend call here; the production caller binds
+    // `backend` to an `AgentProxyBackend` that forwards
+    // `generate`/`sign`/`delete`/`rename` over the agent socket, so
+    // the CLI binary never performs `SecItemAdd`/`SecKeyCreateRandomKey`
+    // directly. Tests pass a mock and exercise the command logic
+    // without needing a live agent.
+    let opts = KeyGenOptions {
+        label: key_label,
+        comment,
+        access_policy,
+        write_pub_path: write_pub.clone(),
     };
+    let info = backend.generate(&opts)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&info)?);
@@ -543,45 +528,6 @@ pub fn keygen(
         }
     }
     Ok(())
-}
-
-/// Reconstruct a [`sshenc_core::key::KeyInfo`] client-side from the
-/// public-key bytes the agent returned. The agent already wrote the
-/// `.handle`/`.meta`/`.pub` files into its keys_dir and stored the
-/// wrapping-key entry in the keychain; the CLI's only remaining
-/// responsibility is the OpenSSH `.pub` file at `write_pub` (if the
-/// caller passed one) and the fingerprint / metadata block the
-/// human-readable output reports.
-fn build_keyinfo_agent_side(
-    label: KeyLabel,
-    comment: Option<String>,
-    access_policy: AccessPolicy,
-    write_pub: Option<PathBuf>,
-    public_key_bytes: Vec<u8>,
-) -> Result<sshenc_core::key::KeyInfo> {
-    use sshenc_core::fingerprint;
-    use sshenc_core::key::{KeyInfo, KeyMetadata};
-
-    let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_key_bytes, comment.clone())?;
-    let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
-
-    let pub_file_path = if let Some(ref path) = write_pub {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, format!("{}\n", ssh_pubkey.to_openssh_line()))?;
-        Some(path.clone())
-    } else {
-        None
-    };
-
-    Ok(KeyInfo {
-        metadata: KeyMetadata::new(label, access_policy, comment),
-        public_key_bytes,
-        fingerprint_sha256: fp_sha256,
-        fingerprint_md5: fp_md5,
-        pub_file_path,
-    })
 }
 
 #[allow(clippy::print_stdout)]
@@ -707,11 +653,7 @@ pub fn delete(
 
     for key in &keys_to_delete {
         let label = key.metadata.label.as_str();
-        if sshenc_agent_proto::client::try_delete_via_agent(label).is_some() {
-            tracing::debug!(label, "delete: routed through agent proxy");
-        } else {
-            backend.delete(label)?;
-        }
+        backend.delete(label)?;
         println!("Deleted key: {label}");
 
         if delete_pub {
@@ -1527,8 +1469,13 @@ pub fn promote_to_default(label: &str) -> Result<()> {
     {
         let keys_dir = sshenc_keys_dir();
         let ssh_dir = default_ssh_dir()?;
-        let backend = SshencBackend::new(ssh_dir.clone(), false)
-            .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
+        let config = Config::load_default()?;
+        // Rename touches the keychain wrapping-key entry; route it
+        // through the agent so the CLI binary's code signature
+        // stays off the relabel op.
+        let backend =
+            sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), false, config.socket_path.clone())
+                .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?;
         let rename_via_backend = |old: &str, new: &str| -> Result<()> {
             backend
                 .rename(old, new)
@@ -1663,6 +1610,7 @@ fn parse_ssh_sign_args(args: &[String]) -> Result<SshSignArgs> {
     })
 }
 
+#[allow(dead_code)] // Windows uses this; on Unix, tests may call it.
 fn resolve_signing_label(backend: &dyn KeyBackend, key_file: &Path) -> Result<String> {
     let key_file_contents = std::fs::read_to_string(key_file)?;
     let key_line = key_file_contents
@@ -1712,7 +1660,7 @@ fn maybe_verify_user_presence(
 }
 
 #[cfg(not(windows))]
-#[allow(clippy::print_stderr)]
+#[allow(dead_code, clippy::print_stderr)] // Tests may call; prod path now goes through agent.
 fn maybe_verify_user_presence(
     info: &sshenc_core::key::KeyInfo,
     policy: PromptPolicy,
@@ -1775,6 +1723,7 @@ fn write_sshsig_pem_file(sig_blob: &[u8], data_file: &Path) -> Result<()> {
     write_atomic_file(&sig_path, pem.as_bytes())
 }
 
+#[allow(dead_code)] // Windows uses this; on Unix tests call it directly.
 fn ssh_sign_with_backend(
     backend: &dyn KeyBackend,
     args: &[String],
@@ -1802,14 +1751,15 @@ fn ssh_sign_with_backend(
 ///
 /// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
 ///
-/// We first try to proxy the signature through the running SSH agent
-/// pointed to by `SSH_AUTH_SOCK`. On macOS with
-/// `wrapping_key_user_presence = true` the agent already holds a
-/// warm wrapping-key cache, so proxying collapses what would be a
-/// fresh Touch ID prompt per `git commit -S` into one prompt per
-/// cache TTL. If no agent is reachable, no matching identity is
-/// advertised, or the sign fails, we fall back to the local hardware
-/// backend — which is where the biometric prompt would fire normally.
+/// On Unix the signature is always produced by `sshenc-agent`; the
+/// CLI never decrypts the wrapping key or calls
+/// `SecKeyCreateSignature` itself. If the agent isn't running we
+/// start it at `Config::socket_path`. If the agent refuses the
+/// request, we error out — no local fallback, because that would
+/// reintroduce the cross-binary ACL prompt class that centralizing
+/// through the agent is supposed to eliminate. On Windows the CLI
+/// still uses the local TPM-backed backend (named-pipe proxy is
+/// not wired up yet and the Windows ACL model differs).
 pub fn ssh_sign(args: &[String]) -> Result<()> {
     let sign_args = parse_ssh_sign_args(args)?;
     let file_data = std::fs::read(&sign_args.data_file)?;
@@ -1817,20 +1767,38 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let requested_pub = read_pubkey_from_openssh_file(&sign_args.key_file)?;
     let pubkey_blob = requested_pub.wire_blob();
 
-    if let Some(ssh_sig) =
-        sshenc_agent_proto::client::try_sign_via_agent(&pubkey_blob, &signed_data)
+    #[cfg(unix)]
     {
+        let config = Config::load_default()?;
+        sshenc_agent_proto::client::ensure_agent_ready(&config.socket_path)
+            .map_err(|e| anyhow!("sshenc-agent not reachable: {e}"))?;
+        let ssh_sig = sshenc_agent_proto::client::try_sign_via_socket(
+            &config.socket_path,
+            &pubkey_blob,
+            &signed_data,
+        )
+        .ok_or_else(|| {
+            anyhow!(
+                "sshenc-agent refused sign request (no matching identity, \
+                 allowed_labels filter, or backend error); check agent logs"
+            )
+        })?;
         tracing::debug!("ssh_sign: signed via agent proxy");
         let sig_blob =
             build_ssh_signature_from_ssh_sig(&requested_pub, &sign_args.namespace, &ssh_sig);
-        return write_sshsig_pem_file(&sig_blob, &sign_args.data_file);
+        write_sshsig_pem_file(&sig_blob, &sign_args.data_file)
     }
 
-    let config = Config::load_default()?;
-    let ssh_dir = config.pub_dir;
-    let backend = SshencBackend::new(ssh_dir, false)
-        .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
-    ssh_sign_with_backend(&backend, args, config.prompt_policy)
+    #[cfg(not(unix))]
+    {
+        let _ = pubkey_blob;
+        let _ = signed_data;
+        let config = Config::load_default()?;
+        let ssh_dir = config.pub_dir;
+        let backend = SshencBackend::new(ssh_dir, false)
+            .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
+        ssh_sign_with_backend(&backend, args, config.prompt_policy)
+    }
 }
 
 fn read_pubkey_from_openssh_file(path: &Path) -> Result<SshPublicKey> {
@@ -1867,6 +1835,7 @@ fn build_ssh_signature_from_ssh_sig(
 }
 
 /// Build an SSH signature blob from a DER-encoded ECDSA signature.
+#[allow(dead_code)] // Windows uses this; on Unix, tests may call it.
 fn build_ssh_signature(pubkey: &SshPublicKey, namespace: &str, der_sig: &[u8]) -> Result<Vec<u8>> {
     let ssh_sig = sshenc_agent_proto::signature::der_to_ssh_signature(der_sig)?;
     Ok(build_ssh_signature_from_ssh_sig(

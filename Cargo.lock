@@ -1502,6 +1502,7 @@ dependencies = [
  "enclaveapp-core",
  "enclaveapp-test-software",
  "serde_json",
+ "sshenc-agent-proto",
  "sshenc-core",
  "thiserror",
  "tracing",

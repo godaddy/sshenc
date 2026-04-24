@@ -269,12 +269,53 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let pub_dir = Config::load_default()?.pub_dir;
+    let config = Config::load_default()?;
 
-    let backend = sshenc_se::SshencBackend::new(pub_dir, cli.keyring)
-        .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?;
+    // Read-only commands that never write to the keychain can run
+    // without the agent (they read `.pub` cache files directly).
+    // Everything else must route through `sshenc-agent` so the CLI
+    // binary's code signature never appears on a `SecItemAdd` or
+    // `SecKeyCreateRandomKey` call — that's what makes one Always-
+    // Allow approval (for the agent binary) cover every sshenc
+    // operation on an unsigned macOS install.
+    #[cfg(unix)]
+    let backend: Box<dyn sshenc_se::KeyBackend> = if command_needs_agent(&cli.command) {
+        Box::new(
+            sshenc_se::AgentProxyBackend::new(
+                config.pub_dir.clone(),
+                cli.keyring,
+                config.socket_path.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
+        )
+    } else {
+        Box::new(
+            sshenc_se::SshencBackend::new(config.pub_dir.clone(), cli.keyring)
+                .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
+        )
+    };
+    #[cfg(not(unix))]
+    let backend: Box<dyn sshenc_se::KeyBackend> = Box::new(
+        sshenc_se::SshencBackend::new(config.pub_dir.clone(), cli.keyring)
+            .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
+    );
 
-    run_command(cli.command, &backend)
+    run_command(cli.command, &*backend)
+}
+
+/// Return `true` for subcommands that perform a write-side
+/// Secure-Enclave / keychain operation (`SecItemAdd`,
+/// `SecKeyCreateSignature`, `SecKeyDelete`, relabel). These
+/// commands must be routed through the agent on Unix. Read-only
+/// commands (`list`, `inspect`, `export-pub`, help, completions)
+/// stay on the direct backend so we don't spawn an agent for
+/// purely cosmetic queries.
+#[cfg(unix)]
+fn command_needs_agent(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Keygen { .. } | Commands::Delete { .. } | Commands::Default { .. }
+    )
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]

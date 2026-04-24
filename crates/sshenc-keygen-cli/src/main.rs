@@ -55,10 +55,22 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let pub_dir = Config::load_default()?.pub_dir;
+    let config = Config::load_default()?;
+    let pub_dir = config.pub_dir.clone();
 
-    let backend = sshenc_se::SshencBackend::new(pub_dir.clone(), false)
-        .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?;
+    // On Unix the keygen goes through `sshenc-agent` so the CLI's
+    // code signature never appears on the `SecItemAdd` for the new
+    // wrapping-key entry. On Windows we use the direct backend.
+    #[cfg(unix)]
+    let backend: Box<dyn KeyBackend> = Box::new(
+        sshenc_se::AgentProxyBackend::new(pub_dir.clone(), false, config.socket_path.clone())
+            .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
+    );
+    #[cfg(not(unix))]
+    let backend: Box<dyn KeyBackend> = Box::new(
+        sshenc_se::SshencBackend::new(pub_dir.clone(), false)
+            .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
+    );
 
     let write_pub = if cli.no_pub_file {
         None
@@ -107,39 +119,20 @@ fn main() -> Result<()> {
     };
 
     let key_label = KeyLabel::new(&cli.label)?;
+    let opts = KeyGenOptions {
+        label: key_label,
+        comment,
+        access_policy,
+        write_pub_path: write_pub.clone(),
+    };
 
-    // Prefer generating through a running `sshenc-agent`. When the
-    // agent creates the wrapping-key entry in the login keychain, it
-    // is also the binary that will later read that entry for
-    // signing or deletion — creator and reader are the same
-    // code-signature, so the legacy ACL does not pop a cross-binary
-    // approval prompt. Fall back to the local backend when no agent
-    // is available, mirroring the behavior of `sshenc -Y sign` and
-    // `sshenc delete`.
+    // `backend` above is an `AgentProxyBackend` on Unix: the
+    // `generate` call routes through `sshenc-agent` so the CLI
+    // binary's code signature is never on the `SecItemAdd` for the
+    // wrapping-key entry. On Windows it's a direct `SshencBackend`.
     let info =
         backup::run_with_backup(write_pub.as_deref(), paired_private_path.as_deref(), || {
-            if let Some(public_bytes) = sshenc_agent_proto::client::try_generate_via_agent(
-                &cli.label,
-                comment.as_deref(),
-                access_policy.as_ffi_value() as u32,
-            ) {
-                tracing::debug!(label = %cli.label, "keygen: generated via agent proxy");
-                build_keyinfo_agent_side(
-                    key_label.clone(),
-                    comment.clone(),
-                    access_policy,
-                    write_pub.clone(),
-                    public_bytes,
-                )
-            } else {
-                let opts = KeyGenOptions {
-                    label: key_label.clone(),
-                    comment: comment.clone(),
-                    access_policy,
-                    write_pub_path: write_pub.clone(),
-                };
-                backend.generate(&opts).map_err(|e| anyhow::anyhow!("{e}"))
-            }
+            backend.generate(&opts).map_err(|e| anyhow::anyhow!("{e}"))
         })?;
 
     if !cli.quiet {
@@ -155,42 +148,6 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Reconstruct a `KeyInfo` client-side after the agent has generated
-/// the key. Matches what `SshencBackend::generate` would have built
-/// locally: compute fingerprints from the public-key bytes, write
-/// the OpenSSH `.pub` file at `write_pub` if requested.
-fn build_keyinfo_agent_side(
-    label: KeyLabel,
-    comment: Option<String>,
-    access_policy: AccessPolicy,
-    write_pub: Option<PathBuf>,
-    public_key_bytes: Vec<u8>,
-) -> Result<sshenc_core::key::KeyInfo> {
-    use sshenc_core::fingerprint;
-    use sshenc_core::key::{KeyInfo, KeyMetadata};
-
-    let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_key_bytes, comment.clone())?;
-    let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
-
-    let pub_file_path = if let Some(ref path) = write_pub {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, format!("{}\n", ssh_pubkey.to_openssh_line()))?;
-        Some(path.clone())
-    } else {
-        None
-    };
-
-    Ok(KeyInfo {
-        metadata: KeyMetadata::new(label, access_policy, comment),
-        public_key_bytes,
-        fingerprint_sha256: fp_sha256,
-        fingerprint_md5: fp_md5,
-        pub_file_path,
-    })
 }
 
 fn default_comment() -> Option<String> {

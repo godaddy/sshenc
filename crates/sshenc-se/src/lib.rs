@@ -10,7 +10,9 @@
 
 pub mod backend;
 pub mod compat;
+pub mod proxy;
 mod unified;
 
 pub use backend::KeyBackend;
+pub use proxy::AgentProxyBackend;
 pub use unified::{sshenc_keys_dir, SshencBackend};

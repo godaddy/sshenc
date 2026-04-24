@@ -1436,6 +1436,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sshenc-e2e"
+version = "0.0.0-dev"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "sshenc-gitenc"
 version = "0.0.0-dev"
 dependencies = [

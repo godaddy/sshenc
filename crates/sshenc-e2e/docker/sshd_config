@@ -1,0 +1,16 @@
+Port 22
+AddressFamily inet
+ListenAddress 0.0.0.0
+
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitRootLogin no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+
+AuthorizedKeysFile .ssh/authorized_keys
+StrictModes yes
+
+LogLevel VERBOSE
+Subsystem sftp /usr/lib/ssh/sftp-server

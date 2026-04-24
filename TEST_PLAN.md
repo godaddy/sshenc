@@ -59,6 +59,13 @@ cargo fmt --all -- --check
 - **sshenc-gitenc** (~15 tests): Arg parsing (label/config/short flags/empty/passthrough), build_ssh_command validation, configure_repo_entries (default/named label/recorded pub path/missing pub path), git key metadata parsing (app_specific/legacy), signing_key_path validation
 - **sshenc-pkcs11** (~4 tests): Session management, slot/token info
 - **sshenc-test-support** (~8 tests): Mock backend key lifecycle (generate/list/get/delete/sign), deterministic key generation, pub file write, comment handling
+- **sshenc-e2e** (6 scenarios, `#[ignore]` by default): drop-in compatibility
+  against a real OpenSSH server in a Docker container. Covers on-disk-only,
+  empty-agent fallback, both-keys-unlabeled (on-disk and enclave variants),
+  `--label` enclave-only restriction, and plain `ssh` with `IdentityAgent`.
+  Run with `make e2e` or `cargo test -p sshenc-e2e -- --ignored --test-threads=1`.
+  See `docs/e2e-design.md` for design and the shared-enclave-key rationale
+  (minimizes macOS keychain prompts to one-per-binary-per-rebuild).
 
 ## Fuzz Targets
 

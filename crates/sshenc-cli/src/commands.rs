@@ -1470,13 +1470,20 @@ pub fn promote_to_default(label: &str) -> Result<()> {
         let keys_dir = sshenc_keys_dir();
         let ssh_dir = default_ssh_dir()?;
         let config = Config::load_default()?;
-        // Rename touches the keychain wrapping-key entry; route it
-        // through the agent so the CLI binary's code signature
-        // stays off the relabel op.
-        let backend =
-            sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), false, config.socket_path.clone())
-                .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?;
+        // Defer AgentProxyBackend construction until the closure
+        // actually fires: `promote_to_default_with_dirs` short-
+        // circuits on pre-rename invariants ("already named
+        // default", target missing, …) without calling this,
+        // and we shouldn't pay the "spawn the agent" cost — or
+        // block callers on a fresh install where the agent binary
+        // isn't on disk yet — for those early error paths.
         let rename_via_backend = |old: &str, new: &str| -> Result<()> {
+            let backend = sshenc_se::AgentProxyBackend::new(
+                ssh_dir.clone(),
+                false,
+                config.socket_path.clone(),
+            )
+            .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?;
             backend
                 .rename(old, new)
                 .map_err(|e| anyhow!("backend rename failed: {e}"))

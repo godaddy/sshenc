@@ -20,6 +20,7 @@ path = "src/main.rs"
 enclaveapp-core = { workspace = true }
 sshenc-core = { workspace = true }
 sshenc-se = { workspace = true }
+sshenc-agent-proto = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

@@ -20,6 +20,28 @@ pub const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
 pub const SSH_AGENT_FAILURE: u8 = 5;
 pub const SSH_AGENT_SUCCESS: u8 = 6;
 
+// sshenc-specific extensions. Type numbers are well outside OpenSSH's
+// assigned range (0-29) so any standard ssh-agent receiving them will
+// respond with `SSH_AGENT_FAILURE` per the draft-miller-ssh-agent
+// rule for unknown message types. sshenc clients treat that as
+// "agent doesn't support this RPC" and fall back to the local path.
+//
+// The whole purpose of these extensions is to ensure that the agent
+// — a single long-lived binary — is the only process that ever calls
+// into the Secure Enclave / keychain. On unsigned macOS builds,
+// the legacy keychain ACL is keyed to the creating binary's code
+// signature; if the CLI creates an item and the agent tries to read
+// it, macOS pops a prompt for the cross-binary access. Routing
+// every secret-touching op through the agent makes the creator and
+// reader the same binary and eliminates that prompt class entirely.
+pub const SSH_AGENTC_SSHENC_DELETE_KEY: u8 = 0xF0;
+pub const SSH_AGENTC_SSHENC_GENERATE_KEY: u8 = 0xF1;
+
+// sshenc-specific response: carries the public-key bytes of a
+// freshly-generated key back to the CLI. On failure the agent uses
+// the standard `SSH_AGENT_FAILURE` instead.
+pub const SSH_AGENT_SSHENC_GENERATE_RESPONSE: u8 = 0xF2;
+
 // Sign request flags
 pub const SSH_AGENT_RSA_SHA2_256: u32 = 0x02;
 pub const SSH_AGENT_RSA_SHA2_512: u32 = 0x04;
@@ -47,6 +69,31 @@ pub enum AgentRequest {
         /// Flags (e.g., for RSA signature algorithm selection).
         flags: u32,
     },
+    /// `SSH_AGENTC_SSHENC_DELETE_KEY` (sshenc extension): destroy a
+    /// Secure-Enclave / TPM / software key and its wrapping-key
+    /// keychain entry. Used by `sshenc delete` so the agent's warm
+    /// wrapping-key cache is reused instead of cold-starting a fresh
+    /// `SshencBackend` per invocation.
+    DeleteKey {
+        /// The key label as UTF-8 bytes.
+        label: Vec<u8>,
+    },
+    /// `SSH_AGENTC_SSHENC_GENERATE_KEY` (sshenc extension): generate
+    /// a fresh signing key inside the agent. The agent calls
+    /// `backend.generate(...)`, which does the `SecItemAdd` for the
+    /// wrapping-key entry. Having the agent be the creator means the
+    /// agent is also the reader on subsequent sign/delete ops — the
+    /// legacy keychain ACL stays satisfied without a cross-binary
+    /// approval prompt.
+    GenerateKey {
+        /// The key label as UTF-8 bytes.
+        label: Vec<u8>,
+        /// Comment to attach to the key metadata. Empty = no comment.
+        comment: Vec<u8>,
+        /// `AccessPolicy::as_ffi_value()` — 0 None, 1 Any, 2
+        /// BiometricOnly, 3 PasswordOnly. Any other value is rejected.
+        access_policy: u32,
+    },
     /// An unrecognized message type.
     Unknown(u8),
 }
@@ -60,6 +107,13 @@ pub enum AgentResponse {
     SignResponse {
         /// The complete signature blob (including algorithm prefix).
         signature_blob: Vec<u8>,
+    },
+    /// `SSH_AGENT_SSHENC_GENERATE_RESPONSE` (sshenc extension):
+    /// successful `GenerateKey` response carrying the fresh key's
+    /// public-key bytes (SEC1 uncompressed, 65 bytes for P-256).
+    GenerateResponse {
+        /// Uncompressed SEC1 public-key bytes.
+        public_key: Vec<u8>,
     },
     /// SSH_AGENT_SUCCESS.
     Success,
@@ -96,6 +150,22 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
                 flags,
             })
         }
+        SSH_AGENTC_SSHENC_DELETE_KEY => {
+            let mut cursor = Cursor::new(body);
+            let label = wire::read_string(&mut cursor)?;
+            Ok(AgentRequest::DeleteKey { label })
+        }
+        SSH_AGENTC_SSHENC_GENERATE_KEY => {
+            let mut cursor = Cursor::new(body);
+            let label = wire::read_string(&mut cursor)?;
+            let comment = wire::read_string(&mut cursor)?;
+            let access_policy = wire::read_u32(&mut cursor)?;
+            Ok(AgentRequest::GenerateKey {
+                label,
+                comment,
+                access_policy,
+            })
+        }
         other => Ok(AgentRequest::Unknown(other)),
     }
 }
@@ -123,6 +193,12 @@ pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
             wire::write_string(&mut buf, signature_blob);
             buf
         }
+        AgentResponse::GenerateResponse { public_key } => {
+            let mut buf = Vec::new();
+            buf.push(SSH_AGENT_SSHENC_GENERATE_RESPONSE);
+            wire::write_string(&mut buf, public_key);
+            buf
+        }
     }
 }
 
@@ -139,6 +215,22 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
             wire::write_string(&mut buf, key_blob);
             wire::write_string(&mut buf, data);
             buf.extend_from_slice(&flags.to_be_bytes());
+            buf
+        }
+        AgentRequest::DeleteKey { label } => {
+            let mut buf = vec![SSH_AGENTC_SSHENC_DELETE_KEY];
+            wire::write_string(&mut buf, label);
+            buf
+        }
+        AgentRequest::GenerateKey {
+            label,
+            comment,
+            access_policy,
+        } => {
+            let mut buf = vec![SSH_AGENTC_SSHENC_GENERATE_KEY];
+            wire::write_string(&mut buf, label);
+            wire::write_string(&mut buf, comment);
+            buf.extend_from_slice(&access_policy.to_be_bytes());
             buf
         }
         AgentRequest::Unknown(t) => vec![*t],
@@ -182,6 +274,11 @@ pub fn parse_response(payload: &[u8]) -> Result<AgentResponse> {
             let mut cursor = Cursor::new(body);
             let signature_blob = wire::read_string(&mut cursor)?;
             Ok(AgentResponse::SignResponse { signature_blob })
+        }
+        SSH_AGENT_SSHENC_GENERATE_RESPONSE => {
+            let mut cursor = Cursor::new(body);
+            let public_key = wire::read_string(&mut cursor)?;
+            Ok(AgentResponse::GenerateResponse { public_key })
         }
         other => Err(Error::AgentProtocol(format!(
             "unexpected response type: {other}"
@@ -549,4 +646,132 @@ mod tests {
         let payload = serialize_response(&AgentResponse::Failure);
         assert_eq!(payload, vec![SSH_AGENT_FAILURE]);
     }
+
+    // --- sshenc DeleteKey extension ---
+
+    #[test]
+    fn roundtrip_delete_key_request() {
+        let original = AgentRequest::DeleteKey {
+            label: b"my-key".to_vec(),
+        };
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_DELETE_KEY);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::DeleteKey { label } => assert_eq!(label, b"my-key"),
+            other => panic!("expected DeleteKey, got {other:?}"),
+        }
+    }
+
+    // OpenSSH's assigned range is 0..=29; a compile-time guard keeps
+    // our extension forward-compatible if the OpenSSH protocol grows.
+    const _: () = assert!(SSH_AGENTC_SSHENC_DELETE_KEY >= 0xF0);
+
+    #[test]
+    fn parse_rejects_truncated_delete_key_request() {
+        // Just the type byte, no label string — should surface as a
+        // protocol error, not be silently treated as empty-label.
+        let payload = vec![SSH_AGENTC_SSHENC_DELETE_KEY];
+        let result = parse_request(&payload);
+        assert!(result.is_err(), "truncated DeleteKey should error");
+    }
+
+    #[test]
+    fn delete_key_request_preserves_unicode_label() {
+        // Labels are UTF-8 — make sure we don't re-encode or mangle.
+        let label = "キー-42".as_bytes().to_vec();
+        let original = AgentRequest::DeleteKey {
+            label: label.clone(),
+        };
+        let parsed = parse_request(&serialize_request(&original)).unwrap();
+        match parsed {
+            AgentRequest::DeleteKey { label: got } => assert_eq!(got, label),
+            other => panic!("expected DeleteKey, got {other:?}"),
+        }
+    }
+
+    // --- sshenc GenerateKey extension ---
+
+    #[test]
+    fn roundtrip_generate_key_request() {
+        let original = AgentRequest::GenerateKey {
+            label: b"gen-test".to_vec(),
+            comment: b"jay@box".to_vec(),
+            access_policy: 0,
+        };
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_GENERATE_KEY);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::GenerateKey {
+                label,
+                comment,
+                access_policy,
+            } => {
+                assert_eq!(label, b"gen-test");
+                assert_eq!(comment, b"jay@box");
+                assert_eq!(access_policy, 0);
+            }
+            other => panic!("expected GenerateKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_key_roundtrips_all_access_policy_values() {
+        for policy in 0_u32..=3 {
+            let original = AgentRequest::GenerateKey {
+                label: b"pol-test".to_vec(),
+                comment: Vec::new(),
+                access_policy: policy,
+            };
+            let parsed = parse_request(&serialize_request(&original)).unwrap();
+            match parsed {
+                AgentRequest::GenerateKey { access_policy, .. } => {
+                    assert_eq!(access_policy, policy, "policy {policy} round-trip");
+                }
+                other => panic!("expected GenerateKey for policy {policy}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn generate_key_empty_comment_round_trips() {
+        let original = AgentRequest::GenerateKey {
+            label: b"empty-comment".to_vec(),
+            comment: Vec::new(),
+            access_policy: 2,
+        };
+        let parsed = parse_request(&serialize_request(&original)).unwrap();
+        match parsed {
+            AgentRequest::GenerateKey { comment, .. } => assert!(comment.is_empty()),
+            other => panic!("expected GenerateKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_truncated_generate_key_request() {
+        let mut payload = vec![SSH_AGENTC_SSHENC_GENERATE_KEY];
+        wire::write_string(&mut payload, b"label");
+        // No comment string or access_policy → should fail.
+        assert!(parse_request(&payload).is_err());
+    }
+
+    #[test]
+    fn roundtrip_generate_response() {
+        let pubkey = vec![0x04_u8; 65];
+        let original = AgentResponse::GenerateResponse {
+            public_key: pubkey.clone(),
+        };
+        let payload = serialize_response(&original);
+        assert_eq!(payload[0], SSH_AGENT_SSHENC_GENERATE_RESPONSE);
+        let parsed = parse_response(&payload).unwrap();
+        match parsed {
+            AgentResponse::GenerateResponse { public_key } => assert_eq!(public_key, pubkey),
+            other => panic!("expected GenerateResponse, got {other:?}"),
+        }
+    }
+
+    // Compile-time guards: custom types stay out of OpenSSH's range.
+    const _: () = assert!(SSH_AGENTC_SSHENC_GENERATE_KEY >= 0xF0);
+    const _: () = assert!(SSH_AGENT_SSHENC_GENERATE_RESPONSE >= 0xF0);
 }

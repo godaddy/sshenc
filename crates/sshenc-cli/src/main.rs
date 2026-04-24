@@ -9,6 +9,7 @@ use sshenc_core::backup;
 use sshenc_core::{AccessPolicy, Config};
 use std::path::PathBuf;
 
+mod agent_sign;
 mod commands;
 #[cfg(windows)]
 #[allow(clippy::print_stdout, clippy::print_stderr)]

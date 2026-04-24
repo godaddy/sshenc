@@ -131,12 +131,13 @@ pub async fn run_agent(
     pub_dir: PathBuf,
     allowed_labels: Vec<String>,
     prompt_policy: PromptPolicy,
+    wrapping_key_cache_ttl: std::time::Duration,
     ready_file: Option<&Path>,
 ) -> Result<()> {
     prepare_socket_path(&socket_path)?;
 
     let backend: Arc<dyn KeyBackend> = Arc::new(
-        sshenc_se::SshencBackend::new(pub_dir, false)
+        sshenc_se::SshencBackend::with_cache_ttl(pub_dir, false, wrapping_key_cache_ttl)
             .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 
@@ -249,12 +250,13 @@ pub async fn run_agent(
     pub_dir: PathBuf,
     allowed_labels: Vec<String>,
     prompt_policy: PromptPolicy,
+    wrapping_key_cache_ttl: std::time::Duration,
     ready_file: Option<&Path>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let backend: Arc<dyn KeyBackend> = Arc::new(
-        sshenc_se::SshencBackend::new(pub_dir, false)
+        sshenc_se::SshencBackend::with_cache_ttl(pub_dir, false, wrapping_key_cache_ttl)
             .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 

@@ -80,6 +80,24 @@ pub struct Config {
     pub log_level: LogLevel,
     /// Host-specific identity preferences.
     pub host_identities: Vec<HostIdentity>,
+    /// (macOS only) Wrapping-key cache TTL in seconds.
+    ///
+    /// After a hardware-bound key's wrapping key is unlocked (the
+    /// LocalAuthentication prompt that secures the keychain item), the
+    /// agent keeps it in `mlock`ed, `zeroize`-on-drop memory for this
+    /// many seconds and reuses it for subsequent signs without
+    /// re-prompting. `0` disables the cache (prompt every sign). The
+    /// env var `SSHENC_WRAPPING_KEY_CACHE_TTL_SECS` overrides this at
+    /// runtime for testing.
+    ///
+    /// Default: 300 (5 minutes), matching Apple's
+    /// `LATouchIDAuthenticationMaximumAllowableReuseDuration`.
+    #[serde(default = "default_wrapping_key_cache_ttl_secs")]
+    pub wrapping_key_cache_ttl_secs: u64,
+}
+
+fn default_wrapping_key_cache_ttl_secs() -> u64 {
+    300
 }
 
 /// Return the user's home directory, or an error if it cannot be determined.
@@ -104,6 +122,7 @@ impl Default for Config {
                 pub_dir: fallback.join(".ssh"),
                 log_level: LogLevel::default(),
                 host_identities: Vec::new(),
+                wrapping_key_cache_ttl_secs: default_wrapping_key_cache_ttl_secs(),
             }
         })
     }
@@ -126,6 +145,7 @@ impl Config {
             pub_dir: home.join(".ssh"),
             log_level: LogLevel::default(),
             host_identities: Vec::new(),
+            wrapping_key_cache_ttl_secs: default_wrapping_key_cache_ttl_secs(),
         })
     }
 
@@ -411,6 +431,7 @@ key = "value"
                     label: "work-key".into(),
                 },
             ],
+            wrapping_key_cache_ttl_secs: 600,
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_str).unwrap();
@@ -421,6 +442,7 @@ key = "value"
         assert_eq!(parsed.pub_dir, config.pub_dir);
         assert_eq!(parsed.log_level, LogLevel::Trace);
         assert_eq!(parsed.host_identities.len(), 2);
+        assert_eq!(parsed.wrapping_key_cache_ttl_secs, 600);
         assert_eq!(parsed.host_identities[0].host, "github.com");
         assert_eq!(parsed.host_identities[0].label, "github-key");
         assert_eq!(parsed.host_identities[1].host, "*.internal.corp");

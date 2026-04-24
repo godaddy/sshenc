@@ -30,5 +30,12 @@ path = "tests/extended.rs"
 name = "gitenc"
 path = "tests/gitenc.rs"
 
+[[test]]
+name = "lifecycle"
+path = "tests/lifecycle.rs"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

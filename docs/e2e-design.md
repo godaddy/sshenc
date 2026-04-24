@@ -273,6 +273,24 @@ separate job that provides Docker. Failures in the e2e job should block merge.
     with an on-disk key runs `ssh-copy-id` to authorize their enclave
     pubkey; the enclave key works afterward.
 
+### `tests/lifecycle.rs` — nine scenarios (some gated)
+
+ 1. `sshenc_list_shows_keys_in_text_and_json` — text + JSON output.
+ 2. `sshenc_inspect_shows_key_details` — fingerprint + `--show-pub`.
+ 3. `sshenc_delete_removes_key` — gated: creates a fresh key.
+ 4. `sshenc_install_idempotent` — second install is a no-op / repair.
+ 5. `sshenc_install_uninstall_roundtrip` — preserves unrelated Host blocks.
+ 6. `sshenc_keygen_standalone_binary_creates_listable_key` — gated:
+    verifies the `sshenc-keygen` binary matches the subcommand path.
+ 7. `sshenc_openssh_print_config_outputs_expected_block` — emits the
+    expected `Host` + `IdentityAgent` + `IdentityFile` directives.
+ 8. `sshenc_config_init_path_show_roundtrip` — config lifecycle.
+ 9. `agent_allowed_labels_filters_identities` — gated: agent honors
+    `allowed_labels` and refuses signing with filtered keys.
+
+Scenarios marked "gated" require `SSHENC_E2E_EXTENDED=1` under SE mode
+(prompt cost), run free under software mode.
+
 ### `tests/gitenc.rs` — five scenarios (baseline)
 
 1. `gitenc_push_and_clone_roundtrip_via_enclave_agent` — make a commit,
@@ -293,6 +311,32 @@ separate job that provides Docker. Failures in the e2e job should block merge.
 
 1. `sshenc_ssh_selects_among_multiple_enclave_keys_by_label`
 2. `sshenc_default_promotion_writes_id_ecdsa_pub_and_authenticates`
+
+## Dual-mode backend verification
+
+The suite runs in two backend modes, and both must pass:
+
+1. **Default (auto-detect).** On a dev macOS machine this exercises the
+   Secure Enclave backend. Cost: a small keychain ACL prompt budget
+   per rebuild (see "macOS prompt budget" above).
+
+2. **Software (`SSHENC_E2E_SOFTWARE=1`).** The harness builds the
+   sshenc binaries with the `force-software` Cargo feature and sets
+   `SSHENC_FORCE_SOFTWARE=1` at runtime. `SshencBackend::new` branches
+   on the env var (only read when the feature is compiled in) and
+   constructs `enclaveapp-test-software::SoftwareSigner` directly,
+   bypassing `AppSigningBackend::init`. Zero prompts. This is also
+   the code path Linux CI exercises when no TPM is available — the
+   auto-detect flow falls through to the Linux keyring backend there,
+   but the scenarios' observable behavior is backend-agnostic, so
+   verifying on macOS-with-software-forced provides additional
+   confidence that the non-SE path works before CI sees it.
+
+The two modes use disjoint persistent keys directories
+(`~/.sshenc-e2e/keys` vs `~/.sshenc-e2e/keys-sw`) because the two
+backends write different file extensions (`.handle` for SE, `.key`
+for software) and would otherwise interfere with each other's
+duplicate-label checks.
 
 ## Backend rename support
 

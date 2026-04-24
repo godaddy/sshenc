@@ -59,7 +59,7 @@ cargo fmt --all -- --check
 - **sshenc-gitenc** (~15 tests): Arg parsing (label/config/short flags/empty/passthrough), build_ssh_command validation, configure_repo_entries (default/named label/recorded pub path/missing pub path), git key metadata parsing (app_specific/legacy), signing_key_path validation
 - **sshenc-pkcs11** (~4 tests): Session management, slot/token info
 - **sshenc-test-support** (~8 tests): Mock backend key lifecycle (generate/list/get/delete/sign), deterministic key generation, pub file write, comment handling
-- **sshenc-e2e** (27 scenarios total, `#[ignore]` by default): sshenc
+- **sshenc-e2e** (36 scenarios total, `#[ignore]` by default): sshenc
   and gitenc against a real OpenSSH server in a Docker container.
   Covers:
   - **drop-in compatibility** (`tests/drop_in.rs`, 6 scenarios):
@@ -76,10 +76,26 @@ cargo fmt --all -- --check
     writes expected git config, `--config` + `git commit -S` produces
     an ssh signature that `git log --show-signature` accepts, and
     fallback to on-disk keys with an empty agent.
+  - **CLI lifecycle / config surface** (`tests/lifecycle.rs`, 9 scenarios):
+    `list` (text + JSON), `inspect` (+ `--show-pub`), `delete`, `install`
+    idempotency, install+uninstall round-trip preserving other config,
+    the standalone `sshenc-keygen` binary, `openssh print-config`,
+    `config init`/`path`/`show`, and the agent's `allowed_labels`
+    filtering.
   - **extended** (`tests/extended.rs`, 2 scenarios, gated behind
     `SSHENC_E2E_EXTENDED=1`): multi-label enclave-key selection and
     `sshenc default` promotion. Gated because each extra SE key on macOS
     adds one keychain ACL prompt per binary per rebuild.
+
+  **Dual-mode verification.** The full 36-scenario suite runs and passes
+  in two modes:
+  - Default (Secure Enclave on macOS): `SSHENC_E2E_EXTENDED=1 make e2e`.
+  - Software backend: `SSHENC_E2E_SOFTWARE=1 SSHENC_E2E_EXTENDED=1 make e2e`.
+    Builds the sshenc binaries with the `force-software` Cargo feature
+    and sets `SSHENC_FORCE_SOFTWARE=1` at runtime so `SshencBackend::new`
+    constructs `enclaveapp-test-software::SoftwareSigner` instead of the
+    platform backend. Zero keychain prompts; also the path exercised by
+    Linux CI where SE/TPM isn't available.
 
   Run with:
   ```sh

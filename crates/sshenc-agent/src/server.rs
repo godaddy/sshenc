@@ -870,6 +870,52 @@ fn handle_request(
                 }
             }
         }
+        AgentRequest::RenameKey {
+            old_label,
+            new_label,
+        } => {
+            let old_str = match std::str::from_utf8(&old_label) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("rename_key: old_label not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            let new_str = match std::str::from_utf8(&new_label) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("rename_key: new_label not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            tracing::debug!(old = old_str, new = new_str, "handling rename request");
+
+            // Gate BOTH labels against the allowed set. Refusing a
+            // rename that would smuggle a restricted label into the
+            // allowed namespace (or vice versa) is consistent with
+            // the `--labels a,b` contract.
+            if !allowed_labels.is_empty()
+                && (!allowed_labels.contains(old_str) || !allowed_labels.contains(new_str))
+            {
+                tracing::warn!(
+                    old = old_str,
+                    new = new_str,
+                    "rename_key: label(s) not in agent's allowed list"
+                );
+                return Ok(AgentResponse::Failure);
+            }
+
+            match backend.rename(old_str, new_str) {
+                Ok(()) => {
+                    tracing::info!(old = old_str, new = new_str, "rename_key: succeeded");
+                    Ok(AgentResponse::Success)
+                }
+                Err(e) => {
+                    tracing::warn!(old = old_str, new = new_str, error = %e, "rename_key: failed");
+                    Ok(AgentResponse::Failure)
+                }
+            }
+        }
         AgentRequest::DeleteKey { label } => {
             let label_str = match std::str::from_utf8(&label) {
                 Ok(s) => s,

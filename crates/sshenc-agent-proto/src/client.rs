@@ -37,7 +37,7 @@
 #[cfg(unix)]
 use crate::message::{
     self, AgentRequest, AgentResponse, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENTC_SIGN_REQUEST,
-    SSH_AGENTC_SSHENC_DELETE_KEY, SSH_AGENTC_SSHENC_GENERATE_KEY,
+    SSH_AGENTC_SSHENC_DELETE_KEY, SSH_AGENTC_SSHENC_GENERATE_KEY, SSH_AGENTC_SSHENC_RENAME_KEY,
 };
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -50,6 +50,66 @@ use std::time::Duration;
 
 #[cfg(unix)]
 const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Make sure the `sshenc-agent` at `socket_path` is listening,
+/// spawning it if necessary, and return `Ok(())` once the socket
+/// accepts connections.
+///
+/// The Unix CLIs (sshenc, sshenc-keygen, gitenc) hold to the
+/// invariant that **only sshenc-agent ever touches Secure Enclave
+/// and keychain**; this helper is the "make sure the agent is there
+/// to talk to" step every secret-touching op runs before proxying.
+/// Returns an error if the agent binary can't be located in a
+/// trusted install dir, if spawn fails, or if the socket never
+/// becomes ready. Callers must not fall back to local execution on
+/// error — doing so would violate the centralization invariant.
+#[cfg(unix)]
+pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
+    if is_socket_ready(socket_path) {
+        return Ok(());
+    }
+
+    let agent_bin =
+        sshenc_core::bin_discovery::find_trusted_binary("sshenc-agent").ok_or_else(|| {
+            "sshenc-agent binary not found in known install dirs; \
+             install sshenc or start the agent manually before running this command"
+                .to_string()
+        })?;
+
+    if let Some(parent) = socket_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating agent socket dir {}: {e}", parent.display()))?;
+        }
+    }
+
+    use std::process::Stdio;
+    std::process::Command::new(&agent_bin)
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawning {}: {e}", agent_bin.display()))?;
+
+    // Exponential backoff: 100, 200, 400, 800, 1600 ms (≈3.1s max).
+    for attempt in 0..5_u32 {
+        std::thread::sleep(Duration::from_millis(100_u64 << attempt));
+        if is_socket_ready(socket_path) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "sshenc-agent did not become ready at {} within 3.1s",
+        socket_path.display()
+    ))
+}
+
+#[cfg(unix)]
+fn is_socket_ready(socket_path: &Path) -> bool {
+    socket_path.exists() && UnixStream::connect(socket_path).is_ok()
+}
 
 /// Try to sign `data` through whatever agent `SSH_AUTH_SOCK` points
 /// to. `pubkey_blob` is the SSH wire-format public key the caller
@@ -79,11 +139,7 @@ pub fn try_sign_via_agent(pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(unix)]
-pub(crate) fn try_sign_via_socket(
-    sock_path: &Path,
-    pubkey_blob: &[u8],
-    data: &[u8],
-) -> Option<Vec<u8>> {
+pub fn try_sign_via_socket(sock_path: &Path, pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
     let mut stream = connect_agent(sock_path)?;
 
     if !agent_has_identity(&mut stream, pubkey_blob)? {
@@ -118,7 +174,7 @@ pub fn try_delete_via_agent(label: &str) -> Option<()> {
 }
 
 #[cfg(unix)]
-pub(crate) fn try_delete_via_socket(sock_path: &Path, label: &str) -> Option<()> {
+pub fn try_delete_via_socket(sock_path: &Path, label: &str) -> Option<()> {
     let mut stream = connect_agent(sock_path)?;
     request_delete(&mut stream, label)
 }
@@ -155,7 +211,7 @@ pub fn try_generate_via_agent(
 }
 
 #[cfg(unix)]
-pub(crate) fn try_generate_via_socket(
+pub fn try_generate_via_socket(
     sock_path: &Path,
     label: &str,
     comment: Option<&str>,
@@ -163,6 +219,33 @@ pub(crate) fn try_generate_via_socket(
 ) -> Option<Vec<u8>> {
     let mut stream = connect_agent(sock_path)?;
     request_generate(&mut stream, label, comment, access_policy)
+}
+
+/// Try to rename a key through the agent at `SSH_AUTH_SOCK`.
+/// Returns `Some(())` on success, `None` on any failure (no socket,
+/// agent refuses, backend error). Callers treat `None` as a hard
+/// error on Unix — the CLI never renames a key itself.
+#[must_use]
+pub fn try_rename_via_agent(old_label: &str, new_label: &str) -> Option<()> {
+    #[cfg(unix)]
+    {
+        let sock_path = std::env::var_os("SSH_AUTH_SOCK")?;
+        if sock_path.is_empty() {
+            return None;
+        }
+        try_rename_via_socket(Path::new(&sock_path), old_label, new_label)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (old_label, new_label);
+        None
+    }
+}
+
+#[cfg(unix)]
+pub fn try_rename_via_socket(sock_path: &Path, old_label: &str, new_label: &str) -> Option<()> {
+    let mut stream = connect_agent(sock_path)?;
+    request_rename(&mut stream, old_label, new_label)
 }
 
 #[cfg(unix)]
@@ -261,6 +344,28 @@ fn request_generate(
                 ?other,
                 "agent proxy: unexpected response to generate request"
             );
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+fn request_rename(stream: &mut UnixStream, old_label: &str, new_label: &str) -> Option<()> {
+    let payload = message::serialize_request(&AgentRequest::RenameKey {
+        old_label: old_label.as_bytes().to_vec(),
+        new_label: new_label.as_bytes().to_vec(),
+    });
+    debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_RENAME_KEY);
+    send_framed(stream, &payload)?;
+
+    match recv_response(stream)? {
+        AgentResponse::Success => Some(()),
+        AgentResponse::Failure => {
+            tracing::debug!("agent proxy: rename returned FAILURE, falling back");
+            None
+        }
+        other => {
+            tracing::debug!(?other, "agent proxy: unexpected response to rename request");
             None
         }
     }

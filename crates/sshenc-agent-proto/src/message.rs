@@ -36,6 +36,7 @@ pub const SSH_AGENT_SUCCESS: u8 = 6;
 // reader the same binary and eliminates that prompt class entirely.
 pub const SSH_AGENTC_SSHENC_DELETE_KEY: u8 = 0xF0;
 pub const SSH_AGENTC_SSHENC_GENERATE_KEY: u8 = 0xF1;
+pub const SSH_AGENTC_SSHENC_RENAME_KEY: u8 = 0xF3;
 
 // sshenc-specific response: carries the public-key bytes of a
 // freshly-generated key back to the CLI. On failure the agent uses
@@ -93,6 +94,14 @@ pub enum AgentRequest {
         /// `AccessPolicy::as_ffi_value()` — 0 None, 1 Any, 2
         /// BiometricOnly, 3 PasswordOnly. Any other value is rejected.
         access_policy: u32,
+    },
+    /// `SSH_AGENTC_SSHENC_RENAME_KEY` (sshenc extension): relabel an
+    /// existing key on disk and in the keychain. Used by `sshenc
+    /// default` so promoting a key to the default slot doesn't
+    /// require the CLI to touch the keychain wrapping entry.
+    RenameKey {
+        old_label: Vec<u8>,
+        new_label: Vec<u8>,
     },
     /// An unrecognized message type.
     Unknown(u8),
@@ -166,6 +175,15 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
                 access_policy,
             })
         }
+        SSH_AGENTC_SSHENC_RENAME_KEY => {
+            let mut cursor = Cursor::new(body);
+            let old_label = wire::read_string(&mut cursor)?;
+            let new_label = wire::read_string(&mut cursor)?;
+            Ok(AgentRequest::RenameKey {
+                old_label,
+                new_label,
+            })
+        }
         other => Ok(AgentRequest::Unknown(other)),
     }
 }
@@ -231,6 +249,15 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
             wire::write_string(&mut buf, label);
             wire::write_string(&mut buf, comment);
             buf.extend_from_slice(&access_policy.to_be_bytes());
+            buf
+        }
+        AgentRequest::RenameKey {
+            old_label,
+            new_label,
+        } => {
+            let mut buf = vec![SSH_AGENTC_SSHENC_RENAME_KEY];
+            wire::write_string(&mut buf, old_label);
+            wire::write_string(&mut buf, new_label);
             buf
         }
         AgentRequest::Unknown(t) => vec![*t],

@@ -11,6 +11,13 @@ repository.workspace = true
 name = "sshenc"
 path = "src/main.rs"
 
+[features]
+default = []
+# Forwards the `force-software` flag down to sshenc-se + sshenc-agent
+# so the whole binary set exposes `SSHENC_FORCE_SOFTWARE=1` at runtime.
+# Test-only.
+force-software = ["sshenc-se/force-software", "sshenc-agent/force-software"]
+
 [dependencies]
 sshenc-core = { workspace = true }
 sshenc-se = { workspace = true }

@@ -45,6 +45,18 @@ pub fn extended_enabled() -> bool {
     std::env::var_os(EXTENDED_ENV).is_some_and(|v| !v.is_empty())
 }
 
+/// Environment variable that opts into the software signing backend for
+/// the e2e run. When set, the harness builds the sshenc binaries with
+/// `--features force-software` and propagates `SSHENC_FORCE_SOFTWARE=1`
+/// to child processes. Default (unset) runs against whatever backend
+/// `AppSigningBackend::init` auto-detects (Secure Enclave on macOS).
+pub const SOFTWARE_ENV: &str = "SSHENC_E2E_SOFTWARE";
+
+/// Return true if the e2e suite should force the software backend.
+pub fn software_mode() -> bool {
+    std::env::var_os(SOFTWARE_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Label used for the single shared enclave key that all scenarios reuse.
 ///
 /// Reusing one key dramatically reduces macOS keychain "Always Allow"
@@ -57,17 +69,21 @@ pub const SHARED_ENCLAVE_LABEL: &str = "e2e-shared";
 /// tempdir `HOME`. Lives under the real user's home so `SshencEnv` tempdir
 /// teardown doesn't wipe it — the whole point is that the key survives
 /// across test runs so we don't re-create (and re-prompt) every time.
+///
+/// The path differs per backend mode (`keys` vs `keys-sw`) because the
+/// two backends write different file extensions (`.handle` for SE,
+/// `.key` for software) and duplicate-label checks see each other's
+/// metadata — keeping them in disjoint directories avoids cross-mode
+/// interference when the developer alternates between the two modes.
 pub fn persistent_keys_dir() -> PathBuf {
     if let Some(override_path) = std::env::var_os("SSHENC_KEYS_DIR") {
         return PathBuf::from(override_path);
     }
-    // Hidden directory in the real user's home. Matches the `~/.sshenc` root
-    // the product uses, with an `-e2e` suffix so it can never be mistaken
-    // for real state.
     let home_var = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .unwrap_or_else(|| std::ffi::OsString::from("/tmp"));
-    PathBuf::from(home_var).join(".sshenc-e2e").join("keys")
+    let leaf = if software_mode() { "keys-sw" } else { "keys" };
+    PathBuf::from(home_var).join(".sshenc-e2e").join(leaf)
 }
 
 /// Return `Some(reason)` if the e2e suite cannot run on this host.
@@ -108,6 +124,13 @@ fn build_binaries() -> Result<()> {
     }
     if is_release_profile() {
         cmd.arg("--release");
+    }
+    if software_mode() {
+        // Only the packages that actually expose the feature flag; the
+        // gitenc binary doesn't link sshenc-se and therefore doesn't
+        // take the feature, so we can't pass `sshenc-gitenc/force-software`.
+        cmd.arg("--features");
+        cmd.arg("sshenc-cli/force-software,sshenc-agent/force-software");
     }
     let output = cmd
         .stdout(Stdio::piped())
@@ -383,6 +406,14 @@ impl SshencEnv {
     /// Start `sshenc-agent --foreground` bound to `socket_path()`. Blocks
     /// until the socket is listening.
     pub fn start_agent(&mut self) -> Result<()> {
+        self.start_agent_with_config(None)
+    }
+
+    /// Start the agent with an explicit `--config <path>` flag. Used by
+    /// scenarios that need to exercise config-file–driven behavior
+    /// (`allowed_labels`, `prompt_policy`), because `Config::default_path`
+    /// resolves via `dirs::config_dir()` (platform-dependent, not `$HOME`).
+    pub fn start_agent_with_config(&mut self, config: Option<&Path>) -> Result<()> {
         if self.agent.is_some() {
             return Ok(());
         }
@@ -391,10 +422,12 @@ impl SshencEnv {
             drop(fs::remove_file(&socket));
         }
         let bin = workspace_bin("sshenc-agent")?;
-        let child = self
-            .scrubbed_command(&bin)
-            .args(["--foreground", "--socket"])
-            .arg(&socket)
+        let mut cmd = self.scrubbed_command(&bin);
+        cmd.args(["--foreground", "--socket"]).arg(&socket);
+        if let Some(path) = config {
+            cmd.arg("--config").arg(path);
+        }
+        let child = cmd
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -424,13 +457,18 @@ impl SshencEnv {
     /// `Command` with `HOME` pinned and common env scrubbed so tests don't
     /// pick up the developer's actual ssh state.
     ///
+    /// Prepends the workspace `target/<profile>/` directory to `PATH` so
+    /// indirect invocations that spell sshenc/gitenc by basename (e.g.
+    /// `GIT_SSH_COMMAND=sshenc ssh -- …` spawned by git) can find the
+    /// freshly-built binaries instead of any globally-installed copy.
+    ///
     /// Also pins `SSHENC_KEYS_DIR` to a persistent path so the shared
     /// enclave key survives across test runs. Without this, every run would
     /// create a fresh SE key and the macOS keychain would prompt again.
     pub fn scrubbed_command<S: AsRef<OsStr>>(&self, program: S) -> Command {
         let mut cmd = Command::new(program);
         cmd.env_clear();
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+        cmd.env("PATH", scrubbed_path());
         cmd.env("HOME", &self.home);
         cmd.env("USER", whoami());
         cmd.env("LOGNAME", whoami());
@@ -441,11 +479,44 @@ impl SshencEnv {
             .clone()
             .unwrap_or_else(persistent_keys_dir);
         cmd.env("SSHENC_KEYS_DIR", keys_dir);
+        if software_mode() {
+            cmd.env("SSHENC_FORCE_SOFTWARE", "1");
+        }
         cmd
     }
 
     pub fn sshenc_cmd(&self) -> Result<Command> {
         Ok(self.scrubbed_command(workspace_bin("sshenc")?))
+    }
+
+    /// Command to run `gitenc`, the git wrapper.
+    pub fn gitenc_cmd(&self) -> Result<Command> {
+        let mut cmd = self.scrubbed_command(workspace_bin("gitenc")?);
+        // gitenc shells out to `git`, which must be on PATH. gitenc
+        // itself is a direct invocation above, so PATH is only relevant
+        // for git and, via `GIT_SSH_COMMAND`, the sshenc binary by
+        // basename. Both are handled by the PATH prepend in
+        // `scrubbed_command`.
+        //
+        // For reproducibility across hosts, pin basic git identity so
+        // `git commit` can succeed without inheriting ambient config.
+        cmd.env("GIT_AUTHOR_NAME", "e2e author")
+            .env("GIT_AUTHOR_EMAIL", "author@e2e.test")
+            .env("GIT_COMMITTER_NAME", "e2e committer")
+            .env("GIT_COMMITTER_EMAIL", "committer@e2e.test");
+        Ok(cmd)
+    }
+
+    /// Shorthand for running `git` directly with the same environment
+    /// scrub applied to the sshenc binaries (needed for repo setup
+    /// outside the gitenc wrapper).
+    pub fn git_cmd(&self) -> Command {
+        let mut cmd = self.scrubbed_command("git");
+        cmd.env("GIT_AUTHOR_NAME", "e2e author")
+            .env("GIT_AUTHOR_EMAIL", "author@e2e.test")
+            .env("GIT_COMMITTER_NAME", "e2e committer")
+            .env("GIT_COMMITTER_EMAIL", "committer@e2e.test");
+        cmd
     }
 
     /// Run the system `ssh` against the container. Writes to `known_hosts`
@@ -797,6 +868,22 @@ fn tempdir() -> Result<PathBuf> {
 
 fn tmp_cleanup(path: &Path) -> io::Result<()> {
     fs::remove_dir_all(path)
+}
+
+/// Return a `PATH` string with the test binaries' `target/<profile>/`
+/// directory prepended. Ensures basename-only invocations of sshenc /
+/// gitenc (as spawned by git via `GIT_SSH_COMMAND` / `gpg.ssh.program`)
+/// resolve to the binaries built for this test run.
+fn scrubbed_path() -> std::ffi::OsString {
+    let host_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut parts: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(profile_dir) = exe.parent().and_then(Path::parent) {
+            parts.push(profile_dir.to_path_buf());
+        }
+    }
+    parts.extend(std::env::split_paths(&host_path));
+    std::env::join_paths(parts).unwrap_or(host_path)
 }
 
 fn whoami() -> String {

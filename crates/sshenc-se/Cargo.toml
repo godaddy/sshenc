@@ -7,10 +7,18 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Compiles in a software-only signing backend and lets the runtime
+# `SSHENC_FORCE_SOFTWARE=1` env var select it instead of the platform
+# hardware backend. Test-only — never enabled in shipping builds.
+force-software = ["dep:enclaveapp-test-software"]
+
 [dependencies]
 sshenc-core = { workspace = true }
 enclaveapp-core = { workspace = true }
 enclaveapp-app-storage = { workspace = true }
+enclaveapp-test-software = { workspace = true, optional = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

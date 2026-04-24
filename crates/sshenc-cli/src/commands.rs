@@ -1216,6 +1216,20 @@ fn build_ssh_wrapper_invocation(
         temp_identity_file = Some(identity_path);
     }
 
+    // Test-harness escape hatch: when `SSHENC_SSH_EXTRA_ARGS` is set,
+    // whitespace-split its value and insert the tokens before the
+    // user-supplied ssh args. Lets e2e tests inject ssh options (e.g.
+    // `-F /dev/null -o UserKnownHostsFile=<tempdir>/known_hosts`) that
+    // can't otherwise be passed through indirect invocations like
+    // `gitenc` → `GIT_SSH_COMMAND=sshenc ssh --` → `ssh`. Unset in
+    // production; no behavior change when absent.
+    if let Some(extra) = std::env::var_os("SSHENC_SSH_EXTRA_ARGS") {
+        let extra = extra.to_string_lossy().into_owned();
+        for token in extra.split_whitespace() {
+            args.push(token.to_string());
+        }
+    }
+
     args.extend(ssh_args.iter().cloned());
 
     Ok(SshInvocation {

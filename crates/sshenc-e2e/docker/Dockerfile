@@ -9,6 +9,8 @@ RUN apk add --no-cache \
         netcat-openbsd \
         rsync \
         coreutils \
+        git \
+        git-daemon \
     && adduser -D -s /bin/bash sshtest \
     && passwd -u sshtest \
     && mkdir -p /home/sshtest/.ssh \

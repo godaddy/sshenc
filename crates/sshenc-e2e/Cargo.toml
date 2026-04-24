@@ -26,5 +26,16 @@ path = "tests/ssh_functions.rs"
 name = "extended"
 path = "tests/extended.rs"
 
+[[test]]
+name = "gitenc"
+path = "tests/gitenc.rs"
+
+[[test]]
+name = "lifecycle"
+path = "tests/lifecycle.rs"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

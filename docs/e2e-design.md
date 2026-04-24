@@ -229,6 +229,59 @@ make e2e
 CI tier: `cargo test --workspace` stays on PRs; the e2e suite runs in a
 separate job that provides Docker. Failures in the e2e job should block merge.
 
+## Scenario inventory
+
+### `tests/drop_in.rs` — six drop-in scenarios (baseline)
+
+1. `sshenc_install_preserves_plain_ssh_with_on_disk_keys`
+2. `agent_running_zero_enclave_keys_still_authenticates_on_disk`
+3. `both_present_unlabeled_falls_back_to_on_disk`
+4. `both_present_unlabeled_uses_enclave_via_agent`
+5. `label_forces_enclave_and_refuses_on_disk_fallback`
+6. `plain_ssh_with_identity_agent_accepts_both_key_paths`
+
+### `tests/ssh_functions.rs` — seven function-coverage scenarios (baseline)
+
+1. `scp_roundtrips_file_via_enclave_agent` — scp upload + download + byte
+   comparison.
+2. `sftp_lists_remote_directory_via_enclave_agent` — sftp batch-mode
+   `ls` sees files placed via scp.
+3. `ssh_local_port_forward_through_enclave_agent` — `ssh -L` forwards
+   to container sshd; local connect reads `SSH-2.0` banner.
+4. `ssh_a_forwards_sshenc_agent_to_remote` — `ssh -A`; running
+   `ssh-add -l` in the container enumerates forwarded identities.
+5. `ssh_add_l_enumerates_sshenc_agent` — direct `SSH_AUTH_SOCK=<sock>
+   ssh-add -l` lists enclave identities.
+6. `sshenc_y_sign_produces_valid_signature` — `sshenc -Y sign` →
+   `ssh-keygen -Y verify` with an allowed_signers file.
+7. `concurrent_ssh_invocations_via_enclave_agent` — four parallel ssh
+   runs against the same agent all succeed.
+
+### `tests/extended.rs` — two scenarios gated behind `SSHENC_E2E_EXTENDED=1`
+
+1. `sshenc_ssh_selects_among_multiple_enclave_keys_by_label`
+2. `sshenc_default_promotion_writes_id_ecdsa_pub_and_authenticates`
+
+## Backend rename support
+
+`sshenc default <label>` renames a label to `default`. Pre-existing on
+macOS the metadata rename was disk-only and left the Keychain
+wrapping-key entry orphaned, so the newly-promoted `default` could not
+be unwrapped. This was found by the promotion e2e scenario and fixed in
+`libenclaveapp` by adding `EnclaveKeyManager::rename_key` with per-backend
+overrides:
+
+- **Apple Secure Enclave**: moves the keychain wrapping-key entry +
+  renames disk metadata atomically, with rollback on failure.
+- **Linux keyring**: decrypts under old label, re-encrypts under new
+  label (new KEK in keyring), renames disk files, deletes old keyring
+  entry.
+- **Linux TPM**: renames `.tpm_pub` / `.tpm_priv` blobs + disk metadata.
+- **Software (test)**: renames disk files only.
+- **Windows TPM**: returns error — CNG persisted keys are immutable by
+  name. A UUID-indirection refactor (label ↔ UUID mapping in metadata)
+  would unblock this on Windows; tracked as a follow-up in libenclaveapp.
+
 ## Open risks / follow-ups
 
 - Alpine's `openssh-server` vs Debian's: we pin the Alpine version; future
@@ -238,6 +291,8 @@ separate job that provides Docker. Failures in the e2e job should block merge.
   is a timeout, not a skip. Acceptable for now.
 - A gitenc e2e scenario (push to a bare repo inside the container) is
   tracked as a follow-up; not required for the drop-in claim.
+- Windows `sshenc default` is still unsupported pending the UUID
+  indirection redesign in libenclaveapp.
 - Concurrent `cargo test -- --test-threads=N` is safe because containers
   bind ephemeral ports and tempdirs are disjoint, but image builds race on
   the first run; a `OnceLock` guards this.

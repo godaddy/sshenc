@@ -18,5 +18,13 @@ anyhow = { workspace = true }
 name = "drop_in"
 path = "tests/drop_in.rs"
 
+[[test]]
+name = "ssh_functions"
+path = "tests/ssh_functions.rs"
+
+[[test]]
+name = "extended"
+path = "tests/extended.rs"
+
 [lints]
 workspace = true

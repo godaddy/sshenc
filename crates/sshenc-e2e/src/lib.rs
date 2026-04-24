@@ -31,6 +31,20 @@ pub const REQUIRED_BINS: &[(&str, &str)] = &[
     ("gitenc", "sshenc-gitenc"),
 ];
 
+/// Environment variable that opts into the "extended" e2e scenarios.
+///
+/// These scenarios need additional Secure Enclave keys beyond the single
+/// shared key, which on macOS means additional keychain ACL entries and
+/// therefore additional "Always Allow" prompts per rebuild. They're
+/// disabled by default so the basic e2e suite stays at two prompts per
+/// rebuild. Set `SSHENC_E2E_EXTENDED=1` to run them (recommended for CI).
+pub const EXTENDED_ENV: &str = "SSHENC_E2E_EXTENDED";
+
+/// Return true if extended e2e scenarios should run.
+pub fn extended_enabled() -> bool {
+    std::env::var_os(EXTENDED_ENV).is_some_and(|v| !v.is_empty())
+}
+
 /// Label used for the single shared enclave key that all scenarios reuse.
 ///
 /// Reusing one key dramatically reduces macOS keychain "Always Allow"
@@ -465,6 +479,58 @@ impl SshencEnv {
             .arg("-o")
             .arg("PreferredAuthentications=publickey");
     }
+
+    /// Same as [`apply_ssh_isolation`] but uses `-o Port=N` instead of
+    /// `-p N` so it works uniformly for `ssh`, `scp`, `sftp` (which spell
+    /// the port flag `-P` rather than `-p`).
+    pub fn apply_isolation_any_client(cmd: &mut Command, port: u16, known_hosts: &Path) {
+        cmd.arg("-F")
+            .arg("/dev/null")
+            .arg("-o")
+            .arg(format!("Port={port}"))
+            .arg("-o")
+            .arg("StrictHostKeyChecking=accept-new")
+            .arg("-o")
+            .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
+            .arg("-o")
+            .arg("ConnectTimeout=10")
+            .arg("-o")
+            .arg("NumberOfPasswordPrompts=0")
+            .arg("-o")
+            .arg("PreferredAuthentications=publickey");
+    }
+
+    /// Return a `Command` for `scp` scrubbed the same way as `ssh_cmd`.
+    pub fn scp_cmd(&self, container: &SshdContainer) -> Command {
+        let mut cmd = self.scrubbed_command("scp");
+        Self::apply_isolation_any_client(&mut cmd, container.host_port, &self.known_hosts());
+        cmd
+    }
+
+    /// Return a `Command` for `sftp` scrubbed the same way as `ssh_cmd`.
+    pub fn sftp_cmd(&self, container: &SshdContainer) -> Command {
+        let mut cmd = self.scrubbed_command("sftp");
+        Self::apply_isolation_any_client(&mut cmd, container.host_port, &self.known_hosts());
+        cmd
+    }
+
+    /// Set `IdentityAgent` on a command to point at this env's agent socket.
+    /// Call after the isolation helper.
+    pub fn with_identity_agent(cmd: &mut Command, socket: &Path) {
+        cmd.arg("-o")
+            .arg(format!("IdentityAgent={}", socket.display()));
+    }
+}
+
+/// Pick a random unused TCP port on 127.0.0.1. Used for `-L` tunnel tests.
+///
+/// Racy in principle (another process could grab it between bind+close and
+/// the ssh tunnel bind), but fine for tests — the window is milliseconds
+/// and the harness runs serially.
+pub fn pick_free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind ephemeral port")?;
+    let port = listener.local_addr()?.port();
+    Ok(port)
 }
 
 impl Drop for SshencEnv {
@@ -528,6 +594,44 @@ pub fn shared_enclave_pubkey(env: &SshencEnv) -> Result<String> {
         Ok(line) => Ok(line.clone()),
         Err(msg) => Err(anyhow!("shared enclave key init failed: {msg}")),
     }
+}
+
+/// Ensure a persistent enclave key with the given label exists. Unlike
+/// `shared_enclave_pubkey`, this is not memoized — callers can use
+/// multiple distinct labels. All keys live in the shared persistent
+/// keys_dir so each label has one keychain ACL per binary, not one per
+/// test run.
+pub fn ensure_persistent_enclave_key(env: &SshencEnv, label: &str) -> Result<String> {
+    init_named_enclave_key(env, label)
+}
+
+fn init_named_enclave_key(env: &SshencEnv, label: &str) -> Result<String> {
+    if let Some(line) = try_export_pub(env, label)? {
+        return Ok(line);
+    }
+    let output = env
+        .sshenc_cmd()?
+        .args([
+            "keygen",
+            "--label",
+            label,
+            "--auth-policy",
+            "none",
+            "--no-pub-file",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("spawn sshenc keygen")?;
+    if !output.status.success() {
+        bail!(
+            "sshenc keygen --label {label} failed: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    try_export_pub(env, label)?
+        .ok_or_else(|| anyhow!("keygen {label} succeeded but export-pub found nothing"))
 }
 
 fn init_shared_enclave_key(env: &SshencEnv) -> Result<String> {

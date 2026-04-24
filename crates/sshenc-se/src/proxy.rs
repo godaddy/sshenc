@@ -26,18 +26,25 @@
 
 use crate::backend::KeyBackend;
 use crate::unified::SshencBackend;
-use sshenc_agent_proto::client;
 use sshenc_core::error::{Error, Result};
-use sshenc_core::fingerprint;
-use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyMetadata};
-use sshenc_core::pubkey::SshPublicKey;
+use sshenc_core::key::{KeyGenOptions, KeyInfo};
 use std::path::PathBuf;
+
+#[cfg(unix)]
+use sshenc_agent_proto::client;
+#[cfg(unix)]
+use sshenc_core::fingerprint;
+#[cfg(unix)]
+use sshenc_core::key::KeyMetadata;
+#[cfg(unix)]
+use sshenc_core::pubkey::SshPublicKey;
 
 /// `KeyBackend` that forwards every secret-touching op to
 /// `sshenc-agent` over a Unix socket. Reads fall through to a local
 /// `SshencBackend`; writes never do.
 #[derive(Debug)]
 pub struct AgentProxyBackend {
+    #[cfg_attr(not(unix), allow(dead_code))]
     socket_path: PathBuf,
     inner: SshencBackend,
 }

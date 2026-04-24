@@ -252,6 +252,14 @@ impl KeyBackend for SshencBackend {
             .map_err(|e| map_err("delete_key", e))
     }
 
+    fn rename(&self, old_label: &str, new_label: &str) -> Result<()> {
+        drop(KeyLabel::new(old_label)?);
+        drop(KeyLabel::new(new_label)?);
+        self.key_manager()
+            .rename_key(old_label, new_label)
+            .map_err(|e| map_err("rename_key", e))
+    }
+
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         drop(KeyLabel::new(label)?);
         self.signer()

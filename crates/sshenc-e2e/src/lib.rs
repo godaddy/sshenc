@@ -424,13 +424,18 @@ impl SshencEnv {
     /// `Command` with `HOME` pinned and common env scrubbed so tests don't
     /// pick up the developer's actual ssh state.
     ///
+    /// Prepends the workspace `target/<profile>/` directory to `PATH` so
+    /// indirect invocations that spell sshenc/gitenc by basename (e.g.
+    /// `GIT_SSH_COMMAND=sshenc ssh -- …` spawned by git) can find the
+    /// freshly-built binaries instead of any globally-installed copy.
+    ///
     /// Also pins `SSHENC_KEYS_DIR` to a persistent path so the shared
     /// enclave key survives across test runs. Without this, every run would
     /// create a fresh SE key and the macOS keychain would prompt again.
     pub fn scrubbed_command<S: AsRef<OsStr>>(&self, program: S) -> Command {
         let mut cmd = Command::new(program);
         cmd.env_clear();
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+        cmd.env("PATH", scrubbed_path());
         cmd.env("HOME", &self.home);
         cmd.env("USER", whoami());
         cmd.env("LOGNAME", whoami());
@@ -446,6 +451,36 @@ impl SshencEnv {
 
     pub fn sshenc_cmd(&self) -> Result<Command> {
         Ok(self.scrubbed_command(workspace_bin("sshenc")?))
+    }
+
+    /// Command to run `gitenc`, the git wrapper.
+    pub fn gitenc_cmd(&self) -> Result<Command> {
+        let mut cmd = self.scrubbed_command(workspace_bin("gitenc")?);
+        // gitenc shells out to `git`, which must be on PATH. gitenc
+        // itself is a direct invocation above, so PATH is only relevant
+        // for git and, via `GIT_SSH_COMMAND`, the sshenc binary by
+        // basename. Both are handled by the PATH prepend in
+        // `scrubbed_command`.
+        //
+        // For reproducibility across hosts, pin basic git identity so
+        // `git commit` can succeed without inheriting ambient config.
+        cmd.env("GIT_AUTHOR_NAME", "e2e author")
+            .env("GIT_AUTHOR_EMAIL", "author@e2e.test")
+            .env("GIT_COMMITTER_NAME", "e2e committer")
+            .env("GIT_COMMITTER_EMAIL", "committer@e2e.test");
+        Ok(cmd)
+    }
+
+    /// Shorthand for running `git` directly with the same environment
+    /// scrub applied to the sshenc binaries (needed for repo setup
+    /// outside the gitenc wrapper).
+    pub fn git_cmd(&self) -> Command {
+        let mut cmd = self.scrubbed_command("git");
+        cmd.env("GIT_AUTHOR_NAME", "e2e author")
+            .env("GIT_AUTHOR_EMAIL", "author@e2e.test")
+            .env("GIT_COMMITTER_NAME", "e2e committer")
+            .env("GIT_COMMITTER_EMAIL", "committer@e2e.test");
+        cmd
     }
 
     /// Run the system `ssh` against the container. Writes to `known_hosts`
@@ -797,6 +832,22 @@ fn tempdir() -> Result<PathBuf> {
 
 fn tmp_cleanup(path: &Path) -> io::Result<()> {
     fs::remove_dir_all(path)
+}
+
+/// Return a `PATH` string with the test binaries' `target/<profile>/`
+/// directory prepended. Ensures basename-only invocations of sshenc /
+/// gitenc (as spawned by git via `GIT_SSH_COMMAND` / `gpg.ssh.program`)
+/// resolve to the binaries built for this test run.
+fn scrubbed_path() -> std::ffi::OsString {
+    let host_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut parts: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(profile_dir) = exe.parent().and_then(Path::parent) {
+            parts.push(profile_dir.to_path_buf());
+        }
+    }
+    parts.extend(std::env::split_paths(&host_path));
+    std::env::join_paths(parts).unwrap_or(host_path)
 }
 
 fn whoami() -> String {

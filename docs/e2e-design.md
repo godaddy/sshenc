@@ -273,6 +273,22 @@ separate job that provides Docker. Failures in the e2e job should block merge.
     with an on-disk key runs `ssh-copy-id` to authorize their enclave
     pubkey; the enclave key works afterward.
 
+### `tests/gitenc.rs` — five scenarios (baseline)
+
+1. `gitenc_push_and_clone_roundtrip_via_enclave_agent` — make a commit,
+   push via `gitenc`, re-clone, verify file content matches.
+2. `gitenc_label_forces_named_enclave_key` — `--label e2e-shared` pushes
+   succeed against a server trusting the enclave; a bogus label fails.
+3. `gitenc_config_writes_expected_git_config` — `gitenc --config <label>`
+   sets `core.sshCommand`, `gpg.format`, `user.signingkey`,
+   `commit.gpgsign`, `gpg.ssh.program` to the expected values.
+4. `gitenc_config_signs_commit_and_verifies` — full chain:
+   `sshenc identity`, `gitenc --config`, `git commit -S`,
+   `git log --show-signature` accepts the signature.
+5. `gitenc_falls_back_to_on_disk_when_agent_is_empty` — proves gitenc
+   inherits the same ssh-level drop-in compatibility: user with
+   only an on-disk key can still use gitenc.
+
 ### `tests/extended.rs` — two scenarios gated behind `SSHENC_E2E_EXTENDED=1`
 
 1. `sshenc_ssh_selects_among_multiple_enclave_keys_by_label`

@@ -26,5 +26,9 @@ path = "tests/ssh_functions.rs"
 name = "extended"
 path = "tests/extended.rs"
 
+[[test]]
+name = "gitenc"
+path = "tests/gitenc.rs"
+
 [lints]
 workspace = true

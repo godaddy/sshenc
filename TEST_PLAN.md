@@ -59,8 +59,9 @@ cargo fmt --all -- --check
 - **sshenc-gitenc** (~15 tests): Arg parsing (label/config/short flags/empty/passthrough), build_ssh_command validation, configure_repo_entries (default/named label/recorded pub path/missing pub path), git key metadata parsing (app_specific/legacy), signing_key_path validation
 - **sshenc-pkcs11** (~4 tests): Session management, slot/token info
 - **sshenc-test-support** (~8 tests): Mock backend key lifecycle (generate/list/get/delete/sign), deterministic key generation, pub file write, comment handling
-- **sshenc-e2e** (22 scenarios total, `#[ignore]` by default): sshenc
-  against a real OpenSSH server in a Docker container. Covers:
+- **sshenc-e2e** (27 scenarios total, `#[ignore]` by default): sshenc
+  and gitenc against a real OpenSSH server in a Docker container.
+  Covers:
   - **drop-in compatibility** (`tests/drop_in.rs`, 6 scenarios):
     `sshenc install` + plain ssh, empty-agent fallback, both-keys-unlabeled
     (on-disk and enclave variants), `--label` enclave-only restriction,
@@ -70,6 +71,11 @@ cargo fmt --all -- --check
     enumeration, `sshenc -Y sign` + verify, concurrent signing, legacy
     on-disk RSA + ECDSA keys, exit-code propagation, binary stdin/stdout
     roundtrip, `ssh -tt` pty allocation, and `ssh-copy-id` key deposit.
+  - **gitenc** (`tests/gitenc.rs`, 5 scenarios): push + clone roundtrip
+    via enclave agent, `--label` forces the named key, `--config`
+    writes expected git config, `--config` + `git commit -S` produces
+    an ssh signature that `git log --show-signature` accepts, and
+    fallback to on-disk keys with an empty agent.
   - **extended** (`tests/extended.rs`, 2 scenarios, gated behind
     `SSHENC_E2E_EXTENDED=1`): multi-label enclave-key selection and
     `sshenc default` promotion. Gated because each extra SE key on macOS

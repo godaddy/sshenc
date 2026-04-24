@@ -1798,8 +1798,8 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
 
     #[cfg(not(unix))]
     {
-        let _ = pubkey_blob;
-        let _ = signed_data;
+        drop(pubkey_blob);
+        drop(signed_data);
         let config = Config::load_default()?;
         let ssh_dir = config.pub_dir;
         let backend = SshencBackend::new(ssh_dir, false)

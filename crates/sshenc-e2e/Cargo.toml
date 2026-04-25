@@ -118,6 +118,10 @@ path = "tests/exit_codes.rs"
 name = "drop_in_extras"
 path = "tests/drop_in_extras.rs"
 
+[[test]]
+name = "pkcs11_boot_hook"
+path = "tests/pkcs11_boot_hook.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

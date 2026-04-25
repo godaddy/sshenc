@@ -1108,6 +1108,50 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// Routes between the explicit-args path and the config-driven
+/// `host_identities` iteration path.
+///
+/// - both `label` and `host` provided → emit a single snippet (legacy behavior)
+/// - neither provided → iterate `config.host_identities` and emit one snippet per entry
+/// - exactly one provided → error: the user has to pick a mode
+#[allow(clippy::print_stdout)]
+pub fn openssh_print_config_dispatch(
+    backend: &dyn KeyBackend,
+    label: Option<String>,
+    host: Option<String>,
+    pkcs11: bool,
+) -> Result<()> {
+    match (label.as_deref(), host.as_deref()) {
+        (Some(l), Some(h)) => openssh_print_config(backend, l, h, pkcs11),
+        (None, None) => openssh_print_config_from_host_identities(backend, pkcs11),
+        (Some(_), None) => Err(anyhow!(
+            "--label given without --host; pass --host too, or omit both to iterate host_identities from the config"
+        )),
+        (None, Some(_)) => Err(anyhow!(
+            "--host given without --label; pass --label too, or omit both to iterate host_identities from the config"
+        )),
+    }
+}
+
+/// Emit one config snippet per `host_identities` entry from the
+/// loaded sshenc config.
+#[allow(clippy::print_stdout)]
+fn openssh_print_config_from_host_identities(backend: &dyn KeyBackend, pkcs11: bool) -> Result<()> {
+    let config = Config::load_default()?;
+    if config.host_identities.is_empty() {
+        return Err(anyhow!(
+            "no host_identities configured; add entries to config.toml or pass --label/--host explicitly"
+        ));
+    }
+    for (i, entry) in config.host_identities.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        openssh_print_config(backend, &entry.label, &entry.host, pkcs11)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::print_stdout)]
 pub fn openssh_print_config(
     backend: &dyn KeyBackend,

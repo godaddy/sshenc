@@ -276,6 +276,163 @@ fn openssh_print_config_pkcs11_mode() {
     );
 }
 
+/// Write a minimal sshenc config at the platform-default path so
+/// `Config::load_default()` (which the CLI calls) finds it. Returns
+/// the written path so the caller can read it back if needed.
+#[cfg(not(windows))]
+fn write_default_config(env: &SshencEnv, body: &str) -> std::path::PathBuf {
+    // dirs::config_dir() resolves via HOME (or platform-specific
+    // wrappers around it) — both macOS (~/Library/Application Support)
+    // and Linux ($XDG_CONFIG_HOME or ~/.config) honor the test's
+    // HOME tempdir scrub.
+    #[cfg(target_os = "macos")]
+    let cfg_dir = env
+        .home()
+        .join("Library")
+        .join("Application Support")
+        .join("sshenc");
+    #[cfg(target_os = "linux")]
+    let cfg_dir = env.home().join(".config").join("sshenc");
+    std::fs::create_dir_all(&cfg_dir).expect("mkdir config dir");
+    let path = cfg_dir.join("config.toml");
+    std::fs::write(&path, body).expect("write config.toml");
+    path
+}
+
+/// `sshenc openssh print-config` (no args) iterates
+/// `host_identities` from the config file and emits one snippet
+/// per entry. This is the wired-up form of what was previously a
+/// dead config field — see PR that introduced
+/// `openssh_print_config_dispatch`.
+#[test]
+#[ignore = "requires docker"]
+#[cfg(not(windows))]
+fn openssh_print_config_iterates_host_identities() {
+    if skip_if_no_docker("openssh_print_config_iterates_host_identities") {
+        return;
+    }
+    let env = SshencEnv::new().expect("env");
+    drop(shared_enclave_pubkey(&env).expect("shared key"));
+
+    write_default_config(
+        &env,
+        &format!(
+            "[[host_identities]]\nhost = \"github.com\"\nlabel = \"{SHARED_ENCLAVE_LABEL}\"\n\n\
+             [[host_identities]]\nhost = \"gitlab.com\"\nlabel = \"{SHARED_ENCLAVE_LABEL}\"\n",
+        ),
+    );
+
+    let out = run(env
+        .sshenc_cmd()
+        .expect("sshenc")
+        .args(["openssh", "print-config"]))
+    .expect("openssh print-config (no args)");
+    assert!(
+        out.succeeded(),
+        "openssh print-config (host_identities mode) failed; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("Host github.com"),
+        "expected Host github.com snippet; got:\n{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("Host gitlab.com"),
+        "expected Host gitlab.com snippet; got:\n{}",
+        out.stdout
+    );
+    // Both snippets should reference the same agent socket and
+    // include IdentitiesOnly.
+    let identity_agent_count = out.stdout.matches("IdentityAgent").count();
+    assert!(
+        identity_agent_count >= 2,
+        "expected at least 2 IdentityAgent directives (one per host); got {identity_agent_count}:\n{}",
+        out.stdout
+    );
+}
+
+/// Passing only `--label` (without `--host`) — or vice versa — must
+/// error out with a message pointing at the right fix. We reject
+/// the half-form to keep the user from being surprised by which
+/// path the CLI silently chose.
+#[test]
+#[ignore = "requires docker"]
+fn openssh_print_config_rejects_half_args() {
+    if skip_if_no_docker("openssh_print_config_rejects_half_args") {
+        return;
+    }
+    let env = SshencEnv::new().expect("env");
+    drop(shared_enclave_pubkey(&env).expect("shared key"));
+
+    let only_label = run(env.sshenc_cmd().expect("sshenc").args([
+        "openssh",
+        "print-config",
+        "--label",
+        SHARED_ENCLAVE_LABEL,
+    ]))
+    .expect("openssh print-config --label");
+    assert!(
+        !only_label.succeeded(),
+        "should fail without --host; stdout:\n{}\nstderr:\n{}",
+        only_label.stdout,
+        only_label.stderr
+    );
+    assert!(
+        only_label.stderr.contains("--host") || only_label.stderr.contains("host_identities"),
+        "expected error pointing at --host; got:\n{}",
+        only_label.stderr
+    );
+
+    let only_host = run(env.sshenc_cmd().expect("sshenc").args([
+        "openssh",
+        "print-config",
+        "--host",
+        "github.com",
+    ]))
+    .expect("openssh print-config --host");
+    assert!(
+        !only_host.succeeded(),
+        "should fail without --label; stdout:\n{}\nstderr:\n{}",
+        only_host.stdout,
+        only_host.stderr
+    );
+}
+
+/// With no `host_identities` configured, calling
+/// `openssh print-config` with no args must error cleanly rather
+/// than silently emit nothing.
+#[test]
+#[ignore = "requires docker"]
+#[cfg(not(windows))]
+fn openssh_print_config_errors_when_host_identities_empty() {
+    if skip_if_no_docker("openssh_print_config_errors_when_host_identities_empty") {
+        return;
+    }
+    let env = SshencEnv::new().expect("env");
+    drop(shared_enclave_pubkey(&env).expect("shared key"));
+
+    // Default config has no host_identities. Don't write any.
+    write_default_config(&env, "# empty config\n");
+
+    let out = run(env
+        .sshenc_cmd()
+        .expect("sshenc")
+        .args(["openssh", "print-config"]))
+    .expect("openssh print-config");
+    assert!(
+        !out.succeeded(),
+        "should fail when host_identities is empty; stdout:\n{}\nstderr:\n{}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("host_identities") || out.stderr.contains("no"),
+        "expected error referencing host_identities; got:\n{}",
+        out.stderr
+    );
+}
+
 // ───────────────────────────────────────────────────────────────
 // agent-respawn invariant
 // ───────────────────────────────────────────────────────────────

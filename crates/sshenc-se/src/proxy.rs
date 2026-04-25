@@ -1,26 +1,30 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! `AgentProxyBackend` — a `KeyBackend` implementation used by CLI
-//! binaries on Unix that *never* calls into Secure Enclave or the
-//! keychain directly. Every write-side operation (`generate` /
-//! `sign` / `delete` / `rename`) is forwarded over the
-//! `sshenc-agent` Unix socket, and read-side operations (`list` /
-//! `get` / `is_available`) are served by reading `.pub` / `.meta`
-//! files from disk — **there is no code path inside
-//! `AgentProxyBackend` that reaches `SecItem*` or `SecKey*` or
-//! `enclaveapp_se_*`.** The CLI binary's code signature therefore
-//! never appears on any of those calls, which eliminates the legacy
-//! keychain cross-binary ACL prompt that unsigned macOS builds
-//! would otherwise fire between the CLI (creator) and the agent
-//! (reader).
+//! `AgentProxyBackend` — a cross-platform `KeyBackend` that never
+//! calls into Secure Enclave / Windows CNG / the macOS keychain /
+//! the Linux keyring directly. Every write-side operation
+//! (`generate` / `sign` / `delete` / `rename`) is forwarded over
+//! the `sshenc-agent` IPC endpoint — a Unix socket on macOS and
+//! Linux (including WSLv2), a named pipe on native Windows (Git
+//! Bash, PowerShell, cmd.exe). Read-side operations (`list` /
+//! `get`) are served by reading `.pub` / `.meta` files from disk.
+//! There is **no code path** inside `AgentProxyBackend` that
+//! reaches the platform crypto FFI; the CLI binary's code
+//! signature therefore never appears on a `SecItem*` / `SecKey*`
+//! / `BCryptSignHash` / `keyutils`-family call, so the
+//! cross-binary ACL prompt class the centralization eliminates on
+//! macOS also doesn't exist on the other platforms.
 //!
-//! The agent is auto-spawned lazily: `new()` only stores config, and
-//! each proxied write op calls
+//! The agent is auto-spawned lazily on Unix: `new()` only stores
+//! config, and each proxied write op calls
 //! `sshenc_agent_proto::client::ensure_agent_ready` just before
 //! sending its RPC. Read-only ops don't touch the agent at all, so
 //! `sshenc list` / `inspect` / `export-pub` never force the agent
-//! up for cosmetic queries.
+//! up for cosmetic queries. On Windows `ensure_agent_ready`
+//! probes the named pipe but does **not** spawn the agent —
+//! Windows services / scheduled-task lifecycle choices belong to
+//! `sshenc install`, not to ad-hoc CLI invocations.
 //!
 //! If a `.pub` file is missing on disk (key created by a pre–Wart-1
 //! version of sshenc, or manually deleted), `get` errors out with a
@@ -30,14 +34,12 @@
 
 use crate::backend::KeyBackend;
 use enclaveapp_core::metadata;
+use sshenc_agent_proto::client;
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;
 use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyLabel, KeyMetadata};
 use sshenc_core::pubkey::SshPublicKey;
 use std::path::PathBuf;
-
-#[cfg(unix)]
-use sshenc_agent_proto::client;
 
 /// `KeyBackend` that serves reads from `.pub` / `.meta` files and
 /// forwards every write-side op to `sshenc-agent`. Has no code
@@ -54,8 +56,11 @@ pub struct AgentProxyBackend {
     /// in OpenSSH format may be written. Used purely for
     /// [`KeyInfo::pub_file_path`] population.
     pub_dir: PathBuf,
-    /// Socket the agent listens on for proxied write ops.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// Endpoint the agent listens on. On Unix this is a Unix socket
+    /// path like `~/.sshenc/agent.sock`; on Windows a named-pipe
+    /// path like `\\.\pipe\openssh-ssh-agent`. Either way,
+    /// `sshenc_agent_proto::client::*` takes care of dispatching to
+    /// the right native IPC.
     socket_path: PathBuf,
 }
 
@@ -83,7 +88,6 @@ impl AgentProxyBackend {
         })
     }
 
-    #[cfg(unix)]
     fn ensure_agent(&self) -> Result<()> {
         client::ensure_agent_ready(&self.socket_path).map_err(|e| Error::SecureEnclave {
             operation: "ensure_agent".into(),
@@ -129,67 +133,56 @@ fn map_meta_err(operation: &str, e: enclaveapp_core::Error) -> Error {
 
 impl KeyBackend for AgentProxyBackend {
     fn generate(&self, opts: &KeyGenOptions) -> Result<KeyInfo> {
-        #[cfg(unix)]
-        {
-            self.ensure_agent()?;
-            let public_bytes = client::try_generate_via_socket(
-                &self.socket_path,
-                opts.label.as_str(),
-                opts.comment.as_deref(),
-                opts.access_policy.as_ffi_value() as u32,
-            )
-            .ok_or_else(|| {
-                Self::agent_refused(
-                    "generate",
-                    format!(
-                        "sshenc-agent refused generate for label '{}' \
-                         (check agent logs)",
-                        opts.label.as_str()
-                    ),
-                )
-            })?;
-
-            let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, opts.comment.clone())?;
-            let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
-
-            let pub_file_path = if let Some(ref path) = opts.write_pub_path {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| Error::SecureEnclave {
-                        operation: "generate".into(),
-                        detail: format!("create pub-file parent {}: {e}", parent.display()),
-                    })?;
-                }
-                std::fs::write(path, format!("{}\n", ssh_pubkey.to_openssh_line())).map_err(
-                    |e| Error::SecureEnclave {
-                        operation: "generate".into(),
-                        detail: format!("write {}: {e}", path.display()),
-                    },
-                )?;
-                Some(path.clone())
-            } else {
-                None
-            };
-
-            Ok(KeyInfo {
-                metadata: KeyMetadata::new(
-                    opts.label.clone(),
-                    opts.access_policy,
-                    opts.comment.clone(),
-                ),
-                public_key_bytes: public_bytes,
-                fingerprint_sha256: fp_sha256,
-                fingerprint_md5: fp_md5,
-                pub_file_path,
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = opts;
-            Err(Self::agent_refused(
+        self.ensure_agent()?;
+        let public_bytes = client::try_generate_via_socket(
+            &self.socket_path,
+            opts.label.as_str(),
+            opts.comment.as_deref(),
+            opts.access_policy.as_ffi_value() as u32,
+        )
+        .ok_or_else(|| {
+            Self::agent_refused(
                 "generate",
-                "AgentProxyBackend is Unix-only; use SshencBackend on Windows",
-            ))
-        }
+                format!(
+                    "sshenc-agent refused generate for label '{}' \
+                     (check agent logs)",
+                    opts.label.as_str()
+                ),
+            )
+        })?;
+
+        let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, opts.comment.clone())?;
+        let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
+
+        let pub_file_path = if let Some(ref path) = opts.write_pub_path {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| Error::SecureEnclave {
+                    operation: "generate".into(),
+                    detail: format!("create pub-file parent {}: {e}", parent.display()),
+                })?;
+            }
+            std::fs::write(path, format!("{}\n", ssh_pubkey.to_openssh_line())).map_err(|e| {
+                Error::SecureEnclave {
+                    operation: "generate".into(),
+                    detail: format!("write {}: {e}", path.display()),
+                }
+            })?;
+            Some(path.clone())
+        } else {
+            None
+        };
+
+        Ok(KeyInfo {
+            metadata: KeyMetadata::new(
+                opts.label.clone(),
+                opts.access_policy,
+                opts.comment.clone(),
+            ),
+            public_key_bytes: public_bytes,
+            fingerprint_sha256: fp_sha256,
+            fingerprint_md5: fp_md5,
+            pub_file_path,
+        })
     }
 
     /// Enumerate keys by walking `.meta` files on disk. Never
@@ -242,48 +235,29 @@ impl KeyBackend for AgentProxyBackend {
     }
 
     fn delete(&self, label: &str) -> Result<()> {
-        #[cfg(unix)]
-        {
-            self.ensure_agent()?;
-            client::try_delete_via_socket(&self.socket_path, label).ok_or_else(|| {
-                Self::agent_refused(
-                    "delete",
-                    format!(
-                        "sshenc-agent refused delete for label '{label}' \
-                         (check agent logs)"
-                    ),
-                )
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = label;
-            Err(Self::agent_refused("delete", "Unix-only"))
-        }
+        self.ensure_agent()?;
+        client::try_delete_via_socket(&self.socket_path, label).ok_or_else(|| {
+            Self::agent_refused(
+                "delete",
+                format!(
+                    "sshenc-agent refused delete for label '{label}' \
+                     (check agent logs)"
+                ),
+            )
+        })
     }
 
     fn rename(&self, old_label: &str, new_label: &str) -> Result<()> {
-        #[cfg(unix)]
-        {
-            self.ensure_agent()?;
-            client::try_rename_via_socket(&self.socket_path, old_label, new_label).ok_or_else(
-                || {
-                    Self::agent_refused(
-                        "rename",
-                        format!(
-                            "sshenc-agent refused rename '{old_label}' -> \
-                             '{new_label}' (check agent logs and \
-                             allowed_labels)"
-                        ),
-                    )
-                },
+        self.ensure_agent()?;
+        client::try_rename_via_socket(&self.socket_path, old_label, new_label).ok_or_else(|| {
+            Self::agent_refused(
+                "rename",
+                format!(
+                    "sshenc-agent refused rename '{old_label}' -> '{new_label}' \
+                     (check agent logs and allowed_labels)"
+                ),
             )
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (old_label, new_label);
-            Err(Self::agent_refused("rename", "Unix-only"))
-        }
+        })
     }
 
     /// Signs via the agent and converts the returned SSH-format
@@ -291,27 +265,18 @@ impl KeyBackend for AgentProxyBackend {
     /// to DER so the `KeyBackend::sign` contract (which promises
     /// DER-encoded ECDSA) is honored.
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
-        #[cfg(unix)]
-        {
-            self.ensure_agent()?;
-            let info = self.get(label)?;
-            let pubkey =
-                SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment)?;
-            let wire_blob = pubkey.wire_blob();
-            let ssh_sig = client::try_sign_via_socket(&self.socket_path, &wire_blob, data)
-                .ok_or_else(|| {
-                    Self::agent_refused(
-                        "sign",
-                        "sshenc-agent refused sign request (check agent logs)",
-                    )
-                })?;
-            ssh_sig_to_der(&ssh_sig)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (label, data);
-            Err(Self::agent_refused("sign", "Unix-only"))
-        }
+        self.ensure_agent()?;
+        let info = self.get(label)?;
+        let pubkey = SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment)?;
+        let wire_blob = pubkey.wire_blob();
+        let ssh_sig =
+            client::try_sign_via_socket(&self.socket_path, &wire_blob, data).ok_or_else(|| {
+                Self::agent_refused(
+                    "sign",
+                    "sshenc-agent refused sign request (check agent logs)",
+                )
+            })?;
+        ssh_sig_to_der(&ssh_sig)
     }
 
     /// Always `true`. The CLI trusts the agent; actual hardware
@@ -326,7 +291,6 @@ impl KeyBackend for AgentProxyBackend {
 /// SSH-format sign response and emit a DER-encoded ECDSA signature
 /// so callers that expected `KeyBackend::sign` to return DER still
 /// work.
-#[cfg(unix)]
 fn ssh_sig_to_der(ssh_sig: &[u8]) -> Result<Vec<u8>> {
     let (_algo, rest) = sshenc_core::pubkey::read_ssh_string(ssh_sig)?;
     let (inner, _tail) = sshenc_core::pubkey::read_ssh_string(rest)?;
@@ -344,7 +308,6 @@ fn ssh_sig_to_der(ssh_sig: &[u8]) -> Result<Vec<u8>> {
     Ok(der)
 }
 
-#[cfg(unix)]
 fn write_der_integer(buf: &mut Vec<u8>, bytes: &[u8]) {
     // Strip redundant leading zeros unless needed to disambiguate
     // sign (high bit of first remaining byte set).
@@ -363,7 +326,7 @@ fn write_der_integer(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(trimmed);
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

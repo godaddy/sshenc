@@ -271,17 +271,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load_default()?;
 
-    // Unix CLI always uses `AgentProxyBackend`. Read-only ops
-    // (list, inspect, export-pub) read `.pub` / `.meta` files
-    // directly in the proxy and don't touch the agent; write ops
-    // lazily `ensure_agent_ready` just before their RPC. Either
-    // way, the CLI binary's code signature never appears on a
-    // `SecItem*` or `SecKey*` call.
-    //
-    // On Windows the cross-binary legacy-keychain ACL doesn't
-    // apply (TPM access is brokered by CNG through a system-wide
-    // Service), so we use the direct `SshencBackend` there.
-    #[cfg(unix)]
+    // The CLI always uses `AgentProxyBackend` — on every platform.
+    // Read-only ops (list, inspect, export-pub) read `.pub` /
+    // `.meta` files directly in the proxy and never talk to the
+    // agent; write ops lazily `ensure_agent_ready` just before
+    // their RPC. On Unix the agent is reachable via Unix socket;
+    // on Windows via named pipe (`\\.\pipe\openssh-ssh-agent` by
+    // default). Either way, the CLI binary's code signature never
+    // appears on a `SecItem*` / `SecKey*` / CNG / keyring call —
+    // the agent is the sole toucher of every platform's secret
+    // store.
     let backend: Box<dyn sshenc_se::KeyBackend> = Box::new(
         sshenc_se::AgentProxyBackend::new(
             config.pub_dir.clone(),
@@ -289,11 +288,6 @@ fn main() -> Result<()> {
             config.socket_path.clone(),
         )
         .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
-    );
-    #[cfg(not(unix))]
-    let backend: Box<dyn sshenc_se::KeyBackend> = Box::new(
-        sshenc_se::SshencBackend::new(config.pub_dir.clone(), cli.keyring)
-            .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 
     run_command(cli.command, &*backend)

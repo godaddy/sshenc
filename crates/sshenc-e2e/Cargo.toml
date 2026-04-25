@@ -58,6 +58,10 @@ path = "tests/config_variations.rs"
 name = "install_uninstall"
 path = "tests/install_uninstall.rs"
 
+[[test]]
+name = "y_sign_verify"
+path = "tests/y_sign_verify.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

@@ -34,6 +34,10 @@ path = "tests/gitenc.rs"
 name = "lifecycle"
 path = "tests/lifecycle.rs"
 
+[[test]]
+name = "cli_flag_matrix"
+path = "tests/cli_flag_matrix.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

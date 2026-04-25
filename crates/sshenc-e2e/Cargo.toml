@@ -46,6 +46,10 @@ path = "tests/small_subcommands.rs"
 name = "agent_protocol_edge"
 path = "tests/agent_protocol_edge.rs"
 
+[[test]]
+name = "gitenc_edge"
+path = "tests/gitenc_edge.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

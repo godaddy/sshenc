@@ -114,6 +114,10 @@ path = "tests/cli_concurrency.rs"
 name = "exit_codes"
 path = "tests/exit_codes.rs"
 
+[[test]]
+name = "drop_in_extras"
+path = "tests/drop_in_extras.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

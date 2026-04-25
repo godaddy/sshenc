@@ -9,7 +9,7 @@ use sshenc_core::backup;
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::{AccessPolicy, Config};
-use sshenc_se::KeyBackend;
+use sshenc_se::{AgentProxyBackend, KeyBackend};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -58,18 +58,13 @@ fn main() -> Result<()> {
     let config = Config::load_default()?;
     let pub_dir = config.pub_dir.clone();
 
-    // On Unix the keygen goes through `sshenc-agent` so the CLI's
-    // code signature never appears on the `SecItemAdd` for the new
-    // wrapping-key entry. On Windows we use the direct backend.
-    #[cfg(unix)]
+    // Keygen goes through `sshenc-agent` on every platform — Unix
+    // socket on macOS/Linux/WSL, named pipe on Windows (native,
+    // Git Bash, PowerShell, cmd.exe). The CLI binary never calls
+    // into Secure Enclave / keychain / CNG directly.
     let backend: Box<dyn KeyBackend> = Box::new(
-        sshenc_se::AgentProxyBackend::new(pub_dir.clone(), false, config.socket_path.clone())
+        AgentProxyBackend::new(pub_dir.clone(), false, config.socket_path.clone())
             .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
-    );
-    #[cfg(not(unix))]
-    let backend: Box<dyn KeyBackend> = Box::new(
-        sshenc_se::SshencBackend::new(pub_dir.clone(), false)
-            .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 
     let write_pub = if cli.no_pub_file {

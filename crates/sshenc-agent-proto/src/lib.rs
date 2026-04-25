@@ -11,6 +11,8 @@
 
 pub mod client;
 pub mod message;
+#[cfg(windows)]
+pub mod pipe;
 pub mod signature;
 pub mod wire;
 

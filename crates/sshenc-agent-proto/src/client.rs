@@ -3,66 +3,62 @@
 
 //! Proxy secret-touching operations through a running `sshenc-agent`.
 //!
-//! The agent holds the wrapping-key cache for its configured TTL; by
-//! routing operations through it the CLI reuses that warm cache
-//! instead of cold-starting a fresh `SshencBackend` (and a fresh
-//! Touch ID / passcode prompt) per invocation. This module is the
-//! client half of that proxy — the server side lives in
-//! `sshenc-agent`.
+//! This module is the client half of the "agent is the sole
+//! keychain / Secure-Enclave / TPM toucher" contract that sshenc's
+//! CLI binaries (`sshenc`, `sshenc-keygen`, `gitenc`) hold to on
+//! every platform. The agent holds the wrapping-key cache, owns the
+//! Apple `SecItem*` / Windows CNG / Linux keyring calls, and
+//! services every write-side op over a local IPC endpoint:
 //!
-//! Two operations are proxied today:
+//! - **Unix** (macOS, Linux, WSLv2 running Linux): a Unix domain
+//!   socket (`UnixStream`).
+//! - **Windows** (native, Git Bash, PowerShell, cmd.exe — anything
+//!   running the Windows `sshenc.exe` binary): a named pipe
+//!   ([`PipeStream`](crate::pipe::PipeStream), built on
+//!   `CreateFileW` + `ReadFile` / `WriteFile`).
 //!
-//! - **Sign** (`SSH_AGENTC_SIGN_REQUEST`): used by `sshenc -Y sign`
-//!   so `git commit -S` collapses into one prompt per TTL.
-//! - **DeleteKey** (`SSH_AGENTC_SSHENC_DELETE_KEY`, sshenc-specific
-//!   extension at message type `0xF0`): used by `sshenc delete` so
-//!   destructive key management goes through the same cache. The
-//!   custom type is outside OpenSSH's assigned range, so foreign
-//!   agents cleanly reply with `SSH_AGENT_FAILURE` and the CLI falls
-//!   back to local deletion.
-//!
-//! Every proxy is strictly an optimization:
-//! - If `SSH_AUTH_SOCK` isn't set or points to a missing socket, we
-//!   fall back immediately.
-//! - If the agent doesn't advertise / accept the target, we fall
-//!   back.
-//! - If the RPC fails, we fall back.
-//!
-//! Only the successful path short-circuits local execution.
-//!
-//! Windows is not covered: `sshenc-agent` on Windows uses a named
-//! pipe and `SSH_AUTH_SOCK` is typically not set — the fallback path
-//! handles that case.
+//! Three sshenc-specific extensions (`SSH_AGENTC_SSHENC_DELETE_KEY`
+//! etc.) sit alongside the standard ssh-agent opcodes so the same
+//! endpoint serves OpenSSH authentications and our own key-
+//! management RPCs. Standard ssh-agents reply `SSH_AGENT_FAILURE`
+//! to unknown opcodes, so a foreign agent on the socket won't
+//! confuse us — it just falls through.
 
-#[cfg(unix)]
 use crate::message::{
     self, AgentRequest, AgentResponse, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENTC_SIGN_REQUEST,
     SSH_AGENTC_SSHENC_DELETE_KEY, SSH_AGENTC_SSHENC_GENERATE_KEY, SSH_AGENTC_SSHENC_RENAME_KEY,
 };
-#[cfg(unix)]
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
-#[cfg(unix)]
 use std::path::Path;
-#[cfg(unix)]
 use std::time::Duration;
 
 #[cfg(unix)]
+use std::os::unix::net::UnixStream;
+
+#[cfg(windows)]
+use crate::pipe::PipeStream;
+
 const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Make sure the `sshenc-agent` at `socket_path` is listening,
-/// spawning it if necessary, and return `Ok(())` once the socket
-/// accepts connections.
+/// Platform-native connected stream to a running `sshenc-agent`.
+/// Unix: a `UnixStream`. Windows: a `PipeStream` wrapping a named-
+/// pipe `HANDLE`. Both implement [`Read`] + [`Write`] so the framing
+/// helpers below don't care which OS they're on.
+#[cfg(unix)]
+pub type AgentStream = UnixStream;
+#[cfg(windows)]
+pub type AgentStream = PipeStream;
+
+/// Make sure the `sshenc-agent` at `socket_path` is reachable. On
+/// Unix, spawns the agent if its socket isn't listening (via
+/// `bin_discovery` + `CreateProcess`-style fork/exec); on Windows
+/// we probe the named pipe and error if the agent isn't already
+/// running (auto-spawn on Windows is a Services-lifecycle problem
+/// we don't tackle here — users run `sshenc install` to register
+/// the agent, or `sshenc-agent.exe` manually).
 ///
-/// The Unix CLIs (sshenc, sshenc-keygen, gitenc) hold to the
-/// invariant that **only sshenc-agent ever touches Secure Enclave
-/// and keychain**; this helper is the "make sure the agent is there
-/// to talk to" step every secret-touching op runs before proxying.
-/// Returns an error if the agent binary can't be located in a
-/// trusted install dir, if spawn fails, or if the socket never
-/// becomes ready. Callers must not fall back to local execution on
-/// error — doing so would violate the centralization invariant.
+/// Callers must not fall back to local execution on error — doing
+/// so would violate the centralization invariant.
 #[cfg(unix)]
 pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
     if is_socket_ready(socket_path) {
@@ -106,111 +102,79 @@ pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
     ))
 }
 
+/// Windows readiness check: probe the named pipe. The agent on
+/// Windows is typically a long-lived process started by the
+/// installer (or manually via `sshenc-agent.exe --foreground`);
+/// auto-spawning from the CLI would require choosing between a
+/// Service, a scheduled task, or a detached console window, each
+/// with its own tradeoffs. For now we surface a clear "agent isn't
+/// running" error if the pipe isn't answering and let the user
+/// start the agent with whatever lifecycle they prefer.
+#[cfg(windows)]
+pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
+    if PipeStream::probe(socket_path) {
+        return Ok(());
+    }
+    Err(format!(
+        "sshenc-agent isn't answering on {}; start it with \
+         `sshenc-agent` or ensure the sshenc-agent Service is running",
+        socket_path.display()
+    ))
+}
+
 #[cfg(unix)]
 fn is_socket_ready(socket_path: &Path) -> bool {
     socket_path.exists() && UnixStream::connect(socket_path).is_ok()
 }
 
-/// Try to sign `data` through whatever agent `SSH_AUTH_SOCK` points
-/// to. `pubkey_blob` is the SSH wire-format public key the caller
-/// wants to sign with; the agent identity whose `key_blob` matches
-/// is asked to produce the signature.
-///
-/// Returns `Some(signature_blob)` on success, where `signature_blob`
-/// is the SSH-format signature
-/// (`string(algo) || string(mpint(r) || mpint(s))`) ready to embed
-/// verbatim in an SSHSIG envelope. Returns `None` for every fall-back
-/// reason (no socket, no matching identity, protocol failure).
+// ───── Public entry points ─────
+//
+// Each entry point has two shapes:
+//   - `try_*_via_agent(…)`: looks the socket up from `SSH_AUTH_SOCK`
+//     (or the Windows equivalent env convention); convenient for
+//     legacy callers that already expect env-driven discovery.
+//   - `try_*_via_socket(sock_path, …)`: explicit socket path;
+//     preferred by sshenc's own CLI because it always knows the
+//     configured agent socket and doesn't want `SSH_AUTH_SOCK`
+//     pointing at some other ssh-agent to steer our destructive
+//     ops.
+
 #[must_use]
 pub fn try_sign_via_agent(pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
-    #[cfg(unix)]
-    {
-        let sock_path = std::env::var_os("SSH_AUTH_SOCK")?;
-        if sock_path.is_empty() {
-            return None;
-        }
-        try_sign_via_socket(Path::new(&sock_path), pubkey_blob, data)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (pubkey_blob, data);
-        None
-    }
+    let sock = env_agent_socket()?;
+    try_sign_via_socket(&sock, pubkey_blob, data)
 }
 
-#[cfg(unix)]
 pub fn try_sign_via_socket(sock_path: &Path, pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
     let mut stream = connect_agent(sock_path)?;
-
     if !agent_has_identity(&mut stream, pubkey_blob)? {
         tracing::debug!("agent proxy: no matching identity, falling back");
         return None;
     }
-
     request_signature(&mut stream, pubkey_blob, data)
 }
 
-/// Try to delete the key with the given `label` through
-/// `SSH_AUTH_SOCK`. Returns `Some(())` when the agent confirms the
-/// delete; `None` for every fall-back reason (no socket, agent
-/// doesn't support the extension, label not allowed, backend
-/// reported an error). Falling back to local deletion is the
-/// caller's responsibility.
 #[must_use]
 pub fn try_delete_via_agent(label: &str) -> Option<()> {
-    #[cfg(unix)]
-    {
-        let sock_path = std::env::var_os("SSH_AUTH_SOCK")?;
-        if sock_path.is_empty() {
-            return None;
-        }
-        try_delete_via_socket(Path::new(&sock_path), label)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = label;
-        None
-    }
+    let sock = env_agent_socket()?;
+    try_delete_via_socket(&sock, label)
 }
 
-#[cfg(unix)]
 pub fn try_delete_via_socket(sock_path: &Path, label: &str) -> Option<()> {
     let mut stream = connect_agent(sock_path)?;
     request_delete(&mut stream, label)
 }
 
-/// Try to generate a new key through the agent at `SSH_AUTH_SOCK`.
-/// On success returns `Some(public_key_bytes)` (SEC1 uncompressed,
-/// 65 bytes for P-256). Returns `None` for every fall-back reason
-/// (no socket, agent refuses, bad policy, backend error); the caller
-/// then does a local keygen.
-///
-/// The whole point: when the agent is reachable, the wrapping-key
-/// entry in the login keychain is *created* by the agent binary,
-/// and every later read of that entry is *also* from the agent.
-/// Same creator and reader → no cross-binary ACL prompt.
 #[must_use]
 pub fn try_generate_via_agent(
     label: &str,
     comment: Option<&str>,
     access_policy: u32,
 ) -> Option<Vec<u8>> {
-    #[cfg(unix)]
-    {
-        let sock_path = std::env::var_os("SSH_AUTH_SOCK")?;
-        if sock_path.is_empty() {
-            return None;
-        }
-        try_generate_via_socket(Path::new(&sock_path), label, comment, access_policy)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (label, comment, access_policy);
-        None
-    }
+    let sock = env_agent_socket()?;
+    try_generate_via_socket(&sock, label, comment, access_policy)
 }
 
-#[cfg(unix)]
 pub fn try_generate_via_socket(
     sock_path: &Path,
     label: &str,
@@ -221,35 +185,33 @@ pub fn try_generate_via_socket(
     request_generate(&mut stream, label, comment, access_policy)
 }
 
-/// Try to rename a key through the agent at `SSH_AUTH_SOCK`.
-/// Returns `Some(())` on success, `None` on any failure (no socket,
-/// agent refuses, backend error). Callers treat `None` as a hard
-/// error on Unix — the CLI never renames a key itself.
 #[must_use]
 pub fn try_rename_via_agent(old_label: &str, new_label: &str) -> Option<()> {
-    #[cfg(unix)]
-    {
-        let sock_path = std::env::var_os("SSH_AUTH_SOCK")?;
-        if sock_path.is_empty() {
-            return None;
-        }
-        try_rename_via_socket(Path::new(&sock_path), old_label, new_label)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (old_label, new_label);
-        None
-    }
+    let sock = env_agent_socket()?;
+    try_rename_via_socket(&sock, old_label, new_label)
 }
 
-#[cfg(unix)]
 pub fn try_rename_via_socket(sock_path: &Path, old_label: &str, new_label: &str) -> Option<()> {
     let mut stream = connect_agent(sock_path)?;
     request_rename(&mut stream, old_label, new_label)
 }
 
+/// Best-effort lookup of the agent socket from the environment —
+/// `SSH_AUTH_SOCK` on Unix, or on Windows (cmd.exe, PowerShell, Git
+/// Bash, etc.) the same variable if set. If absent, returns `None`
+/// and the caller falls back to whatever configured path it knows.
+fn env_agent_socket() -> Option<std::path::PathBuf> {
+    let v = std::env::var_os("SSH_AUTH_SOCK")?;
+    if v.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(v))
+}
+
+// ───── Platform-specific connect ─────
+
 #[cfg(unix)]
-fn connect_agent(sock_path: &Path) -> Option<UnixStream> {
+fn connect_agent(sock_path: &Path) -> Option<AgentStream> {
     let stream = match UnixStream::connect(sock_path) {
         Ok(s) => s,
         Err(e) => {
@@ -266,12 +228,28 @@ fn connect_agent(sock_path: &Path) -> Option<UnixStream> {
     Some(stream)
 }
 
-#[cfg(unix)]
-fn agent_has_identity(stream: &mut UnixStream, pubkey_blob: &[u8]) -> Option<bool> {
+#[cfg(windows)]
+fn connect_agent(sock_path: &Path) -> Option<AgentStream> {
+    let mut stream = match PipeStream::connect(sock_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(error = %e, "agent proxy: pipe connect failed, falling back");
+            return None;
+        }
+    };
+    if stream.set_timeouts(AGENT_IO_TIMEOUT).is_err() {
+        tracing::debug!("agent proxy: failed to set pipe timeouts, falling back");
+        return None;
+    }
+    Some(stream)
+}
+
+// ───── Protocol handlers (generic over Read + Write) ─────
+
+fn agent_has_identity<S: Read + Write>(stream: &mut S, pubkey_blob: &[u8]) -> Option<bool> {
     let payload = message::serialize_request(&AgentRequest::RequestIdentities);
     debug_assert_eq!(payload[0], SSH_AGENTC_REQUEST_IDENTITIES);
     send_framed(stream, &payload)?;
-
     match recv_response(stream)? {
         AgentResponse::IdentitiesAnswer(ids) => {
             Some(ids.into_iter().any(|id| id.key_blob == pubkey_blob))
@@ -283,8 +261,11 @@ fn agent_has_identity(stream: &mut UnixStream, pubkey_blob: &[u8]) -> Option<boo
     }
 }
 
-#[cfg(unix)]
-fn request_signature(stream: &mut UnixStream, pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+fn request_signature<S: Read + Write>(
+    stream: &mut S,
+    pubkey_blob: &[u8],
+    data: &[u8],
+) -> Option<Vec<u8>> {
     let payload = message::serialize_request(&AgentRequest::SignRequest {
         key_blob: pubkey_blob.to_vec(),
         data: data.to_vec(),
@@ -292,7 +273,6 @@ fn request_signature(stream: &mut UnixStream, pubkey_blob: &[u8], data: &[u8]) -
     });
     debug_assert_eq!(payload[0], SSH_AGENTC_SIGN_REQUEST);
     send_framed(stream, &payload)?;
-
     match recv_response(stream)? {
         AgentResponse::SignResponse { signature_blob } if !signature_blob.is_empty() => {
             Some(signature_blob)
@@ -312,9 +292,8 @@ fn request_signature(stream: &mut UnixStream, pubkey_blob: &[u8], data: &[u8]) -
     }
 }
 
-#[cfg(unix)]
-fn request_generate(
-    stream: &mut UnixStream,
+fn request_generate<S: Read + Write>(
+    stream: &mut S,
     label: &str,
     comment: Option<&str>,
     access_policy: u32,
@@ -326,7 +305,6 @@ fn request_generate(
     });
     debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_GENERATE_KEY);
     send_framed(stream, &payload)?;
-
     match recv_response(stream)? {
         AgentResponse::GenerateResponse { public_key } if !public_key.is_empty() => {
             Some(public_key)
@@ -349,15 +327,13 @@ fn request_generate(
     }
 }
 
-#[cfg(unix)]
-fn request_rename(stream: &mut UnixStream, old_label: &str, new_label: &str) -> Option<()> {
+fn request_rename<S: Read + Write>(stream: &mut S, old_label: &str, new_label: &str) -> Option<()> {
     let payload = message::serialize_request(&AgentRequest::RenameKey {
         old_label: old_label.as_bytes().to_vec(),
         new_label: new_label.as_bytes().to_vec(),
     });
     debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_RENAME_KEY);
     send_framed(stream, &payload)?;
-
     match recv_response(stream)? {
         AgentResponse::Success => Some(()),
         AgentResponse::Failure => {
@@ -371,14 +347,12 @@ fn request_rename(stream: &mut UnixStream, old_label: &str, new_label: &str) -> 
     }
 }
 
-#[cfg(unix)]
-fn request_delete(stream: &mut UnixStream, label: &str) -> Option<()> {
+fn request_delete<S: Read + Write>(stream: &mut S, label: &str) -> Option<()> {
     let payload = message::serialize_request(&AgentRequest::DeleteKey {
         label: label.as_bytes().to_vec(),
     });
     debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_DELETE_KEY);
     send_framed(stream, &payload)?;
-
     match recv_response(stream)? {
         AgentResponse::Success => Some(()),
         AgentResponse::Failure => {
@@ -392,8 +366,7 @@ fn request_delete(stream: &mut UnixStream, label: &str) -> Option<()> {
     }
 }
 
-#[cfg(unix)]
-fn send_framed(stream: &mut UnixStream, payload: &[u8]) -> Option<()> {
+fn send_framed<S: Write>(stream: &mut S, payload: &[u8]) -> Option<()> {
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
@@ -404,8 +377,7 @@ fn send_framed(stream: &mut UnixStream, payload: &[u8]) -> Option<()> {
     Some(())
 }
 
-#[cfg(unix)]
-fn recv_response(stream: &mut UnixStream) -> Option<AgentResponse> {
+fn recv_response<S: Read>(stream: &mut S) -> Option<AgentResponse> {
     let payload = read_frame(stream)?;
     match message::parse_response(&payload) {
         Ok(resp) => Some(resp),
@@ -416,8 +388,7 @@ fn recv_response(stream: &mut UnixStream) -> Option<AgentResponse> {
     }
 }
 
-#[cfg(unix)]
-fn read_frame(stream: &mut UnixStream) -> Option<Vec<u8>> {
+fn read_frame<S: Read>(stream: &mut S) -> Option<Vec<u8>> {
     let mut len_buf = [0_u8; 4];
     if let Err(e) = stream.read_exact(&mut len_buf) {
         tracing::debug!(error = %e, "agent proxy: read length failed");

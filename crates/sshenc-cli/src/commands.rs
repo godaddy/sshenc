@@ -1261,18 +1261,12 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     }
 
     let ssh_dir = config.pub_dir.clone();
-    // Route the identity-file lookup through `AgentProxyBackend` on
-    // Unix so label-to-pubkey resolution is done via the agent's
-    // disk reads (no keychain fallback) rather than the CLI's.
-    #[cfg(unix)]
+    // Identity-file lookup via `AgentProxyBackend` on every
+    // platform — label-to-pubkey resolution is a `.pub`-file disk
+    // read, never a keychain fallback.
     let backend: Box<dyn KeyBackend> = Box::new(
         sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), false, config.socket_path.clone())
             .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?,
-    );
-    #[cfg(not(unix))]
-    let backend: Box<dyn KeyBackend> = Box::new(
-        SshencBackend::new(ssh_dir.clone(), false)
-            .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?,
     );
     let invocation =
         build_ssh_wrapper_invocation(&*backend, &config.socket_path, label, ssh_args, &ssh_dir)?;
@@ -1769,17 +1763,16 @@ fn ssh_sign_with_backend(
 
 /// Handle ssh-keygen-compatible signing mode.
 ///
-/// Git calls: sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>
+/// Git calls: `sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>`.
 ///
-/// On Unix the signature is always produced by `sshenc-agent`; the
-/// CLI never decrypts the wrapping key or calls
-/// `SecKeyCreateSignature` itself. If the agent isn't running we
-/// start it at `Config::socket_path`. If the agent refuses the
-/// request, we error out — no local fallback, because that would
-/// reintroduce the cross-binary ACL prompt class that centralizing
-/// through the agent is supposed to eliminate. On Windows the CLI
-/// still uses the local TPM-backed backend (named-pipe proxy is
-/// not wired up yet and the Windows ACL model differs).
+/// Signing is always produced by `sshenc-agent` — on Unix via the
+/// configured Unix socket, on Windows via the named pipe. The CLI
+/// process never decrypts the wrapping key or calls into
+/// `SecKeyCreateSignature` / CNG / keyring itself. If the agent
+/// isn't reachable we error out; there's no local fallback,
+/// because that would reintroduce the cross-binary
+/// code-signature prompts centralizing through the agent is
+/// supposed to eliminate.
 pub fn ssh_sign(args: &[String]) -> Result<()> {
     let sign_args = parse_ssh_sign_args(args)?;
     let file_data = std::fs::read(&sign_args.data_file)?;
@@ -1787,38 +1780,23 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let requested_pub = read_pubkey_from_openssh_file(&sign_args.key_file)?;
     let pubkey_blob = requested_pub.wire_blob();
 
-    #[cfg(unix)]
-    {
-        let config = Config::load_default()?;
-        sshenc_agent_proto::client::ensure_agent_ready(&config.socket_path)
-            .map_err(|e| anyhow!("sshenc-agent not reachable: {e}"))?;
-        let ssh_sig = sshenc_agent_proto::client::try_sign_via_socket(
-            &config.socket_path,
-            &pubkey_blob,
-            &signed_data,
+    let config = Config::load_default()?;
+    sshenc_agent_proto::client::ensure_agent_ready(&config.socket_path)
+        .map_err(|e| anyhow!("sshenc-agent not reachable: {e}"))?;
+    let ssh_sig = sshenc_agent_proto::client::try_sign_via_socket(
+        &config.socket_path,
+        &pubkey_blob,
+        &signed_data,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "sshenc-agent refused sign request (no matching identity, \
+             allowed_labels filter, or backend error); check agent logs"
         )
-        .ok_or_else(|| {
-            anyhow!(
-                "sshenc-agent refused sign request (no matching identity, \
-                 allowed_labels filter, or backend error); check agent logs"
-            )
-        })?;
-        tracing::debug!("ssh_sign: signed via agent proxy");
-        let sig_blob =
-            build_ssh_signature_from_ssh_sig(&requested_pub, &sign_args.namespace, &ssh_sig);
-        write_sshsig_pem_file(&sig_blob, &sign_args.data_file)
-    }
-
-    #[cfg(not(unix))]
-    {
-        drop(pubkey_blob);
-        drop(signed_data);
-        let config = Config::load_default()?;
-        let ssh_dir = config.pub_dir;
-        let backend = SshencBackend::new(ssh_dir, false)
-            .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
-        ssh_sign_with_backend(&backend, args, config.prompt_policy)
-    }
+    })?;
+    tracing::debug!("ssh_sign: signed via agent proxy");
+    let sig_blob = build_ssh_signature_from_ssh_sig(&requested_pub, &sign_args.namespace, &ssh_sig);
+    write_sshsig_pem_file(&sig_blob, &sign_args.data_file)
 }
 
 fn read_pubkey_from_openssh_file(path: &Path) -> Result<SshPublicKey> {

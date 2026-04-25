@@ -231,14 +231,19 @@ enum ConfigAction {
 #[derive(Subcommand)]
 enum OpensshAction {
     /// Print an SSH config snippet for a key.
+    ///
+    /// With both `--label` and `--host`, prints a snippet for that pair.
+    /// With neither, iterates `host_identities` from the config file
+    /// and prints one snippet per entry.
     PrintConfig {
-        /// Key label.
+        /// Key label. Required if `--host` is given; otherwise the
+        /// command iterates `host_identities` from the config file.
         #[arg(long, short = 'l')]
-        label: String,
+        label: Option<String>,
 
         /// Target hostname.
         #[arg(long)]
-        host: String,
+        host: Option<String>,
 
         /// Use PKCS#11 mode instead of agent mode.
         #[arg(long)]
@@ -397,7 +402,7 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 label,
                 host,
                 pkcs11,
-            } => commands::openssh_print_config(backend, &label, &host, pkcs11),
+            } => commands::openssh_print_config_dispatch(backend, label, host, pkcs11),
         },
         Commands::Install => commands::install(),
         Commands::Uninstall => commands::uninstall(),

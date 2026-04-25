@@ -62,6 +62,10 @@ path = "tests/install_uninstall.rs"
 name = "y_sign_verify"
 path = "tests/y_sign_verify.rs"
 
+[[test]]
+name = "agent_concurrency"
+path = "tests/agent_concurrency.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

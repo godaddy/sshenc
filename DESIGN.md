@@ -12,9 +12,9 @@ Rust workspace with 10 crates under `crates/`:
 
 | Crate | Purpose |
 |---|---|
-| `sshenc-core` | Domain models, SSH public key encoding, fingerprints, config, trusted binary discovery, transactional backup/rollback |
-| `sshenc-se` | Hardware key backend via `KeyBackend` trait (macOS, Windows, Linux) |
-| `sshenc-agent-proto` | SSH agent protocol: message parsing, DER-to-SSH signature conversion |
+| `sshenc-core` | Domain models, SSH public key encoding, fingerprints, config, transactional backup/rollback |
+| `sshenc-se` | `KeyBackend` trait and two impls: `SshencBackend` (the agent's direct backend) and `AgentProxyBackend` (the CLI's agent-routing backend) |
+| `sshenc-agent-proto` | SSH agent protocol + sshenc extensions, plus the client helpers that CLIs use to reach the agent (Unix socket and Windows named pipe) |
 | `sshenc-agent` | Async SSH agent daemon (tokio), Unix socket / named pipe server |
 | `sshenc-cli` | Main CLI (`sshenc`): keygen, list, inspect, delete, export-pub, agent, config, openssh, install, uninstall, identity, default, ssh, completions |
 | `sshenc-keygen-cli` | Standalone `sshenc-keygen` binary |
@@ -92,8 +92,9 @@ signed with the hardware-bound key.
 - Keys are ECDSA P-256 (the only curve with hardware support on all platforms)
 - Keys are device-bound and non-exportable
 - Optional per-key Touch ID / Windows Hello / password for each signing operation
-- Agent socket restricted to owner-only permissions (0600)
-- No Keychain entitlements required on macOS (CryptoKit, not Security.framework)
+- Agent socket restricted to owner-only permissions (0600 on Unix; per-user DACL on Windows named pipe)
+- **`sshenc-agent` is the sole process that calls into the platform crypto FFI.** The CLI binaries (`sshenc`, `sshenc-keygen`, `gitenc`) construct `AgentProxyBackend`, which reads `.pub` / `.meta` from disk directly for read-side ops and forwards every write-side op (`generate`, `sign`, `delete`, `rename`) to the agent over its local IPC endpoint (Unix socket on macOS/Linux/WSLv2, Windows named pipe for PowerShell / cmd.exe / Git Bash). This keeps the CLI binary's code signature off every `SecItem*` / `SecKey*` / CNG / keyring call, which on unsigned macOS builds eliminates the legacy-keychain cross-binary approval prompt.
+- No Keychain entitlements required on macOS (CryptoKit for SE keys, Security.framework `SecItem*` for wrapping keys — both accept unsigned callers via the legacy keychain path).
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
 

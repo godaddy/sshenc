@@ -61,7 +61,20 @@ fn round_trip_raw(socket: &Path, payload: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    stream.write_all(payload)?;
+    // The agent may reject the frame on its length check and close
+    // the connection mid-write. macOS lets the write succeed and
+    // surfaces the closure on read; Linux returns ECONNRESET /
+    // EPIPE on the write itself. Both mean the same thing for
+    // these negative tests: "agent rejected, hung up". Treat
+    // either as "no reply received" rather than failing the test.
+    if let Err(e) = stream.write_all(payload) {
+        match e.kind() {
+            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
+                return Ok(Vec::new());
+            }
+            _ => return Err(e),
+        }
+    }
     let mut buf = Vec::new();
     // Read until EOF or timeout. Any agent reply will be small.
     let mut tmp = [0_u8; 4096];
@@ -71,6 +84,7 @@ fn round_trip_raw(socket: &Path, payload: &[u8]) -> std::io::Result<Vec<u8>> {
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
             Err(e) => return Err(e),
         }
         if buf.len() > 1024 * 1024 {

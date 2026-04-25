@@ -42,6 +42,10 @@ path = "tests/cli_flag_matrix.rs"
 name = "small_subcommands"
 path = "tests/small_subcommands.rs"
 
+[[test]]
+name = "agent_protocol_edge"
+path = "tests/agent_protocol_edge.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

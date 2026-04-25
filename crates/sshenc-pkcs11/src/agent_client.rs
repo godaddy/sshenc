@@ -108,13 +108,13 @@ pub fn ensure_agent_running() -> Result<(), String> {
 
 #[cfg(unix)]
 fn find_agent_binary() -> Result<PathBuf, String> {
-    sshenc_core::bin_discovery::find_trusted_binary("sshenc-agent")
+    enclaveapp_core::bin_discovery::find_trusted_binary("sshenc-agent", "sshenc")
         .ok_or_else(|| "sshenc-agent not found in trusted install locations".into())
 }
 
 #[cfg(windows)]
 fn find_agent_binary() -> Result<PathBuf, String> {
-    sshenc_core::bin_discovery::find_trusted_binary("sshenc-agent.exe")
+    enclaveapp_core::bin_discovery::find_trusted_binary("sshenc-agent.exe", "sshenc")
         .ok_or_else(|| "sshenc-agent.exe not found in trusted install locations".into())
 }
 

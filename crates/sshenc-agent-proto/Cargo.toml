@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 sshenc-core = { workspace = true }
+enclaveapp-core = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }

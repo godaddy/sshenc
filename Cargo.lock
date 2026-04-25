@@ -1400,6 +1400,7 @@ version = "0.0.0-dev"
 dependencies = [
  "byteorder",
  "bytes",
+ "enclaveapp-core",
  "sshenc-core",
  "thiserror",
  "tracing",
@@ -1491,6 +1492,7 @@ name = "sshenc-pkcs11"
 version = "0.0.0-dev"
 dependencies = [
  "dirs",
+ "enclaveapp-core",
  "sshenc-core",
 ]
 

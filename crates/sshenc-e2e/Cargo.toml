@@ -110,6 +110,10 @@ path = "tests/json_output_stability.rs"
 name = "cli_concurrency"
 path = "tests/cli_concurrency.rs"
 
+[[test]]
+name = "exit_codes"
+path = "tests/exit_codes.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

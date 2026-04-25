@@ -1,0 +1,67 @@
+name: e2e
+
+# Runs the sshenc-e2e integration tests, which are #[ignore]-gated
+# and therefore not exercised by `cargo test --workspace` in
+# `ci.yml`. Without this workflow the e2e suite would be
+# compile-checked only and never actually executed.
+#
+# The job runs in software mode (`SSHENC_E2E_SOFTWARE=1`) on
+# ubuntu-latest. Tests that require Docker auto-skip when the
+# daemon isn't reachable; tests gated on native hardware skip
+# automatically because Linux has no hardware backend.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Same sibling-checkout dance as the reusable CI workflow:
+      # sshenc's workspace declares enclaveapp-* deps via
+      # ../crates/, so we clone libenclaveapp and stage its
+      # crates + workspace Cargo.toml alongside ours.
+      - name: Clone libenclaveapp
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/godaddy/libenclaveapp.git ../libenclaveapp
+          cp -r ../libenclaveapp/crates ../crates
+          cp ../libenclaveapp/Cargo.toml ../Cargo.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config libtss2-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-e2e-
+            ${{ runner.os }}-cargo-
+
+      - name: Build workspace tests
+        run: cargo build --workspace --tests
+
+      - name: Run e2e suite (software mode, single-threaded)
+        env:
+          SSHENC_E2E_SOFTWARE: "1"
+        # --test-threads=1 because the e2e tests share a per-host
+        # persistent keys dir and a fixed agent socket path; running
+        # in parallel would interleave their state.
+        run: cargo test -p sshenc-e2e -- --ignored --test-threads=1

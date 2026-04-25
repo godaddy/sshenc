@@ -62,13 +62,12 @@ impl PipeStream {
         let pcwstr = PCWSTR::from_raw(wide.as_ptr());
 
         // Wait up to 10 s for a pipe instance. If the pipe doesn't
-        // exist at all the call returns fast with an error — that's
-        // the signal the agent isn't running. We drop the result
-        // because a timeout or not-found here is actionable only
-        // via the `CreateFileW` below.
-        unsafe {
-            drop(WaitNamedPipeW(pcwstr, 10_000));
-        }
+        // exist at all the call returns fast with a falsy BOOL —
+        // actionable only via the `CreateFileW` below, which gives
+        // us a richer error. `WaitNamedPipeW` returns a plain BOOL
+        // (Copy) so `let _ = …` is a true no-op, not a destructor
+        // silence.
+        let _ignored_wait_result = unsafe { WaitNamedPipeW(pcwstr, 10_000) };
 
         let handle = unsafe {
             CreateFileW(

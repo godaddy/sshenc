@@ -102,6 +102,10 @@ path = "tests/export_pub_format.rs"
 name = "sign_edge_data"
 path = "tests/sign_edge_data.rs"
 
+[[test]]
+name = "json_output_stability"
+path = "tests/json_output_stability.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

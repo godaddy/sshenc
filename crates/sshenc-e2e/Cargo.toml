@@ -98,6 +98,10 @@ path = "tests/agent_extensions.rs"
 name = "export_pub_format"
 path = "tests/export_pub_format.rs"
 
+[[test]]
+name = "sign_edge_data"
+path = "tests/sign_edge_data.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

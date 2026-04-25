@@ -38,6 +38,10 @@ path = "tests/lifecycle.rs"
 name = "cli_flag_matrix"
 path = "tests/cli_flag_matrix.rs"
 
+[[test]]
+name = "small_subcommands"
+path = "tests/small_subcommands.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

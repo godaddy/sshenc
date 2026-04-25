@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::{AccessPolicy, Config, PromptPolicy};
-use sshenc_se::{sshenc_keys_dir, KeyBackend, SshencBackend};
+#[cfg(not(unix))]
+use sshenc_se::SshencBackend;
+use sshenc_se::{sshenc_keys_dir, KeyBackend};
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -1259,10 +1261,21 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     }
 
     let ssh_dir = config.pub_dir.clone();
-    let backend = SshencBackend::new(ssh_dir.clone(), false)
-        .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?;
+    // Route the identity-file lookup through `AgentProxyBackend` on
+    // Unix so label-to-pubkey resolution is done via the agent's
+    // disk reads (no keychain fallback) rather than the CLI's.
+    #[cfg(unix)]
+    let backend: Box<dyn KeyBackend> = Box::new(
+        sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), false, config.socket_path.clone())
+            .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?,
+    );
+    #[cfg(not(unix))]
+    let backend: Box<dyn KeyBackend> = Box::new(
+        SshencBackend::new(ssh_dir.clone(), false)
+            .map_err(|e| anyhow!("failed to initialize sshenc backend: {e}"))?,
+    );
     let invocation =
-        build_ssh_wrapper_invocation(&backend, &config.socket_path, label, ssh_args, &ssh_dir)?;
+        build_ssh_wrapper_invocation(&*backend, &config.socket_path, label, ssh_args, &ssh_dir)?;
 
     let status = std::process::Command::new(&invocation.ssh_bin)
         .args(&invocation.args)

@@ -271,29 +271,25 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load_default()?;
 
-    // Read-only commands that never write to the keychain can run
-    // without the agent (they read `.pub` cache files directly).
-    // Everything else must route through `sshenc-agent` so the CLI
-    // binary's code signature never appears on a `SecItemAdd` or
-    // `SecKeyCreateRandomKey` call — that's what makes one Always-
-    // Allow approval (for the agent binary) cover every sshenc
-    // operation on an unsigned macOS install.
+    // Unix CLI always uses `AgentProxyBackend`. Read-only ops
+    // (list, inspect, export-pub) read `.pub` / `.meta` files
+    // directly in the proxy and don't touch the agent; write ops
+    // lazily `ensure_agent_ready` just before their RPC. Either
+    // way, the CLI binary's code signature never appears on a
+    // `SecItem*` or `SecKey*` call.
+    //
+    // On Windows the cross-binary legacy-keychain ACL doesn't
+    // apply (TPM access is brokered by CNG through a system-wide
+    // Service), so we use the direct `SshencBackend` there.
     #[cfg(unix)]
-    let backend: Box<dyn sshenc_se::KeyBackend> = if command_needs_agent(&cli.command) {
-        Box::new(
-            sshenc_se::AgentProxyBackend::new(
-                config.pub_dir.clone(),
-                cli.keyring,
-                config.socket_path.clone(),
-            )
-            .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
+    let backend: Box<dyn sshenc_se::KeyBackend> = Box::new(
+        sshenc_se::AgentProxyBackend::new(
+            config.pub_dir.clone(),
+            cli.keyring,
+            config.socket_path.clone(),
         )
-    } else {
-        Box::new(
-            sshenc_se::SshencBackend::new(config.pub_dir.clone(), cli.keyring)
-                .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
-        )
-    };
+        .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
+    );
     #[cfg(not(unix))]
     let backend: Box<dyn sshenc_se::KeyBackend> = Box::new(
         sshenc_se::SshencBackend::new(config.pub_dir.clone(), cli.keyring)
@@ -301,21 +297,6 @@ fn main() -> Result<()> {
     );
 
     run_command(cli.command, &*backend)
-}
-
-/// Return `true` for subcommands that perform a write-side
-/// Secure-Enclave / keychain operation (`SecItemAdd`,
-/// `SecKeyCreateSignature`, `SecKeyDelete`, relabel). These
-/// commands must be routed through the agent on Unix. Read-only
-/// commands (`list`, `inspect`, `export-pub`, help, completions)
-/// stay on the direct backend so we don't spawn an agent for
-/// purely cosmetic queries.
-#[cfg(unix)]
-fn command_needs_agent(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::Keygen { .. } | Commands::Delete { .. } | Commands::Default { .. }
-    )
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]

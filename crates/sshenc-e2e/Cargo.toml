@@ -86,6 +86,10 @@ path = "tests/native_hardware.rs"
 name = "cache_ttl"
 path = "tests/cache_ttl.rs"
 
+[[test]]
+name = "completion_scripts"
+path = "tests/completion_scripts.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

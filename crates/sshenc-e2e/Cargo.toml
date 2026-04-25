@@ -74,6 +74,10 @@ path = "tests/signal_handling.rs"
 name = "corrupted_state"
 path = "tests/corrupted_state.rs"
 
+[[test]]
+name = "agent_protocol_edge_windows"
+path = "tests/agent_protocol_edge_windows.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

@@ -19,10 +19,17 @@
 ## High-level flow
 
 ```
-sshenc-cli / gitenc / sshenc-agent
+sshenc-cli / sshenc-keygen-cli / gitenc
+            |
+            |  (AgentProxyBackend — disk reads + RPC)
+            |
+            |  Unix socket (macOS/Linux)  or
+            |  Windows named pipe
+            v
+        sshenc-agent
             |
             v
-        sshenc-se
+        sshenc-se (SshencBackend)
             |
             v
   enclaveapp-app-storage + enclaveapp-core
@@ -33,7 +40,14 @@ sshenc-cli / gitenc / sshenc-agent
 macOS SE         Windows TPM   Linux TPM / software fallback
 ```
 
-`sshenc-se` is the key boundary. It uses `enclaveapp-app-storage` for platform detection and backend initialization, then layers SSH-specific behavior on top:
+**`sshenc-agent` is the only process that ever calls into the platform crypto store.** The CLI binaries (`sshenc`, `sshenc-keygen`, `gitenc`) go through `sshenc-se::AgentProxyBackend`, which:
+
+- serves read-only ops (`list`, `get`, `is_available`) by reading `<label>.pub` / `<label>.meta` files directly from disk — no keychain / TPM / keyring touch;
+- forwards every write-side op (`generate`, `sign`, `delete`, `rename`) over the agent's local IPC endpoint (Unix socket on macOS/Linux, named pipe on Windows).
+
+This keeps the CLI binary's code signature off every `SecItemAdd` / `SecKeyCreateSignature` / CNG / keyring call — which on unsigned macOS builds prevents the legacy keychain's cross-binary ACL prompt from firing between creator (CLI) and reader (agent).
+
+`sshenc-se` is the backend boundary *inside* the agent process. It uses `enclaveapp-app-storage` for platform detection and backend initialization, then layers SSH-specific behavior on top:
 
 - public key file placement
 - metadata with comments and git identity
@@ -124,20 +138,28 @@ All application-side files live in `~/.sshenc/keys/` (Unix) or `%APPDATA%\sshenc
 
 Private keys never appear as application-accessible files. On macOS and Windows, the private key stays in the Secure Enclave or TPM respectively. On Linux, the software backend stores an encrypted private key in the handle file, but this is managed entirely by the `enclaveapp-software` crate.
 
-## Data flow: key generation
+## Data flow: key generation (`sshenc keygen`)
 
 ```
 CLI validates label (KeyLabel::new)
-  → KeyBackend::generate()
-    → SshencBackend checks for duplicates
+  → AgentProxyBackend::generate()
+    → ensure_agent_ready() — spawns sshenc-agent on Unix if not
+      already listening at config.socket_path; probes the named
+      pipe on Windows
+    → try_generate_via_socket() sends SSH_AGENTC_SSHENC_GENERATE_KEY
+      framed over the IPC endpoint
+  → AGENT PROCESS receives the RPC
+    → SshencBackend::generate() runs here
       → EnclaveKeyManager::generate() via AppSigningBackend
-        → platform backend creates key (SE / TPM / software)
-        → returns SEC1 public key bytes
-      → sshenc-se saves app_specific metadata (.meta file)
-      → optional: writes OpenSSH .pub file to pub_dir
-    → returns KeyInfo with fingerprints
-  → CLI prints fingerprint and key info
+      → platform backend creates key (SE / TPM / software)
+      → sshenc-se saves `.meta` / `.pub` / `.handle` to keys_dir
+    → responds with SSH_AGENT_SSHENC_GENERATE_RESPONSE carrying
+      SEC1 public-key bytes
+  → CLI reconstructs KeyInfo client-side (fingerprints, the
+    optional `~/.ssh/<label>.pub` write), prints output
 ```
+
+The CLI process never touches the platform crypto store. `backend.get` / `backend.list` on the CLI side read `.pub` / `.meta` from disk directly — no `load_handle` fallback, so a missing `.pub` surfaces as `KeyNotFound` rather than triggering a keychain read.
 
 ## Data flow: signing (agent)
 
@@ -145,12 +167,12 @@ CLI validates label (KeyLabel::new)
 SSH client connects to agent socket (Unix) or named pipe (Windows)
   → agent reads framed message (u32 length + payload)
     → sshenc-agent-proto parses SSH agent protocol message
-    → RequestIdentities: lists keys via KeyBackend::list(),
+    → RequestIdentities: lists keys via SshencBackend::list(),
         filters by allowed_labels, returns wire-format blobs
     → SignRequest: matches key_blob against stored keys
         → checks allowed_labels filter
         → evaluates PromptPolicy vs key's AccessPolicy
-        → calls KeyBackend::sign(label, data)
+        → calls SshencBackend::sign(label, data)
           → platform backend signs:
               macOS SE: triggers Touch ID/password if access_policy requires it
               Windows TPM: triggers Windows Hello
@@ -160,20 +182,25 @@ SSH client connects to agent socket (Unix) or named pipe (Windows)
         → returns framed SignResponse
 ```
 
-## Data flow: git commit signing
+## Data flow: git commit signing (`sshenc -Y sign`)
 
 ```
 git calls: sshenc -Y sign -n git -f <pubkey_path> <data_file>
   → CLI intercepts -Y sign before clap parsing
-    → loads SshencBackend
-    → resolves signing label by matching <pubkey_path> content to stored keys
-    → evaluates PromptPolicy (on non-macOS, may prompt on stderr)
-    → hashes file data with SHA-256
-    → constructs SSHSIG signed-data blob (magic + namespace + hash)
-    → calls KeyBackend::sign(label, signed_data)
-    → builds SSH signature envelope (SSHSIG v1 + pubkey + namespace + sig)
-    → writes PEM-armored signature to <data_file>.sig
+    → reads <pubkey_path> to get the target pubkey wire blob
+    → builds SSHSIG pre-sign bytes (magic + namespace + sha256(file))
+    → ensure_agent_ready() — starts sshenc-agent if needed
+    → try_sign_via_socket() sends standard
+      SSH_AGENTC_SIGN_REQUEST to the agent over the configured
+      socket (NOT `SSH_AUTH_SOCK` — sshenc's CLI always talks to
+      its own agent)
+  → AGENT PROCESS signs via SshencBackend and returns the
+    ssh-format signature (string(algo) || string(r || s))
+  → CLI builds the SSHSIG v1 envelope and writes the
+    PEM-armored signature to <data_file>.sig
 ```
+
+Same agent, same IPC endpoint as SSH authentication — `sshenc-agent` is a drop-in `ssh-agent` with sshenc-specific extensions layered on top (opcodes `0xF0`/`0xF1`/`0xF2`/`0xF3` for DeleteKey / GenerateKey / GenerateResponse / RenameKey).
 
 `gitenc --config <label>` sets up the repo with `gpg.format=ssh`, `gpg.ssh.program=sshenc`, `user.signingkey=<pub_path>`, and `commit.gpgsign=true`. It also reads `git_name`/`git_email` from the key's metadata to set `user.name`/`user.email`.
 
@@ -196,7 +223,9 @@ The agent's `PromptPolicy` config (`always`/`never`/`keydefault`) controls wheth
 ## Security boundaries
 
 - **Private key isolation.** On macOS, private keys live in the Secure Enclave and are never exportable. On Windows, private keys are held in the TPM 2.0. On Linux, the software backend stores keys encrypted on disk in `~/.sshenc/keys/` — these ARE extractable and not hardware-protected.
-- **Agent socket permissions.** Unix sockets are created with mode `0600`, restricting access to the owning user. On Windows, a per-user named pipe is used, with an additional AF_UNIX socket for Git Bash/MINGW compatibility.
-- **Trusted binary discovery.** `bin_discovery.rs` searches only a fixed set of trusted directories (current exe sibling, `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` on Unix; `%LOCALAPPDATA%\sshenc\bin`, `%ProgramFiles%\sshenc` on Windows). It never searches `$PATH`, preventing binary planting attacks.
+- **Sole crypto-store toucher.** `sshenc-agent` is the only process that calls into the platform crypto FFI (`SecItem*` / `SecKey*` on macOS, CNG on Windows, `keyutils`-family on Linux). The CLI binaries construct `AgentProxyBackend`, which performs `KeyBackend`-trait reads by reading disk files directly and forwards every write through the agent. On unsigned macOS builds this prevents the legacy keychain's cross-binary ACL prompt from firing between the CLI (as creator) and the agent (as reader); on signed builds it keeps the Always-Allow surface reduced to a single binary.
+- **Agent socket permissions.** Unix sockets are created with mode `0600`, restricting access to the owning user. On Windows, a per-user named pipe is used; its DACL grants access only to the creating user and SYSTEM.
+- **Trusted binary discovery.** `enclaveapp_core::bin_discovery` searches a fixed set of install directories (current exe sibling, `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` on Unix; `%LOCALAPPDATA%\sshenc\bin`, `%ProgramFiles%\sshenc` etc. on Windows, parameterized by `app_name`). It never consults `$PATH`, preventing binary-planting attacks. Every consumer of the enclaveapp helpers (sshenc today; awsenc etc. next) shares the same search logic.
 - **Atomic file writes.** SSH config modifications and config saves use `atomic_write` (write to temp file, then rename) to prevent partial writes from corrupting state.
 - **Key material backup.** `backup.rs` provides transactional backup/rollback for key file overwrites. Existing `.pub` and private key files are renamed to `.bak` before overwrite and restored on failure. Backup files are cleaned up on success to avoid stale key material persisting on disk.
+- **Human-time crypto-op detection.** `enclaveapp-apple`'s Swift bridge wraps every Apple FFI call with a shippable warning that logs to stderr when an op exceeds 1000 ms (the threshold below which a macOS prompt sheet almost never completes). If a cross-binary or userPresence prompt ever slips back in, the warning line names the exact `SecItem*` / `SecKey*` call and the elapsed milliseconds, so regressions self-identify in CI and field use. Opt into per-call detail with `ENCLAVEAPP_KEYCHAIN_TRACE=1`; override the threshold with `ENCLAVEAPP_SLOW_OP_THRESHOLD_MS`.

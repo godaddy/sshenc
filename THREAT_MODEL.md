@@ -357,6 +357,44 @@ the attacker's own keys for commit verification.
   dotfile-integrity threat that `sshenc` cannot fully mitigate from inside
   its own process.
 
+## Threat: Cross-Binary Keychain ACL Prompt / Fatigue
+
+**Scenario**: The macOS legacy keychain keys its per-item ACL to
+the *creating binary's* code signature. On unsigned sshenc builds
+(cargo, Homebrew, pre-signing), every new binary hash is a fresh
+ACL identity. If the CLI (`sshenc` / `sshenc-keygen`) creates a
+wrapping-key entry and the agent (`sshenc-agent`) later tries to
+read it, macOS fires an approval sheet for the cross-binary
+access. Without careful design this cascades into a prompt per
+rebuild per binary per key, fatiguing the user into clicking
+"Always Allow" on everything.
+
+**Mitigations**:
+- `sshenc-agent` is the *sole* process that calls into the
+  platform crypto FFI. The CLI binaries construct
+  `sshenc-se::AgentProxyBackend`, which reads `.pub` / `.meta`
+  from disk directly for read-side ops and forwards every write
+  (`generate` / `sign` / `delete` / `rename`) over the agent's
+  local IPC endpoint. Creator and reader of every keychain item
+  are the same binary — no cross-binary ACL prompt.
+- The invariant is platform-uniform: Unix socket on
+  macOS/Linux/WSLv2, Windows named pipe on native/PowerShell/Git
+  Bash/cmd.exe. The CLI binary never links the platform FFI into
+  a path that would call it.
+- The Swift bridge in `enclaveapp-apple` emits a shippable stderr
+  warning whenever a single crypto op exceeds ~1 s — any cross-
+  binary prompt that ever slips back in self-identifies with the
+  exact `SecItem*` call and its elapsed time.
+
+**Residual risk**:
+- Rebuilding `sshenc-agent` still changes its code signature, so
+  a rebuild still costs one Always-Allow approval per existing
+  wrapping-key item. That's one prompt per key, not one per key
+  per binary per rebuild — a linear improvement.
+- On Windows, CNG's ACL model isn't code-signature-based, so the
+  prompt class doesn't apply there; the centralization is kept
+  anyway for architectural uniformity.
+
 ## Threat: PKCS#11 Dylib / Agent Binary Tamper
 
 **Scenario**: `sshenc-pkcs11` is installed to a user-writable location
@@ -366,9 +404,11 @@ dylib with a lookalike that signs with its own key or exfiltrates signing
 requests.
 
 **Mitigations**:
-- `sshenc-core::bin_discovery::find_trusted_binary` canonicalizes paths
-  and restricts lookups to a trusted install-directory list, preventing
-  PATH-based planting of the sshenc CLI itself.
+- `enclaveapp_core::bin_discovery::find_trusted_binary` canonicalizes
+  paths and restricts lookups to a trusted install-directory list,
+  preventing PATH-based planting of the sshenc CLI itself. The same
+  helper is shared across every enclaveapp consumer (sshenc today;
+  awsenc next) so the search-path invariant stays consistent.
 - The PKCS#11 provider path in `~/.ssh/config` is written as an absolute
   path, so planting a lookalike requires write access to that exact path.
 - Distribution via signed Homebrew bottles / MSI installers is the

@@ -15,6 +15,7 @@
 
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
 
+#[cfg(not(windows))]
 use std::time::{Duration, Instant};
 
 use sshenc_e2e::{
@@ -30,6 +31,7 @@ fn skip_if_no_docker(test_name: &str) -> bool {
     false
 }
 
+#[cfg_attr(windows, allow(dead_code))] // Used only by Unix-gated tests below.
 fn skip_unless_key_creation_cheap(test_name: &str) -> bool {
     if extended_enabled() || software_mode() {
         return false;
@@ -285,8 +287,15 @@ fn openssh_print_config_pkcs11_mode() {
 /// a stale agent gets killed) and must NOT fall back to local
 /// crypto (the centralization invariant — agent is the sole
 /// toucher).
+///
+/// Unix only: the test removes the socket file to force the
+/// readiness probe down the spawn path. Windows uses a named pipe
+/// that's owned by the running process (not a filesystem entry we
+/// can remove) and the auto-spawn path on Windows is intentionally
+/// not implemented — agent lifecycle there is a Service.
 #[test]
 #[ignore = "requires docker"]
+#[cfg(not(windows))]
 fn cli_respawns_agent_after_kill() {
     if skip_if_no_docker("cli_respawns_agent_after_kill") {
         return;

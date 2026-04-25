@@ -21,6 +21,11 @@
 //! over the same connection.
 
 #![cfg(windows)]
+// Raw winapi is inherently unsafe — CreateFileW, ReadFile, WriteFile,
+// CloseHandle, WaitNamedPipeW. The unsafe blocks are scoped to the
+// smallest possible calls and their preconditions (valid handle,
+// valid buffer, etc.) are checked locally.
+#![allow(unsafe_code)]
 
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
@@ -58,9 +63,11 @@ impl PipeStream {
 
         // Wait up to 10 s for a pipe instance. If the pipe doesn't
         // exist at all the call returns fast with an error — that's
-        // the signal the agent isn't running.
+        // the signal the agent isn't running. We drop the result
+        // because a timeout or not-found here is actionable only
+        // via the `CreateFileW` below.
         unsafe {
-            let _ = WaitNamedPipeW(pcwstr, 10_000);
+            drop(WaitNamedPipeW(pcwstr, 10_000));
         }
 
         let handle = unsafe {
@@ -74,7 +81,7 @@ impl PipeStream {
                 None,
             )
         }
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("CreateFileW: {e}")))?;
+        .map_err(|e| io::Error::other(format!("CreateFileW: {e}")))?;
 
         if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::new(
@@ -112,15 +119,8 @@ impl PipeStream {
 impl Read for PipeStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut bytes_read: u32 = 0;
-        unsafe {
-            ReadFile(
-                self.handle,
-                Some(buf),
-                Some(&mut bytes_read as *mut u32),
-                None,
-            )
-        }
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("ReadFile: {e}")))?;
+        unsafe { ReadFile(self.handle, Some(buf), Some(&mut bytes_read), None) }
+            .map_err(|e| io::Error::other(format!("ReadFile: {e}")))?;
         Ok(bytes_read as usize)
     }
 }
@@ -128,15 +128,8 @@ impl Read for PipeStream {
 impl Write for PipeStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut bytes_written: u32 = 0;
-        unsafe {
-            WriteFile(
-                self.handle,
-                Some(buf),
-                Some(&mut bytes_written as *mut u32),
-                None,
-            )
-        }
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("WriteFile: {e}")))?;
+        unsafe { WriteFile(self.handle, Some(buf), Some(&mut bytes_written), None) }
+            .map_err(|e| io::Error::other(format!("WriteFile: {e}")))?;
         Ok(bytes_written as usize)
     }
 
@@ -151,7 +144,7 @@ impl Drop for PipeStream {
     fn drop(&mut self) {
         if self.handle != INVALID_HANDLE_VALUE {
             unsafe {
-                let _ = CloseHandle(self.handle);
+                drop(CloseHandle(self.handle));
             }
         }
     }

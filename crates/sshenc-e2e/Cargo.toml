@@ -90,6 +90,10 @@ path = "tests/cache_ttl.rs"
 name = "completion_scripts"
 path = "tests/completion_scripts.rs"
 
+[[test]]
+name = "agent_extensions"
+path = "tests/agent_extensions.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

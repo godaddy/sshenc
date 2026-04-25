@@ -82,6 +82,10 @@ path = "tests/agent_protocol_edge_windows.rs"
 name = "native_hardware"
 path = "tests/native_hardware.rs"
 
+[[test]]
+name = "cache_ttl"
+path = "tests/cache_ttl.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

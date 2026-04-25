@@ -94,6 +94,10 @@ path = "tests/completion_scripts.rs"
 name = "agent_extensions"
 path = "tests/agent_extensions.rs"
 
+[[test]]
+name = "export_pub_format"
+path = "tests/export_pub_format.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

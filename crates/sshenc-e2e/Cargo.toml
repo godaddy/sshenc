@@ -66,6 +66,10 @@ path = "tests/y_sign_verify.rs"
 name = "agent_concurrency"
 path = "tests/agent_concurrency.rs"
 
+[[test]]
+name = "signal_handling"
+path = "tests/signal_handling.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::{AccessPolicy, Config, PromptPolicy};
-#[cfg(not(unix))]
-use sshenc_se::SshencBackend;
 use sshenc_se::{sshenc_keys_dir, KeyBackend};
 use std::io::{self, Write};
 #[cfg(unix)]

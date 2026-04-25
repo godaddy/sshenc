@@ -70,6 +70,10 @@ path = "tests/agent_concurrency.rs"
 name = "signal_handling"
 path = "tests/signal_handling.rs"
 
+[[test]]
+name = "corrupted_state"
+path = "tests/corrupted_state.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

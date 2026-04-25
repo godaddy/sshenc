@@ -50,6 +50,10 @@ path = "tests/agent_protocol_edge.rs"
 name = "gitenc_edge"
 path = "tests/gitenc_edge.rs"
 
+[[test]]
+name = "config_variations"
+path = "tests/config_variations.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

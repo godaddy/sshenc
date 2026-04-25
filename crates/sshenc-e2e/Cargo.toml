@@ -106,6 +106,10 @@ path = "tests/sign_edge_data.rs"
 name = "json_output_stability"
 path = "tests/json_output_stability.rs"
 
+[[test]]
+name = "cli_concurrency"
+path = "tests/cli_concurrency.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

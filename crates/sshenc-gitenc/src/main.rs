@@ -81,7 +81,7 @@ fn configure_repo(label: Option<&str>) {
         let binary_name = "sshenc.exe";
         #[cfg(not(windows))]
         let binary_name = "sshenc";
-        sshenc_core::bin_discovery::find_trusted_binary(binary_name)
+        enclaveapp_core::bin_discovery::find_trusted_binary(binary_name, "sshenc")
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| {
                 eprintln!("gitenc: trusted sshenc binary not found");

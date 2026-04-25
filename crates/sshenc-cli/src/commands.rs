@@ -1051,7 +1051,7 @@ fn find_agent_binary() -> Result<PathBuf> {
     let agent_name = "sshenc-agent.exe";
     #[cfg(not(windows))]
     let agent_name = "sshenc-agent";
-    sshenc_core::bin_discovery::find_trusted_binary(agent_name)
+    enclaveapp_core::bin_discovery::find_trusted_binary(agent_name, "sshenc")
         .ok_or_else(|| anyhow!("sshenc-agent not found in trusted install locations"))
 }
 

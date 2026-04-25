@@ -7,7 +7,6 @@
 //! across all other sshenc crates.
 
 pub mod backup;
-pub mod bin_discovery;
 pub mod config;
 pub mod error;
 pub mod fingerprint;

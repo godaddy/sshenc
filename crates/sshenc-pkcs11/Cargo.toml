@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 dirs = { workspace = true }
+enclaveapp-core = { workspace = true }
 sshenc-core = { workspace = true }
 
 [lints]

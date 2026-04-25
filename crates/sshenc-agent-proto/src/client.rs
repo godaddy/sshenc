@@ -61,45 +61,14 @@ pub type AgentStream = PipeStream;
 /// so would violate the centralization invariant.
 #[cfg(unix)]
 pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
-    if is_socket_ready(socket_path) {
-        return Ok(());
-    }
-
-    let agent_bin =
-        sshenc_core::bin_discovery::find_trusted_binary("sshenc-agent").ok_or_else(|| {
-            "sshenc-agent binary not found in known install dirs; \
-             install sshenc or start the agent manually before running this command"
-                .to_string()
-        })?;
-
-    if let Some(parent) = socket_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("creating agent socket dir {}: {e}", parent.display()))?;
-        }
-    }
-
-    use std::process::Stdio;
-    std::process::Command::new(&agent_bin)
-        .arg("--socket")
-        .arg(socket_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawning {}: {e}", agent_bin.display()))?;
-
-    // Exponential backoff: 100, 200, 400, 800, 1600 ms (≈3.1s max).
-    for attempt in 0..5_u32 {
-        std::thread::sleep(Duration::from_millis(100_u64 << attempt));
-        if is_socket_ready(socket_path) {
-            return Ok(());
-        }
-    }
-    Err(format!(
-        "sshenc-agent did not become ready at {} within 3.1s",
-        socket_path.display()
-    ))
+    // Delegates to the shared helper in `enclaveapp_core::daemon`.
+    // sshenc is the reference consumer of that pattern; awsenc and
+    // any future enclaveapp CLI gets the same semantics (trusted
+    // bin discovery, exponential readiness backoff, fixed
+    // `--socket <path>` invoke shape) without reimplementing.
+    enclaveapp_core::daemon::ensure_daemon_ready("sshenc-agent", "sshenc", socket_path)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Windows readiness check: probe the named pipe. The agent on
@@ -120,11 +89,6 @@ pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
          `sshenc-agent` or ensure the sshenc-agent Service is running",
         socket_path.display()
     ))
-}
-
-#[cfg(unix)]
-fn is_socket_ready(socket_path: &Path) -> bool {
-    socket_path.exists() && UnixStream::connect(socket_path).is_ok()
 }
 
 // ───── Public entry points ─────

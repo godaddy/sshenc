@@ -54,6 +54,10 @@ path = "tests/gitenc_edge.rs"
 name = "config_variations"
 path = "tests/config_variations.rs"
 
+[[test]]
+name = "install_uninstall"
+path = "tests/install_uninstall.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

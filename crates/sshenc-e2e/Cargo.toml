@@ -202,6 +202,10 @@ path = "tests/ssh_add_unsupported_ops.rs"
 name = "agent_forwarding_multihop"
 path = "tests/agent_forwarding_multihop.rs"
 
+[[test]]
+name = "edge_cases_and_perms"
+path = "tests/edge_cases_and_perms.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

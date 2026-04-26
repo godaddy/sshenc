@@ -223,6 +223,7 @@ fn agent_keeps_serving_with_orphan_files_present() {
     env.use_ephemeral_keys_dir().expect("ephemeral");
     let keys_dir = env.home().join(".sshenc-keys-ephemeral");
     drop(shared_enclave_pubkey(&env).expect("warm shared key"));
+    env.start_agent().expect("start agent");
 
     // Mint a real key.
     let real = unique_label("orph-svc-real");

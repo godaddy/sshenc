@@ -158,6 +158,10 @@ path = "tests/y_verify_negatives.rs"
 name = "agent_socket_perms"
 path = "tests/agent_socket_perms.rs"
 
+[[test]]
+name = "keygen_backup_rollback"
+path = "tests/keygen_backup_rollback.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

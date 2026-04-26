@@ -210,6 +210,10 @@ path = "tests/edge_cases_and_perms.rs"
 name = "protocol_limits_and_keygen_bin"
 path = "tests/protocol_limits_and_keygen_bin.rs"
 
+[[test]]
+name = "gitenc_corners"
+path = "tests/gitenc_corners.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

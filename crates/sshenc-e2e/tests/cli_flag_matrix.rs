@@ -53,7 +53,8 @@ fn keygen_comment_round_trips_through_inspect() {
     if skip_unless_key_creation_cheap("keygen_comment_round_trips_through_inspect") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     let label = "e2e-comment";
     let comment = "jay@laptop ✨ unicode test";
 
@@ -252,7 +253,8 @@ fn keygen_duplicate_label_errors() {
     if skip_if_no_docker("keygen_duplicate_label_errors") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     drop(shared_enclave_pubkey(&env).expect("shared key"));
 
     let out = run(env.sshenc_cmd().expect("sshenc").args([
@@ -295,7 +297,8 @@ fn keygen_rejects_invalid_label() {
     if skip_if_no_docker("keygen_rejects_invalid_label") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
 
     for bad in &["../escape", "with space", ".leading-dot", "ends-in-slash/"] {
         let out = run(env.sshenc_cmd().expect("sshenc").args([
@@ -328,7 +331,8 @@ fn inspect_json_emits_keyinfo() {
     if skip_if_no_docker("inspect_json_emits_keyinfo") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     drop(shared_enclave_pubkey(&env).expect("shared key"));
 
     let out =
@@ -359,7 +363,8 @@ fn inspect_missing_label_errors() {
     if skip_if_no_docker("inspect_missing_label_errors") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
 
     let out = run(env
         .sshenc_cmd()
@@ -387,7 +392,8 @@ fn export_pub_output_writes_file() {
     if skip_if_no_docker("export_pub_output_writes_file") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     drop(shared_enclave_pubkey(&env).expect("shared key"));
     let target = env.home().join("exported.pub");
     drop(std::fs::remove_file(&target));
@@ -419,7 +425,8 @@ fn export_pub_fingerprint_only() {
     if skip_if_no_docker("export_pub_fingerprint_only") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     drop(shared_enclave_pubkey(&env).expect("shared key"));
 
     let out = run(env.sshenc_cmd().expect("sshenc").args([
@@ -453,7 +460,8 @@ fn export_pub_authorized_keys_format() {
     if skip_if_no_docker("export_pub_authorized_keys_format") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     drop(shared_enclave_pubkey(&env).expect("shared key"));
 
     let out = run(env.sshenc_cmd().expect("sshenc").args([
@@ -482,7 +490,8 @@ fn export_pub_json_format() {
     if skip_if_no_docker("export_pub_json_format") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     drop(shared_enclave_pubkey(&env).expect("shared key"));
 
     let out =
@@ -508,7 +517,8 @@ fn export_pub_missing_label_errors() {
     if skip_if_no_docker("export_pub_missing_label_errors") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
 
     let out = run(env
         .sshenc_cmd()
@@ -534,7 +544,8 @@ fn delete_missing_label_errors() {
     if skip_if_no_docker("delete_missing_label_errors") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
 
     let out =
         run(env
@@ -560,7 +571,8 @@ fn delete_with_delete_pub_removes_pub_file() {
     if skip_unless_key_creation_cheap("delete_with_delete_pub_removes_pub_file") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     let label = "e2e-delete-pub";
     let pub_path = env.ssh_dir().join(format!("{label}.pub"));
 

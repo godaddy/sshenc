@@ -126,6 +126,10 @@ path = "tests/pkcs11_boot_hook.rs"
 name = "gitenc_extras"
 path = "tests/gitenc_extras.rs"
 
+[[test]]
+name = "keygen_up_and_agent_labels"
+path = "tests/keygen_up_and_agent_labels.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

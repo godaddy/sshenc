@@ -234,6 +234,10 @@ path = "tests/git_protocol_variants.rs"
 name = "scaling_edges"
 path = "tests/scaling_edges.rs"
 
+[[test]]
+name = "ssh_multiplex_and_addkeys"
+path = "tests/ssh_multiplex_and_addkeys.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

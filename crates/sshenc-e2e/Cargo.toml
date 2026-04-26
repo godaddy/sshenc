@@ -190,6 +190,10 @@ path = "tests/cross_binary_and_migration.rs"
 name = "output_stability_and_shell_tools"
 path = "tests/output_stability_and_shell_tools.rs"
 
+[[test]]
+name = "gitenc_config_more"
+path = "tests/gitenc_config_more.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

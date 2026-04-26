@@ -166,6 +166,10 @@ path = "tests/keygen_backup_rollback.rs"
 name = "agent_labels_concurrent"
 path = "tests/agent_labels_concurrent.rs"
 
+[[test]]
+name = "agent_forwarding"
+path = "tests/agent_forwarding.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

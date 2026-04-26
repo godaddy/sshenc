@@ -222,6 +222,10 @@ path = "tests/agent_lifecycle_corners.rs"
 name = "ssh_config_interactions"
 path = "tests/ssh_config_interactions.rs"
 
+[[test]]
+name = "cli_version_help"
+path = "tests/cli_version_help.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

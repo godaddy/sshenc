@@ -1486,6 +1486,7 @@ version = "0.0.0-dev"
 dependencies = [
  "dirs",
  "enclaveapp-core",
+ "libc",
  "sshenc-core",
 ]
 

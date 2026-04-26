@@ -106,16 +106,78 @@ pub fn ensure_agent_running() -> Result<(), String> {
     Err("agent failed to start (timeout)".into())
 }
 
+/// On Unix (macOS / Linux), resolve this dylib's own filesystem path
+/// so we can use ITS sibling directory as the discovery hint
+/// instead of `current_exe`'s sibling. The dylib is hosted by an
+/// arbitrary process (ssh, gpg, …); its `current_exe` is the host,
+/// whose siblings are unrelated to where the matching `sshenc-agent`
+/// lives. The dylib's *own* siblings, on the other hand, are the
+/// install set: a homebrew install puts both libsshenc_pkcs11.dylib
+/// and sshenc-agent under the same Cellar prefix; a cargo dev build
+/// puts both under `target/<profile>/`.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn dylib_path() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    extern "C" {
+        fn dladdr(addr: *const libc::c_void, info: *mut libc::Dl_info) -> libc::c_int;
+    }
+    // Take the address of any function statically linked into this
+    // dylib; dladdr resolves which loaded image contains it.
+    let addr = dylib_path as *const libc::c_void;
+    let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+    let rc = unsafe { dladdr(addr, &mut info) };
+    if rc == 0 || info.dli_fname.is_null() {
+        return None;
+    }
+    let cstr = unsafe { CStr::from_ptr(info.dli_fname) };
+    let p = PathBuf::from(cstr.to_string_lossy().into_owned());
+    // canonicalize to drop any symlinks (e.g. homebrew's
+    // `lib/libsshenc_pkcs11.dylib` → `Cellar/<ver>/lib/...`)
+    p.canonicalize().ok().or(Some(p))
+}
+
+#[cfg(windows)]
+fn dylib_path() -> Option<PathBuf> {
+    // TODO: GetModuleHandleEx + GetModuleFileName for the
+    // equivalent on Windows. Falls back to `current_exe`-based
+    // discovery for now (no homebrew-style version skew on
+    // Windows).
+    None
+}
+
+/// Build a `BinaryDiscoveryContext` with `current_exe` overridden
+/// to point at this dylib (when we can resolve its path). That way
+/// `find_trusted_binary` searches THIS library's siblings first,
+/// not the hosting process's siblings — which on a homebrew Mac
+/// would be ssh's sibling directory and pick up an outdated
+/// homebrew sshenc-agent.
+fn discovery_context() -> enclaveapp_core::bin_discovery::BinaryDiscoveryContext {
+    let mut ctx = enclaveapp_core::bin_discovery::BinaryDiscoveryContext::current();
+    if let Some(my_path) = dylib_path() {
+        ctx.current_exe = Some(my_path);
+    }
+    ctx
+}
+
 #[cfg(unix)]
 fn find_agent_binary() -> Result<PathBuf, String> {
-    enclaveapp_core::bin_discovery::find_trusted_binary("sshenc-agent", "sshenc")
-        .ok_or_else(|| "sshenc-agent not found in trusted install locations".into())
+    enclaveapp_core::bin_discovery::find_trusted_binary_with_context(
+        "sshenc-agent",
+        "sshenc",
+        &discovery_context(),
+    )
+    .ok_or_else(|| "sshenc-agent not found in trusted install locations".into())
 }
 
 #[cfg(windows)]
 fn find_agent_binary() -> Result<PathBuf, String> {
-    enclaveapp_core::bin_discovery::find_trusted_binary("sshenc-agent.exe", "sshenc")
-        .ok_or_else(|| "sshenc-agent.exe not found in trusted install locations".into())
+    enclaveapp_core::bin_discovery::find_trusted_binary_with_context(
+        "sshenc-agent.exe",
+        "sshenc",
+        &discovery_context(),
+    )
+    .ok_or_else(|| "sshenc-agent.exe not found in trusted install locations".into())
 }
 
 #[cfg(test)]

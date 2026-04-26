@@ -16,5 +16,8 @@ dirs = { workspace = true }
 enclaveapp-core = { workspace = true }
 sshenc-core = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [lints]
 workspace = true

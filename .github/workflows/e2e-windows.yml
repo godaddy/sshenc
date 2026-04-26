@@ -49,5 +49,17 @@ jobs:
       # Run only the Windows-gated test file (the rest are
       # `#![cfg(unix)]` and don't compile here). `--ignored` because
       # the e2e suite uses #[ignore] for spawn-an-agent tests.
+      #
+      # SSHENC_E2E_SOFTWARE=1 keeps the agent off the runner's TPM.
+      # GitHub windows-latest runners don't expose a usable TPM 2.0
+      # to user processes, so a hardware-backend agent fails to
+      # init and the named pipe never gets bound. The named-pipe
+      # protocol-edge contracts we want to pin (oversize / zero-len
+      # / baseline RequestIdentities) are independent of the
+      # backend choice — software is the right substrate here.
+      # Hardware coverage on Windows happens on the developer's
+      # own laptop, where TPM access is available.
       - name: Run Windows agent protocol-edge tests
+        env:
+          SSHENC_E2E_SOFTWARE: "1"
         run: cargo test -p sshenc-e2e --test agent_protocol_edge_windows -- --ignored --test-threads=1

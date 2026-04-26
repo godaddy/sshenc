@@ -28,11 +28,6 @@ mod wsl;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-
-    /// Force the system keyring backend (Linux only). Bypasses WSL bridge
-    /// and TPM detection. Requires an unlocked keyring session.
-    #[arg(long, global = true)]
-    keyring: bool,
 }
 
 #[derive(Subcommand)]
@@ -287,12 +282,8 @@ fn main() -> Result<()> {
     // the agent is the sole toucher of every platform's secret
     // store.
     let backend: Box<dyn sshenc_se::KeyBackend> = Box::new(
-        sshenc_se::AgentProxyBackend::new(
-            config.pub_dir.clone(),
-            cli.keyring,
-            config.socket_path.clone(),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
+        sshenc_se::AgentProxyBackend::new(config.pub_dir.clone(), config.socket_path.clone())
+            .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
     );
 
     run_command(cli.command, &*backend)

@@ -58,6 +58,77 @@ pub fn software_mode() -> bool {
     std::env::var_os(SOFTWARE_ENV).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+/// Coarse hardware-backend classification for the current platform.
+/// Used by tests that want to gate on "is a hardware-backed key
+/// store available right now?" without instantiating one.
+///
+/// The detection is intentionally conservative — it reflects what
+/// `AppSigningBackend::init` is *expected* to pick on a given OS,
+/// not a deep probe. On platforms with optional hardware (Linux
+/// without TPM, older Windows without TPM 2.0), the actual backend
+/// selection happens at runtime when the agent starts. Treat this
+/// as "hardware is plausibly present, run the test"; the test
+/// itself surfaces a real error if the platform's hardware ends
+/// up unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareBackend {
+    /// macOS Secure Enclave (T2 / Apple Silicon).
+    SecureEnclave,
+    /// Windows TPM 2.0 via CNG.
+    Tpm,
+    /// Software-only (Linux without WSL bridge, or any platform
+    /// when `SSHENC_E2E_SOFTWARE=1`).
+    Software,
+}
+
+impl HardwareBackend {
+    /// True when the backend involves real hardware that requires
+    /// platform crypto entitlements (and may surface user prompts).
+    #[must_use]
+    pub fn is_hardware(self) -> bool {
+        matches!(self, Self::SecureEnclave | Self::Tpm)
+    }
+}
+
+/// Detect the hardware backend the platform is expected to use
+/// for the current e2e run. `SSHENC_E2E_SOFTWARE` overrides to
+/// `Software` regardless of platform.
+#[must_use]
+pub fn hardware_backend() -> HardwareBackend {
+    if software_mode() {
+        return HardwareBackend::Software;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        HardwareBackend::SecureEnclave
+    }
+    #[cfg(target_os = "windows")]
+    {
+        HardwareBackend::Tpm
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        HardwareBackend::Software
+    }
+}
+
+/// Skip helper for tests that *require* a real hardware backend
+/// (Touch ID / TPM access). Returns true (test should skip) when
+/// `SSHENC_E2E_SOFTWARE=1` is set or the platform has no hardware
+/// backend. Prints a diagnostic so the skip is visible in test
+/// output.
+pub fn skip_unless_hardware(test_name: &str) -> bool {
+    let backend = hardware_backend();
+    if backend.is_hardware() {
+        return false;
+    }
+    eprintln!(
+        "skip {test_name}: needs a hardware backend (Secure Enclave / TPM); \
+         current backend is {backend:?}"
+    );
+    true
+}
+
 /// Label used for the single shared enclave key that all scenarios reuse.
 ///
 /// Reusing one key dramatically reduces macOS keychain "Always Allow"
@@ -183,6 +254,8 @@ fn build_image() -> Result<()> {
 }
 
 /// Resolve `target/<profile>/<bin_name>` by walking up from `current_exe`.
+/// On Windows the binary name typically has a `.exe` suffix; if the bare
+/// name doesn't exist we fall back to `<name>.exe` before erroring.
 pub fn workspace_bin(name: &str) -> Result<PathBuf> {
     let exe = std::env::current_exe().context("current_exe")?;
     let target_profile_dir = exe
@@ -193,7 +266,22 @@ pub fn workspace_bin(name: &str) -> Result<PathBuf> {
     if candidate.exists() {
         return Ok(candidate);
     }
-    bail!("binary {name} not found at {}", candidate.display());
+    #[cfg(windows)]
+    {
+        let with_exe = target_profile_dir.join(format!("{name}.exe"));
+        if with_exe.exists() {
+            return Ok(with_exe);
+        }
+        bail!(
+            "binary {name} not found at {} or {}",
+            candidate.display(),
+            with_exe.display()
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        bail!("binary {name} not found at {}", candidate.display());
+    }
 }
 
 fn is_release_profile() -> bool {

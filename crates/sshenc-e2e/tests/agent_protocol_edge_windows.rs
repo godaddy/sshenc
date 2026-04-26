@@ -22,19 +22,11 @@
 #![cfg(windows)]
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
 
-use sshenc_e2e::{docker_skip_reason, workspace_bin, SshencEnv};
+use sshenc_e2e::{workspace_bin, SshencEnv};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
-
-fn skip_if_no_docker(test_name: &str) -> bool {
-    if let Some(reason) = docker_skip_reason() {
-        eprintln!("skip {test_name}: {reason}");
-        return true;
-    }
-    false
-}
 
 const SSH_AGENTC_REQUEST_IDENTITIES: u8 = 11;
 const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
@@ -120,11 +112,8 @@ fn stop_agent(mut child: Child) {
 /// Sanity baseline: a normal RequestIdentities round-trip works
 /// over the Windows named pipe.
 #[test]
-#[ignore = "requires docker"]
+#[ignore = "spawns sshenc-agent"]
 fn windows_pipe_baseline_request_identities() {
-    if skip_if_no_docker("windows_pipe_baseline_request_identities") {
-        return;
-    }
     let env = SshencEnv::new().expect("env");
     let pipe = unique_pipe_name("baseline");
     let agent = spawn_agent(&env, &pipe);
@@ -148,11 +137,8 @@ fn windows_pipe_baseline_request_identities() {
 /// it. Subsequent connections must still work, proving the agent
 /// didn't crash on the rejection.
 #[test]
-#[ignore = "requires docker"]
+#[ignore = "spawns sshenc-agent"]
 fn windows_pipe_oversize_frame_rejected_without_crash() {
-    if skip_if_no_docker("windows_pipe_oversize_frame_rejected_without_crash") {
-        return;
-    }
     let env = SshencEnv::new().expect("env");
     let pipe = unique_pipe_name("oversize");
     let agent = spawn_agent(&env, &pipe);
@@ -182,11 +168,8 @@ fn windows_pipe_oversize_frame_rejected_without_crash() {
 /// Zero-length frame — claimed body length 0 — rejected without
 /// hanging the connection. Same invariant as the Unix mirror.
 #[test]
-#[ignore = "requires docker"]
+#[ignore = "spawns sshenc-agent"]
 fn windows_pipe_zero_length_frame_rejected() {
-    if skip_if_no_docker("windows_pipe_zero_length_frame_rejected") {
-        return;
-    }
     let env = SshencEnv::new().expect("env");
     let pipe = unique_pipe_name("zerolen");
     let agent = spawn_agent(&env, &pipe);

@@ -206,6 +206,10 @@ path = "tests/agent_forwarding_multihop.rs"
 name = "edge_cases_and_perms"
 path = "tests/edge_cases_and_perms.rs"
 
+[[test]]
+name = "protocol_limits_and_keygen_bin"
+path = "tests/protocol_limits_and_keygen_bin.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

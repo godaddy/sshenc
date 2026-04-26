@@ -1,0 +1,65 @@
+name: e2e-windows
+
+# Native Windows e2e job. The Linux-mode e2e suite (e2e.yml) covers
+# the bulk of CLI/gitenc behavior, but everything that talks IPC
+# does so through Unix sockets — the test files that aren't
+# `#![cfg(unix)]` are the named-pipe protocol-edge tests for the
+# agent. Run those on a real Windows runner so the named-pipe
+# implementation gets exercised in CI rather than only locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Clone libenclaveapp
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/godaddy/libenclaveapp.git ../libenclaveapp
+          cp -r ../libenclaveapp/crates ../crates
+          cp ../libenclaveapp/Cargo.toml ../Cargo.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-e2e-
+            ${{ runner.os }}-cargo-
+
+      - name: Build workspace tests
+        run: cargo build --workspace --tests
+
+      # Run only the Windows-gated test file (the rest are
+      # `#![cfg(unix)]` and don't compile here). `--ignored` because
+      # the e2e suite uses #[ignore] for spawn-an-agent tests.
+      #
+      # SSHENC_E2E_SOFTWARE=1 keeps the agent off the runner's TPM.
+      # GitHub windows-latest runners don't expose a usable TPM 2.0
+      # to user processes, so a hardware-backend agent fails to
+      # init and the named pipe never gets bound. The named-pipe
+      # protocol-edge contracts we want to pin (oversize / zero-len
+      # / baseline RequestIdentities) are independent of the
+      # backend choice — software is the right substrate here.
+      # Hardware coverage on Windows happens on the developer's
+      # own laptop, where TPM access is available.
+      - name: Run Windows agent protocol-edge tests
+        env:
+          SSHENC_E2E_SOFTWARE: "1"
+        run: cargo test -p sshenc-e2e --test agent_protocol_edge_windows -- --ignored --test-threads=1

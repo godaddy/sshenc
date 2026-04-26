@@ -89,29 +89,46 @@ fn open_pipe_with_retry(pipe: &str) -> std::io::Result<std::fs::File> {
     }
 }
 
-/// Connect to the pipe, write `payload`, read a reply (best-effort
-/// up to a generous limit), close. Returns the bytes read; an empty
-/// vec means the agent hung up without replying.
+/// Connect to the pipe, write `payload`, then read exactly **one**
+/// length-prefixed reply (4-byte BE length followed by `length`
+/// bytes). On a malformed request the agent closes the pipe before
+/// replying — that surfaces as `BrokenPipe` and returns an empty
+/// `Vec`, which is the test's expected "rejected, didn't reply"
+/// signal.
+///
+/// We can't use `read_to_end` here because `handle_connection`
+/// keeps the pipe open after a successful reply for subsequent
+/// requests; an "until EOF" read would deadlock.
 fn round_trip_raw(pipe: &str, payload: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut stream = open_pipe_with_retry(pipe)?;
     stream.write_all(payload)?;
-    let mut buf = Vec::new();
-    let mut tmp = [0_u8; 4096];
-    // Pipes don't support read timeouts via std; rely on the agent
-    // to either reply or hang up. For tests this is bounded by the
-    // agent's behavior — bad frames cause an immediate hang up.
-    loop {
-        match stream.read(&mut tmp) {
-            Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
-            Err(e) => return Err(e),
+
+    let mut len_buf = [0_u8; 4];
+    match stream.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            return Ok(Vec::new());
         }
-        if buf.len() > 1024 * 1024 {
-            break;
-        }
+        Err(e) => return Err(e),
     }
-    Ok(buf)
+    let body_len = u32::from_be_bytes(len_buf) as usize;
+    if body_len == 0 || body_len > 1024 * 1024 {
+        // Defensive: reject suspicious lengths so a corrupt agent
+        // doesn't make us allocate huge buffers.
+        return Ok(len_buf.to_vec());
+    }
+    let mut body = vec![0_u8; body_len];
+    stream.read_exact(&mut body)?;
+
+    let mut out = Vec::with_capacity(4 + body.len());
+    out.extend_from_slice(&len_buf);
+    out.extend_from_slice(&body);
+    Ok(out)
 }
 
 /// Stop the agent child. Best-effort kill + wait.

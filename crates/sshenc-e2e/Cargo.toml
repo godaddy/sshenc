@@ -138,8 +138,13 @@ path = "tests/multi_key_scaling.rs"
 name = "log_level_filter"
 path = "tests/log_level_filter.rs"
 
+[[test]]
+name = "config_init_roundtrip"
+path = "tests/config_init_roundtrip.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
+toml = { workspace = true }
 
 [lints]
 workspace = true

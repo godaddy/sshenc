@@ -198,6 +198,10 @@ path = "tests/gitenc_config_more.rs"
 name = "ssh_add_unsupported_ops"
 path = "tests/ssh_add_unsupported_ops.rs"
 
+[[test]]
+name = "agent_forwarding_multihop"
+path = "tests/agent_forwarding_multihop.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

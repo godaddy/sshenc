@@ -230,6 +230,10 @@ path = "tests/cli_version_help.rs"
 name = "git_protocol_variants"
 path = "tests/git_protocol_variants.rs"
 
+[[test]]
+name = "scaling_edges"
+path = "tests/scaling_edges.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

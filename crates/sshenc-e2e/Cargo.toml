@@ -154,6 +154,10 @@ path = "tests/gitenc_agent_only_contract.rs"
 name = "y_verify_negatives"
 path = "tests/y_verify_negatives.rs"
 
+[[test]]
+name = "agent_socket_perms"
+path = "tests/agent_socket_perms.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

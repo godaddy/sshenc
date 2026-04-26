@@ -134,6 +134,10 @@ path = "tests/keygen_up_and_agent_labels.rs"
 name = "multi_key_scaling"
 path = "tests/multi_key_scaling.rs"
 
+[[test]]
+name = "log_level_filter"
+path = "tests/log_level_filter.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

@@ -795,7 +795,12 @@ fn keygen_with_diagnostic_agent(env: &SshencEnv, label: &str) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut socket_ready = false;
     while Instant::now() < deadline {
-        if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        #[cfg(unix)]
+        let connect_ok =
+            socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok();
+        #[cfg(not(unix))]
+        let connect_ok = socket.exists();
+        if connect_ok {
             socket_ready = true;
             break;
         }

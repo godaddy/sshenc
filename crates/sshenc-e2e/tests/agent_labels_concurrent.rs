@@ -143,8 +143,13 @@ fn parallel_ssh_add_against_labeled_agent_only_shows_allowed_label() {
     ) {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
     let shared = shared_enclave_pubkey(&env).expect("shared enclave");
+
+    // Pre-start the unfiltered agent so the keygen+export-pub below
+    // don't race against ensure_daemon_ready. We tear it down before
+    // spawning the labeled agent.
+    env.start_agent().expect("start unfiltered agent");
 
     // Mint a second key so the agent's underlying keys_dir has two
     // identities. With --labels SHARED, only one should surface.
@@ -178,6 +183,7 @@ fn parallel_ssh_add_against_labeled_agent_only_shows_allowed_label() {
         .expect("shared pub body")
         .to_string();
 
+    env.stop_agent();
     let mut agent = spawn_labeled_agent(&env, &[SHARED_ENCLAVE_LABEL]);
 
     let env = Arc::new(env);
@@ -233,8 +239,10 @@ fn parallel_sign_for_allowed_label_succeeds_under_filter() {
     if skip_unless_key_creation_cheap("parallel_sign_for_allowed_label_succeeds_under_filter") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
     let shared = shared_enclave_pubkey(&env).expect("shared enclave");
+
+    env.start_agent().expect("start unfiltered agent");
 
     // Mint a second key so the keys_dir has two identities the
     // filter must distinguish between.
@@ -254,6 +262,7 @@ fn parallel_sign_for_allowed_label_succeeds_under_filter() {
     std::fs::create_dir_all(pub_path.parent().unwrap()).expect("mkdir ssh dir");
     std::fs::write(&pub_path, format!("{shared}\n")).expect("write pub");
 
+    env.stop_agent();
     let mut agent = spawn_labeled_agent(&env, &[SHARED_ENCLAVE_LABEL]);
 
     let env = Arc::new(env);

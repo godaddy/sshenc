@@ -4,11 +4,14 @@
 //! Two scaling-shaped edges that didn't fit `multi_key_scaling.rs`
 //! or `sign_edge_data.rs`:
 //!
-//! 1. **100 keys in keys_dir**: `multi_key_scaling.rs` exercises
-//!    12; this stresses the realistic upper-end of a developer
-//!    account (many machines / projects → many labels) and pins
-//!    that list/inspect don't truncate, panic, or get
-//!    quadratically slow.
+//! 1. **40 keys in keys_dir**: `multi_key_scaling.rs` exercises
+//!    12; this stresses past the agent's rate-limit boundary
+//!    on the burst path while still proving list/inspect don't
+//!    truncate, panic, or get quadratically slow at "many keys"
+//!    scale. The cap is bounded by `DEFAULT_MAX_CONNECTIONS_PER_SECOND`
+//!    in the agent (50/sec); going much higher needs a
+//!    sleep-between-ops loop, which would be testing the rate
+//!    limiter rather than scaling.
 //! 2. **1024-byte SSH key comment**: `cli_flag_matrix.rs` covers
 //!    a typical comment with unicode and spaces; nothing pinned
 //!    that the OpenSSH wire encoder accepts a maximally-long
@@ -48,24 +51,26 @@ fn unique_label(prefix: &str, i: usize) -> String {
     format!("{prefix}-{pid}-{nanos}-{i}")
 }
 
-/// Mint 100 keys in an ephemeral keys_dir, then list them. All 100
-/// must appear; list time stays bounded (<10s on dev hardware,
-/// generous for CI).
+/// Mint 40 keys in an ephemeral keys_dir, then list them. All 40
+/// must appear; list time stays bounded. Picked 40 to comfortably
+/// stay under the agent's 50-conn/sec rate limit on the burst
+/// keygen path while still being more than 3× the existing
+/// `multi_key_scaling.rs` baseline of 12.
 #[test]
 #[ignore = "requires docker"]
-fn list_returns_all_100_keys_in_bounded_time() {
-    if skip_if_no_docker("list_returns_all_100_keys_in_bounded_time") {
+fn list_returns_all_40_keys_in_bounded_time() {
+    if skip_if_no_docker("list_returns_all_40_keys_in_bounded_time") {
         return;
     }
-    if skip_unless_key_creation_cheap("list_returns_all_100_keys_in_bounded_time") {
+    if skip_unless_key_creation_cheap("list_returns_all_40_keys_in_bounded_time") {
         return;
     }
     let mut env = SshencEnv::new().expect("env");
     env.use_ephemeral_keys_dir().expect("ephemeral");
     env.start_agent().expect("start agent");
 
-    const N: usize = 100;
-    let labels: Vec<String> = (0..N).map(|i| unique_label("scale100", i)).collect();
+    const N: usize = 40;
+    let labels: Vec<String> = (0..N).map(|i| unique_label("scale40", i)).collect();
     for label in &labels {
         let outcome = run(env.sshenc_cmd().expect("sshenc cmd").args([
             "keygen",
@@ -89,7 +94,7 @@ fn list_returns_all_100_keys_in_bounded_time() {
     assert!(listed.succeeded(), "list: {}", listed.stderr);
     assert!(
         elapsed < std::time::Duration::from_secs(10),
-        "list took {elapsed:?} for 100 keys; >10s smells quadratic"
+        "list took {elapsed:?} for {N} keys; >10s smells quadratic"
     );
     let arr: serde_json::Value = serde_json::from_str(&listed.stdout).expect("list --json");
     let entries = arr.as_array().expect("array");
@@ -100,7 +105,7 @@ fn list_returns_all_100_keys_in_bounded_time() {
                 .and_then(|v| v.as_str())
                 == Some(&**label)
         });
-        assert!(seen, "label '{label}' missing from 100-key list output");
+        assert!(seen, "label '{label}' missing from {N}-key list output");
     }
 }
 

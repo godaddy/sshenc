@@ -122,6 +122,10 @@ path = "tests/drop_in_extras.rs"
 name = "pkcs11_boot_hook"
 path = "tests/pkcs11_boot_hook.rs"
 
+[[test]]
+name = "gitenc_extras"
+path = "tests/gitenc_extras.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

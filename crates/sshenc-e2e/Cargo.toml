@@ -182,6 +182,10 @@ path = "tests/gitenc_advanced_ops.rs"
 name = "y_variants"
 path = "tests/y_variants.rs"
 
+[[test]]
+name = "cross_binary_and_migration"
+path = "tests/cross_binary_and_migration.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

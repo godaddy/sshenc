@@ -194,6 +194,10 @@ path = "tests/output_stability_and_shell_tools.rs"
 name = "gitenc_config_more"
 path = "tests/gitenc_config_more.rs"
 
+[[test]]
+name = "ssh_add_unsupported_ops"
+path = "tests/ssh_add_unsupported_ops.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

@@ -764,6 +764,25 @@ fn keygen_with_diagnostic_agent(env: &SshencEnv, label: &str) -> Result<()> {
     let agent_bin = workspace_bin("sshenc-agent")?;
     let socket = env.socket_path();
     drop(fs::remove_file(&socket));
+
+    // Snapshot the keys_dir so we can include its contents in the
+    // failure message — when the agent rejects keygen with a
+    // "duplicate" error, we want to see what the agent saw.
+    let keys_dir = env
+        .keys_dir_override
+        .clone()
+        .unwrap_or_else(persistent_keys_dir);
+    let keys_dir_listing = match fs::read_dir(&keys_dir) {
+        Ok(entries) => {
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            format!("[{}]", names.join(", "))
+        }
+        Err(e) => format!("(unreadable: {e})"),
+    };
     let mut agent = env
         .scrubbed_command(&agent_bin)
         .args(["--foreground", "--socket"])
@@ -818,8 +837,9 @@ fn keygen_with_diagnostic_agent(env: &SshencEnv, label: &str) -> Result<()> {
 
     if !keygen_out.status.success() {
         bail!(
-            "sshenc keygen --label {label} failed: {}\nkeygen stdout: {}\nkeygen stderr: {}\nagent stdout: {}\nagent stderr: {}",
+            "sshenc keygen --label {label} failed: {}\nkeys_dir {} contents pre-keygen: {keys_dir_listing}\nkeygen stdout: {}\nkeygen stderr: {}\nagent stdout: {}\nagent stderr: {}",
             keygen_out.status,
+            keys_dir.display(),
             String::from_utf8_lossy(&keygen_out.stdout),
             String::from_utf8_lossy(&keygen_out.stderr),
             String::from_utf8_lossy(&agent_out.stdout),

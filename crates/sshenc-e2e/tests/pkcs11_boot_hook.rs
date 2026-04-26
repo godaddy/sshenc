@@ -165,40 +165,30 @@ fn pkcs11_provider_dlopen_boots_a_working_agent() {
         socket.display(),
     );
 
-    // The agent must actually serve identities — not just be a
-    // socket file. Talk to it via ssh-add -L; it should list the
-    // enclave key because the harness's persistent keys_dir is
-    // inherited via SSHENC_KEYS_DIR (set by scrubbed_command on
-    // the ssh process and inherited by the child agent the dylib
-    // spawned).
-    // Verify the agent is actually serving requests, not just a
-    // dead socket file. ssh-add -L exits 0 (identities listed) or
-    // 1 (zero identities, "The agent has no identities."). Either
-    // means the agent received and answered RequestIdentities.
-    // A reachable but non-responsive agent (or a stale socket
-    // from a crashed agent) would fail to connect → exit 2.
+    // The agent the dylib spawned must actually serve identities —
+    // ssh-add -L should list the shared enclave key. This is the
+    // strong invariant that catches the version-skew bug: if the
+    // dylib finds a stale or differently-configured sshenc-agent
+    // (e.g. an older homebrew-installed one whose keys_dir
+    // resolution differs), it would either fail to honor
+    // SSHENC_KEYS_DIR or report no identities.
     let listed = run(env
         .scrubbed_command("ssh-add")
         .env("SSH_AUTH_SOCK", &socket)
         .arg("-L"))
     .expect("ssh-add -L");
-    let exit_code = listed.status.code();
     assert!(
-        matches!(exit_code, Some(0) | Some(1)),
-        "ssh-add against dylib-spawned agent should connect and \
-         answer (exit 0 or 1), got {exit_code:?}\nstdout:\n{}\nstderr:\n{}",
+        listed.succeeded(),
+        "ssh-add -L against dylib-spawned agent failed; \
+         stdout:\n{}\nstderr:\n{}",
         listed.stdout,
         listed.stderr,
     );
-    let answered = listed.stdout.contains("ecdsa-sha2-nistp256")
-        || listed.stdout.contains("ssh-ed25519")
-        || listed.stdout.contains("The agent has no identities")
-        || listed.stderr.contains("The agent has no identities");
     assert!(
-        answered,
-        "ssh-add output should be an agent reply (identities or \
-         'no identities'); got\nstdout:\n{}\nstderr:\n{}",
-        listed.stdout, listed.stderr,
+        listed.stdout.contains("ecdsa-sha2-nistp256"),
+        "dylib-spawned agent should serve the shared enclave key; \
+         output:\n{}",
+        listed.stdout,
     );
 
     // Cleanup: remove the socket so the accept-loop exits and

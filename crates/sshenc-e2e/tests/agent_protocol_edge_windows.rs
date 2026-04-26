@@ -56,20 +56,6 @@ fn spawn_agent(env: &SshencEnv, pipe: &str) -> Child {
         .expect("spawn sshenc-agent")
 }
 
-/// Wait until the pipe accepts a CreateFile (i.e., the agent has
-/// called CreateNamedPipeW and is in the listening state). Panics
-/// on timeout.
-fn wait_for_pipe(pipe: &str, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if OpenOptions::new().read(true).write(true).open(pipe).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("pipe never became available at {pipe}");
-}
-
 /// Frame `payload` with a 4-byte big-endian length prefix.
 fn frame(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + payload.len());
@@ -78,11 +64,36 @@ fn frame(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Open a connection to the pipe, tolerating two transient
+/// Windows errors:
+/// - `ERROR_FILE_NOT_FOUND` (2): agent hasn't created the pipe
+///   yet (initial startup race).
+/// - `ERROR_PIPE_BUSY` (231): agent's accept loop is swapping in
+///   a new `ServerOptions` instance after the previous client
+///   disconnected — a small window where opens race with that
+///   swap.
+///
+/// Both are expected during a healthy run; we retry up to 10s
+/// with 50 ms backoff, then surface the original error so a
+/// genuinely-down agent still fails the test.
+fn open_pipe_with_retry(pipe: &str) -> std::io::Result<std::fs::File> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match OpenOptions::new().read(true).write(true).open(pipe) {
+            Ok(f) => return Ok(f),
+            Err(e) if matches!(e.raw_os_error(), Some(2 | 231)) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Connect to the pipe, write `payload`, read a reply (best-effort
 /// up to a generous limit), close. Returns the bytes read; an empty
 /// vec means the agent hung up without replying.
 fn round_trip_raw(pipe: &str, payload: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut stream = OpenOptions::new().read(true).write(true).open(pipe)?;
+    let mut stream = open_pipe_with_retry(pipe)?;
     stream.write_all(payload)?;
     let mut buf = Vec::new();
     let mut tmp = [0_u8; 4096];
@@ -117,7 +128,6 @@ fn windows_pipe_baseline_request_identities() {
     let env = SshencEnv::new().expect("env");
     let pipe = unique_pipe_name("baseline");
     let agent = spawn_agent(&env, &pipe);
-    wait_for_pipe(&pipe, Duration::from_secs(10));
 
     let reply = round_trip_raw(&pipe, &frame(&[SSH_AGENTC_REQUEST_IDENTITIES]))
         .expect("round-trip request-identities");
@@ -142,7 +152,6 @@ fn windows_pipe_oversize_frame_rejected_without_crash() {
     let env = SshencEnv::new().expect("env");
     let pipe = unique_pipe_name("oversize");
     let agent = spawn_agent(&env, &pipe);
-    wait_for_pipe(&pipe, Duration::from_secs(10));
 
     // Claim 1 MiB body. The wire reader should reject on the length
     // check before the body needs to be fully transmitted.
@@ -151,10 +160,10 @@ fn windows_pipe_oversize_frame_rejected_without_crash() {
     malicious.push(0xAB);
     drop(round_trip_raw(&pipe, &malicious));
 
-    // A fresh connection on the same pipe must still work. On
-    // Windows pipe semantics, the second client may need to wait
-    // briefly for a new server instance to come up.
-    wait_for_pipe(&pipe, Duration::from_secs(5));
+    // A fresh connection on the same pipe must still work.
+    // open_pipe_with_retry handles the brief 231 (PIPE_BUSY) window
+    // while the agent's accept loop swaps in the next server
+    // instance.
     let reply = round_trip_raw(&pipe, &frame(&[SSH_AGENTC_REQUEST_IDENTITIES]))
         .expect("baseline after oversize");
     assert!(
@@ -173,12 +182,10 @@ fn windows_pipe_zero_length_frame_rejected() {
     let env = SshencEnv::new().expect("env");
     let pipe = unique_pipe_name("zerolen");
     let agent = spawn_agent(&env, &pipe);
-    wait_for_pipe(&pipe, Duration::from_secs(10));
 
     let zero = 0_u32.to_be_bytes();
     drop(round_trip_raw(&pipe, &zero));
 
-    wait_for_pipe(&pipe, Duration::from_secs(5));
     let reply = round_trip_raw(&pipe, &frame(&[SSH_AGENTC_REQUEST_IDENTITIES]))
         .expect("baseline after zero-len");
     assert!(

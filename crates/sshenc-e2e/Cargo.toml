@@ -146,6 +146,10 @@ path = "tests/config_init_roundtrip.rs"
 name = "agent_transient_errors"
 path = "tests/agent_transient_errors.rs"
 
+[[test]]
+name = "gitenc_agent_only_contract"
+path = "tests/gitenc_agent_only_contract.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

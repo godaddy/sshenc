@@ -14,6 +14,21 @@
 //!   gitenc --label github-personal push origin main
 //!   gitenc --config github-work               # configure current repo
 //!   gitenc pull                               # uses configured key
+//!
+//! ## Transport
+//!
+//! gitenc is **agent-only**. Both the SSH side (set via
+//! `core.sshCommand = sshenc ssh --label X --`) and the
+//! commit-signing side (`gpg.ssh.program = sshenc`) talk to
+//! `sshenc-agent` via the same Unix socket. There is no PKCS#11
+//! mode for gitenc — PKCS#11 is OpenSSH's plug-in interface for
+//! crypto providers and is only used by `sshenc install` to wire
+//! up the agent boot-hook in `~/.ssh/config`. From git's
+//! perspective every operation goes through `sshenc ssh` →
+//! `AgentProxyBackend` → the agent. If you need to disable the
+//! agent path entirely, fall back to a non-sshenc SSH key and
+//! configure git to use the system ssh directly; gitenc itself
+//! does not expose an alternative.
 
 use enclaveapp_core::types::validate_label;
 #[cfg(unix)]

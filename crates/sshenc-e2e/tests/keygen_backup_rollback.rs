@@ -73,6 +73,7 @@ fn keygen_default_success_cleans_up_backed_up_files() {
     }
     let mut env = SshencEnv::new().expect("env");
     env.use_ephemeral_keys_dir().expect("ephemeral");
+    env.start_agent().expect("start agent");
 
     let priv_path = env.ssh_dir().join("id_ecdsa");
     let pub_path = env.ssh_dir().join("id_ecdsa.pub");
@@ -148,6 +149,7 @@ fn keygen_default_failure_restores_paired_files() {
     }
     let mut env = SshencEnv::new().expect("env");
     env.use_ephemeral_keys_dir().expect("ephemeral");
+    env.start_agent().expect("start agent");
 
     // Mint `default` once so a second attempt is guaranteed to
     // fail with DuplicateLabel.
@@ -240,6 +242,7 @@ fn keygen_named_label_does_not_touch_id_ecdsa() {
     }
     let mut env = SshencEnv::new().expect("env");
     env.use_ephemeral_keys_dir().expect("ephemeral");
+    env.start_agent().expect("start agent");
 
     let priv_path = env.ssh_dir().join("id_ecdsa");
     let pub_path = env.ssh_dir().join("id_ecdsa.pub");

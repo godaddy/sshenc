@@ -72,13 +72,12 @@ impl AgentProxyBackend {
     /// `inspect`, `export-pub`) don't force the agent up.
     ///
     /// `pub_dir` is the OpenSSH `.pub` destination reported in
-    /// [`KeyInfo::pub_file_path`]. `force_keyring` is accepted for
-    /// API parity with [`SshencBackend::new`] but isn't used — the
-    /// agent already honors whatever backend policy the user
-    /// configured.
+    /// [`KeyInfo::pub_file_path`]. The backend policy on the agent
+    /// side is decided by `sshenc-agent`'s own config; the proxy
+    /// has nothing to switch on, so unlike [`SshencBackend::new`]
+    /// there's no `force_keyring` knob to plumb through.
     pub fn new(
         pub_dir: PathBuf,
-        _force_keyring: bool,
         socket_path: PathBuf,
     ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
         Ok(Self {

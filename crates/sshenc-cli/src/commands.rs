@@ -1307,7 +1307,7 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     // platform — label-to-pubkey resolution is a `.pub`-file disk
     // read, never a keychain fallback.
     let backend: Box<dyn KeyBackend> = Box::new(
-        sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), false, config.socket_path.clone())
+        sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), config.socket_path.clone())
             .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?,
     );
     let invocation =
@@ -1527,12 +1527,9 @@ pub fn promote_to_default(label: &str) -> Result<()> {
         // block callers on a fresh install where the agent binary
         // isn't on disk yet — for those early error paths.
         let rename_via_backend = |old: &str, new: &str| -> Result<()> {
-            let backend = sshenc_se::AgentProxyBackend::new(
-                ssh_dir.clone(),
-                false,
-                config.socket_path.clone(),
-            )
-            .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?;
+            let backend =
+                sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), config.socket_path.clone())
+                    .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?;
             backend
                 .rename(old, new)
                 .map_err(|e| anyhow!("backend rename failed: {e}"))

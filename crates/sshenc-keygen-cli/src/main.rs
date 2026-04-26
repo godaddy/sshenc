@@ -63,7 +63,7 @@ fn main() -> Result<()> {
     // Git Bash, PowerShell, cmd.exe). The CLI binary never calls
     // into Secure Enclave / keychain / CNG directly.
     let backend: Box<dyn KeyBackend> = Box::new(
-        AgentProxyBackend::new(pub_dir.clone(), false, config.socket_path.clone())
+        AgentProxyBackend::new(pub_dir.clone(), config.socket_path.clone())
             .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
     );
 

@@ -170,6 +170,10 @@ path = "tests/agent_labels_concurrent.rs"
 name = "agent_forwarding"
 path = "tests/agent_forwarding.rs"
 
+[[test]]
+name = "ssh_port_forwarding"
+path = "tests/ssh_port_forwarding.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

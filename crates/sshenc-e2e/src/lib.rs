@@ -735,7 +735,67 @@ fn init_named_enclave_key(env: &SshencEnv, label: &str) -> Result<String> {
     if let Some(line) = try_export_pub(env, label)? {
         return Ok(line);
     }
-    let output = env
+    keygen_with_diagnostic_agent(env, label)?;
+    try_export_pub(env, label)?
+        .ok_or_else(|| anyhow!("keygen {label} succeeded but export-pub found nothing"))
+}
+
+fn init_shared_enclave_key(env: &SshencEnv) -> Result<String> {
+    // Fast path: key already exists from a prior run — just export its pubkey.
+    if let Some(line) = try_export_pub(env, SHARED_ENCLAVE_LABEL)? {
+        return Ok(line);
+    }
+    // Slow path: generate once. On macOS this is the step that can prompt
+    // the user (for the keychain wrapping-key entry), and it will prompt
+    // zero times on subsequent runs because we reuse the same label+dir.
+    keygen_with_diagnostic_agent(env, SHARED_ENCLAVE_LABEL)?;
+    try_export_pub(env, SHARED_ENCLAVE_LABEL)?
+        .ok_or_else(|| anyhow!("keygen succeeded but export-pub found nothing"))
+}
+
+/// Run `sshenc keygen --label <label>` against an agent we own
+/// directly, so we can capture the agent's stderr. The CLI's auto-
+/// spawn redirects agent stderr to `/dev/null`, which makes
+/// diagnosing keygen failures (e.g. "agent refused generate") on
+/// CI a guessing game. By pre-spawning the agent ourselves, we get
+/// the underlying tracing output and can include it in the bail
+/// message when keygen fails.
+fn keygen_with_diagnostic_agent(env: &SshencEnv, label: &str) -> Result<()> {
+    let agent_bin = workspace_bin("sshenc-agent")?;
+    let socket = env.socket_path();
+    drop(fs::remove_file(&socket));
+    let mut agent = env
+        .scrubbed_command(&agent_bin)
+        .args(["--foreground", "--socket"])
+        .arg(&socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn diagnostic sshenc-agent")?;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut socket_ready = false;
+    while Instant::now() < deadline {
+        if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            socket_ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if !socket_ready {
+        drop(agent.kill());
+        let out = agent.wait_with_output().ok();
+        let stderr = out
+            .as_ref()
+            .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+            .unwrap_or_default();
+        bail!(
+            "diagnostic sshenc-agent did not bind {} in time; agent stderr:\n{stderr}",
+            socket.display()
+        );
+    }
+
+    let keygen_out = env
         .sshenc_cmd()?
         .args([
             "keygen",
@@ -749,48 +809,24 @@ fn init_named_enclave_key(env: &SshencEnv, label: &str) -> Result<String> {
         .stderr(Stdio::piped())
         .output()
         .context("spawn sshenc keygen")?;
-    if !output.status.success() {
-        bail!(
-            "sshenc keygen --label {label} failed: {}\nstderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    try_export_pub(env, label)?
-        .ok_or_else(|| anyhow!("keygen {label} succeeded but export-pub found nothing"))
-}
 
-fn init_shared_enclave_key(env: &SshencEnv) -> Result<String> {
-    // Fast path: key already exists from a prior run — just export its pubkey.
-    if let Some(line) = try_export_pub(env, SHARED_ENCLAVE_LABEL)? {
-        return Ok(line);
-    }
-    // Slow path: generate once. On macOS this is the step that can prompt
-    // the user (for the keychain wrapping-key entry), and it will prompt
-    // zero times on subsequent runs because we reuse the same label+dir.
-    let output = env
-        .sshenc_cmd()?
-        .args([
-            "keygen",
-            "--label",
-            SHARED_ENCLAVE_LABEL,
-            "--auth-policy",
-            "none",
-            "--no-pub-file",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("spawn sshenc keygen")?;
-    if !output.status.success() {
+    drop(agent.kill());
+    let agent_out = agent
+        .wait_with_output()
+        .context("read diagnostic agent output")?;
+    drop(fs::remove_file(&socket));
+
+    if !keygen_out.status.success() {
         bail!(
-            "sshenc keygen --label {SHARED_ENCLAVE_LABEL} failed: {}\nstderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+            "sshenc keygen --label {label} failed: {}\nkeygen stdout: {}\nkeygen stderr: {}\nagent stdout: {}\nagent stderr: {}",
+            keygen_out.status,
+            String::from_utf8_lossy(&keygen_out.stdout),
+            String::from_utf8_lossy(&keygen_out.stderr),
+            String::from_utf8_lossy(&agent_out.stdout),
+            String::from_utf8_lossy(&agent_out.stderr),
         );
     }
-    try_export_pub(env, SHARED_ENCLAVE_LABEL)?
-        .ok_or_else(|| anyhow!("keygen succeeded but export-pub found nothing"))
+    Ok(())
 }
 
 /// Return `Ok(Some(line))` if `sshenc export-pub <label>` succeeds with a

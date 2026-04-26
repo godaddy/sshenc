@@ -242,6 +242,10 @@ path = "tests/ssh_multiplex_and_addkeys.rs"
 name = "git_verify_pull_show_sig"
 path = "tests/git_verify_pull_show_sig.rs"
 
+[[test]]
+name = "agent_protocol_and_lifecycle"
+path = "tests/agent_protocol_and_lifecycle.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

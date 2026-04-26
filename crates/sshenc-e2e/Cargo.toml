@@ -238,6 +238,10 @@ path = "tests/scaling_edges.rs"
 name = "ssh_multiplex_and_addkeys"
 path = "tests/ssh_multiplex_and_addkeys.rs"
 
+[[test]]
+name = "git_verify_pull_show_sig"
+path = "tests/git_verify_pull_show_sig.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

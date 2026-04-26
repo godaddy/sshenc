@@ -812,18 +812,17 @@ fn try_export_pub(env: &SshencEnv, label: &str) -> Result<Option<String>> {
         return Ok(if line.is_empty() { None } else { Some(line) });
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // The CLI does not expose a stable "not found" exit code; fall back to
-    // substring detection. Any unrelated error surfaces up the stack.
-    if stderr.contains("not found")
-        || stderr.contains("does not exist")
-        || stderr.contains("no key")
-    {
-        return Ok(None);
-    }
-    // Treat as "not present" if the keys dir is empty or the underlying
-    // backend reports no such label; this matches what happens on a clean
-    // first run before the shared key exists.
-    if stderr.contains("KeyNotFound") || stderr.contains("label") {
+    // The CLI does not expose a stable "not found" exit code; fall
+    // back to *narrow* substring detection on the canonical error
+    // strings the backend emits when a label genuinely doesn't
+    // exist. Any unrelated error (agent unreachable, FS perms,
+    // garbage meta, etc.) surfaces up the stack so the caller
+    // sees the real cause instead of silently treating it as
+    // "key absent" and trying to keygen — which would then fail
+    // with "agent refused generate for <label>" if the key
+    // actually existed (the e2e flake we observed in
+    // sshenc PR #89's first run).
+    if stderr.contains("key not found") || stderr.contains("KeyNotFound") {
         return Ok(None);
     }
     bail!(

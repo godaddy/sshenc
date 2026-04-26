@@ -178,6 +178,10 @@ path = "tests/ssh_port_forwarding.rs"
 name = "gitenc_advanced_ops"
 path = "tests/gitenc_advanced_ops.rs"
 
+[[test]]
+name = "y_variants"
+path = "tests/y_variants.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

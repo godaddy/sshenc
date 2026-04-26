@@ -108,7 +108,8 @@ fn keygen_print_pub_emits_openssh_line() {
     if skip_unless_key_creation_cheap("keygen_print_pub_emits_openssh_line") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     let label = "e2e-print-pub";
     drop(run(env
         .sshenc_cmd()
@@ -149,7 +150,8 @@ fn keygen_json_output_is_valid_keyinfo() {
     if skip_unless_key_creation_cheap("keygen_json_output_is_valid_keyinfo") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     let label = "e2e-json-keygen";
     drop(run(env
         .sshenc_cmd()
@@ -203,7 +205,8 @@ fn keygen_write_pub_custom_path() {
     if skip_unless_key_creation_cheap("keygen_write_pub_custom_path") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     let label = "e2e-custom-pub";
     let custom_dir = env.home().join("pubs");
     let custom_path = custom_dir.join("the-key.pub");
@@ -608,7 +611,8 @@ fn delete_multi_label_in_one_invocation() {
     if skip_unless_key_creation_cheap("delete_multi_label_in_one_invocation") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
+    env.start_agent().expect("start agent");
     let labels = ["e2e-multi-a", "e2e-multi-b"];
 
     for label in &labels {

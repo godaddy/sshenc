@@ -130,6 +130,10 @@ path = "tests/gitenc_extras.rs"
 name = "keygen_up_and_agent_labels"
 path = "tests/keygen_up_and_agent_labels.rs"
 
+[[test]]
+name = "multi_key_scaling"
+path = "tests/multi_key_scaling.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

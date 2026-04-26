@@ -226,6 +226,10 @@ path = "tests/ssh_config_interactions.rs"
 name = "cli_version_help"
 path = "tests/cli_version_help.rs"
 
+[[test]]
+name = "git_protocol_variants"
+path = "tests/git_protocol_variants.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

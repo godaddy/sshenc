@@ -186,6 +186,10 @@ path = "tests/y_variants.rs"
 name = "cross_binary_and_migration"
 path = "tests/cross_binary_and_migration.rs"
 
+[[test]]
+name = "output_stability_and_shell_tools"
+path = "tests/output_stability_and_shell_tools.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

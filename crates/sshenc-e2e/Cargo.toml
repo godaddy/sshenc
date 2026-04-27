@@ -250,6 +250,10 @@ path = "tests/agent_protocol_and_lifecycle.rs"
 name = "gitenc_env_corners"
 path = "tests/gitenc_env_corners.rs"
 
+[[test]]
+name = "ssh_client_feats"
+path = "tests/ssh_client_feats.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

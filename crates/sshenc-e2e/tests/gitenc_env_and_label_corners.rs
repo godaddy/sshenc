@@ -1,8 +1,8 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Round-7 corners — small contracts none of the 63 existing
-//! test files pinned:
+//! Gitenc env-var, signing-opt-out, label-validation, and
+//! key-store corners:
 //!
 //! 1. `GIT_TRACE=1` on a gitenc operation doesn't expose private
 //!    key material in the trace output.

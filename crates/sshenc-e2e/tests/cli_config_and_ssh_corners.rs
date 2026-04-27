@@ -1,8 +1,7 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Round-6 corner cases — small contracts that none of the
-//! 60+ existing test files pinned:
+//! Mixed CLI, config, and SSH-client-option corners:
 //!
 //! 1. `sshenc keygen --no-pub-file --write-pub <path>` —
 //!    conflicting flags. Pin the actual behavior so a future
@@ -11,8 +10,8 @@
 //!    trailing comma, spaces around delimiters.
 //! 3. `git switch` after a fresh fetch from an sshenc-mediated
 //!    remote (local op, but exercises the post-fetch ref state).
-//! 4. SSH client options ssh_client_feats didn't cover: `-T`
-//!    (no PTY), `-q` (quiet), and `-c <cipher>` (specific
+//! 4. SSH client options not covered by `ssh_client_feats.rs`:
+//!    `-T` (no PTY), `-q` (quiet), and `-c <cipher>` (specific
 //!    cipher negotiation). Pin that sshenc-ssh forwards each
 //!    cleanly.
 //! 5. `sshenc default <nonexistent-label>` errors cleanly.

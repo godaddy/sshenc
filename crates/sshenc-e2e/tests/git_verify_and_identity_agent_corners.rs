@@ -1,8 +1,8 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Round-8 corners — small contracts none of the 64 existing
-//! test files pinned:
+//! Git signature-verification surfaces and SSH IdentityAgent
+//! corners:
 //!
 //! 1. `git verify-tag <tag>` accepts an sshenc-signed annotated
 //!    tag. Distinct surface from `verify-commit`.

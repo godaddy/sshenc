@@ -1,8 +1,8 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Round-9 corners — small contracts none of the 65 existing
-//! test files pinned:
+//! Git history-rewriting ops with sshenc signing, plus CLI
+//! input-validation error paths:
 //!
 //! 1. `git cherry-pick` of an existing commit produces an
 //!    sshenc-signed commit on the current branch (the

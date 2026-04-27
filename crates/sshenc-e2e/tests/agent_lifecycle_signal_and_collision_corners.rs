@@ -1,13 +1,16 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Four more agent-lifecycle edges:
+//! Agent signal handling, socket-collision, install/uninstall
+//! interaction, and on-disk-state corners. Complements
+//! `signal_handling.rs` (SIGTERM graceful shutdown) and
+//! `corrupted_state.rs` (garbage JSON in meta files).
 //!
-//! 1. **SIGHUP doesn't kill the agent**: signal_handling.rs covers
-//!    SIGTERM (graceful shutdown). SIGHUP isn't a documented
-//!    sshenc-agent reload signal — it should either be ignored
-//!    or cause graceful shutdown, but never abort()/SIGSEGV the
-//!    process. Pin "agent stays alive across SIGHUP".
+//! 1. **SIGHUP doesn't crash the agent**: SIGHUP isn't a
+//!    documented sshenc-agent reload signal — it should either
+//!    be ignored or cause graceful shutdown, but never
+//!    abort()/SIGSEGV the process. Pin "agent stays alive (or
+//!    exits cleanly) across SIGHUP".
 //! 2. **A second sshenc-agent on the same socket path bails
 //!    cleanly**: prepare_socket_path's "socket already in use"
 //!    branch. Rather than silently overwriting the listener, the
@@ -16,10 +19,9 @@
 //!    install/uninstall paths edit ~/.ssh/config; uninstall
 //!    shouldn't crash if a live agent is holding the socket. Test
 //!    that uninstall succeeds even with the agent up.
-//! 4. **Truncated meta file (0 bytes) on disk**: corrupted_state
-//!    covers garbage JSON; truncated-to-empty is a different
-//!    failure mode (e.g. crash mid-fsync) and the agent must
-//!    skip the entry rather than panic when listing.
+//! 4. **Truncated meta file (0 bytes) on disk**: a different
+//!    failure mode from garbage JSON (e.g. crash mid-fsync) — the
+//!    agent must skip the entry rather than panic when listing.
 
 #![cfg(unix)]
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]

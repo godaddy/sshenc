@@ -259,24 +259,24 @@ name = "git_fetch_and_partial_clone"
 path = "tests/git_fetch_and_partial_clone.rs"
 
 [[test]]
-name = "agent_lifecycle_edges_2"
-path = "tests/agent_lifecycle_edges_2.rs"
+name = "agent_lifecycle_signal_and_collision_corners"
+path = "tests/agent_lifecycle_signal_and_collision_corners.rs"
 
 [[test]]
-name = "misc_corners_round_6"
-path = "tests/misc_corners_round_6.rs"
+name = "cli_config_and_ssh_corners"
+path = "tests/cli_config_and_ssh_corners.rs"
 
 [[test]]
-name = "misc_corners_round_7"
-path = "tests/misc_corners_round_7.rs"
+name = "gitenc_env_and_label_corners"
+path = "tests/gitenc_env_and_label_corners.rs"
 
 [[test]]
-name = "misc_corners_round_8"
-path = "tests/misc_corners_round_8.rs"
+name = "git_verify_and_identity_agent_corners"
+path = "tests/git_verify_and_identity_agent_corners.rs"
 
 [[test]]
-name = "misc_corners_round_9"
-path = "tests/misc_corners_round_9.rs"
+name = "git_history_ops_and_validation_corners"
+path = "tests/git_history_ops_and_validation_corners.rs"
 
 [[test]]
 name = "git_signing_amend_and_empty"

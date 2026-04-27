@@ -442,6 +442,18 @@ path = "tests/ssh_config_keepalive_and_qos_directives.rs"
 name = "agent_concurrent_keygen_and_sign"
 path = "tests/agent_concurrent_keygen_and_sign.rs"
 
+[[test]]
+name = "git_signing_message_and_tag_corners"
+path = "tests/git_signing_message_and_tag_corners.rs"
+
+[[test]]
+name = "git_branch_navigation_and_diff_raw"
+path = "tests/git_branch_navigation_and_diff_raw.rs"
+
+[[test]]
+name = "gitenc_overrides_global_signingkey"
+path = "tests/gitenc_overrides_global_signingkey.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

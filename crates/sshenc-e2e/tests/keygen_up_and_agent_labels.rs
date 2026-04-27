@@ -70,8 +70,11 @@ fn keygen_require_user_presence_persists_as_access_policy_any() {
     {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
     drop(shared_enclave_pubkey(&env).expect("warm shared key"));
+    // Pre-spawn the agent to dodge the libenclaveapp daemonize flake on
+    // Linux CI.
+    env.start_agent().expect("start agent");
 
     let label = unique_label("up-required");
     let kg = run(env.sshenc_cmd().expect("sshenc").args([
@@ -179,8 +182,11 @@ fn agent_cli_labels_override_filters_identities() {
     if skip_unless_key_creation_cheap("agent_cli_labels_override_filters_identities") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
     let _shared = shared_enclave_pubkey(&env).expect("shared enclave");
+    // Pre-spawn the agent to dodge the libenclaveapp daemonize flake on
+    // Linux CI.
+    env.start_agent().expect("start agent");
 
     // Mint a second key alongside the shared one so the agent has
     // two identities to choose between. With --labels = SHARED, the

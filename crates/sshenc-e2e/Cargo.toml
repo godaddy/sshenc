@@ -254,6 +254,10 @@ path = "tests/gitenc_env_corners.rs"
 name = "ssh_client_feats"
 path = "tests/ssh_client_feats.rs"
 
+[[test]]
+name = "git_fetch_and_partial_clone"
+path = "tests/git_fetch_and_partial_clone.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

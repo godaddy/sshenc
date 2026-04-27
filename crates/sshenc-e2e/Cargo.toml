@@ -346,6 +346,18 @@ path = "tests/scp_preserve_and_recursive.rs"
 name = "git_tag_and_branch_deletion_on_signed_repo"
 path = "tests/git_tag_and_branch_deletion_on_signed_repo.rs"
 
+[[test]]
+name = "git_pull_rebase_signed"
+path = "tests/git_pull_rebase_signed.rs"
+
+[[test]]
+name = "rsync_archive_and_delete"
+path = "tests/rsync_archive_and_delete.rs"
+
+[[test]]
+name = "export_pub_flag_combos"
+path = "tests/export_pub_flag_combos.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

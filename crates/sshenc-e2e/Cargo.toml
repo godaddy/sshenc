@@ -466,6 +466,14 @@ path = "tests/git_detached_head_commit_signs.rs"
 name = "git_stash_inspection_and_merge_ff_only"
 path = "tests/git_stash_inspection_and_merge_ff_only.rs"
 
+[[test]]
+name = "git_rebase_autosquash_and_revert_merge"
+path = "tests/git_rebase_autosquash_and_revert_merge.rs"
+
+[[test]]
+name = "gitenc_per_repo_signing_opt_out_and_worktree_mgmt"
+path = "tests/gitenc_per_repo_signing_opt_out_and_worktree_mgmt.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

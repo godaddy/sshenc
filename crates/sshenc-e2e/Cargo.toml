@@ -410,6 +410,22 @@ path = "tests/ssh_config_ipv6_literal.rs"
 name = "git_filter_branch_re_signs"
 path = "tests/git_filter_branch_re_signs.rs"
 
+[[test]]
+name = "git_symbolic_ref_pack_refs_and_archive"
+path = "tests/git_symbolic_ref_pack_refs_and_archive.rs"
+
+[[test]]
+name = "git_3way_merge_conflict_signed"
+path = "tests/git_3way_merge_conflict_signed.rs"
+
+[[test]]
+name = "gitenc_gpg_format_openpgp_fallback"
+path = "tests/gitenc_gpg_format_openpgp_fallback.rs"
+
+[[test]]
+name = "cli_label_control_chars"
+path = "tests/cli_label_control_chars.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

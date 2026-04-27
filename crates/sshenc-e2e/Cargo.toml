@@ -338,6 +338,14 @@ path = "tests/gitenc_unborn_head_and_removed_signing_config.rs"
 name = "keys_dir_symlink_handling"
 path = "tests/keys_dir_symlink_handling.rs"
 
+[[test]]
+name = "scp_preserve_and_recursive"
+path = "tests/scp_preserve_and_recursive.rs"
+
+[[test]]
+name = "git_tag_and_branch_deletion_on_signed_repo"
+path = "tests/git_tag_and_branch_deletion_on_signed_repo.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

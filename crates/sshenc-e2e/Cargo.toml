@@ -278,6 +278,18 @@ path = "tests/misc_corners_round_8.rs"
 name = "misc_corners_round_9"
 path = "tests/misc_corners_round_9.rs"
 
+[[test]]
+name = "git_signing_amend_and_empty"
+path = "tests/git_signing_amend_and_empty.rs"
+
+[[test]]
+name = "git_force_lease_and_single_branch"
+path = "tests/git_force_lease_and_single_branch.rs"
+
+[[test]]
+name = "agent_client_abrupt_disconnect"
+path = "tests/agent_client_abrupt_disconnect.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

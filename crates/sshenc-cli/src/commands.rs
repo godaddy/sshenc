@@ -483,7 +483,7 @@ fn restore_windows_state_with(
     Ok(())
 }
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::too_many_arguments)]
 pub fn keygen(
     backend: &dyn KeyBackend,
     label: &str,
@@ -491,6 +491,7 @@ pub fn keygen(
     write_pub: Option<PathBuf>,
     print_pub: bool,
     access_policy: AccessPolicy,
+    presence_mode: enclaveapp_core::types::PresenceMode,
     json: bool,
 ) -> Result<()> {
     let key_label = KeyLabel::new(label)?;
@@ -505,6 +506,7 @@ pub fn keygen(
         label: key_label,
         comment,
         access_policy,
+        presence_mode,
         write_pub_path: write_pub.clone(),
     };
     let info = backend.generate(&opts)?;
@@ -553,10 +555,11 @@ pub fn list(backend: &dyn KeyBackend, json: bool) -> Result<()> {
         );
         println!(
             "  User presence: {}",
-            if key.metadata.requires_user_presence() {
-                "required"
-            } else {
-                "not required"
+            match key.metadata.effective_presence_mode() {
+                enclaveapp_core::types::PresenceMode::Cached => "required (cached)",
+                enclaveapp_core::types::PresenceMode::Strict =>
+                    "required (strict, prompt per sign)",
+                enclaveapp_core::types::PresenceMode::None => "not required",
             }
         );
         println!("  App tag:       {}", key.metadata.app_tag);
@@ -1925,6 +1928,7 @@ mod tests {
             label: KeyLabel::new(label).unwrap(),
             comment,
             access_policy: AccessPolicy::None,
+            presence_mode: sshenc_core::PresenceMode::None,
             write_pub_path: None,
         };
         backend.generate(&opts).unwrap();
@@ -1997,6 +2001,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         );
         assert!(result.is_ok());
@@ -2015,6 +2020,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2034,6 +2040,7 @@ mod tests {
             Some(pub_path.clone()),
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2057,6 +2064,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2074,6 +2082,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2084,6 +2093,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         );
         assert!(result.is_err());
@@ -2104,6 +2114,7 @@ mod tests {
             None,
             false,
             AccessPolicy::Any,
+            sshenc_core::PresenceMode::Strict,
             false,
         )
         .unwrap();
@@ -2122,6 +2133,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             true,
         );
         assert!(result.is_ok());
@@ -2137,6 +2149,7 @@ mod tests {
             None,
             true,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         );
         assert!(result.is_ok());
@@ -2152,6 +2165,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         );
         assert!(result.is_err());
@@ -2178,6 +2192,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2188,6 +2203,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2215,6 +2231,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2225,6 +2242,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2319,6 +2337,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2329,6 +2348,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2339,6 +2359,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2364,6 +2385,7 @@ mod tests {
             Some(pub_path.clone()),
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2387,6 +2409,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2397,6 +2420,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -2407,6 +2431,7 @@ mod tests {
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -3042,6 +3067,7 @@ HKEY_CURRENT_USER\Environment
             None,
             false,
             AccessPolicy::Any,
+            sshenc_core::PresenceMode::Strict,
             false,
         )
         .unwrap();
@@ -3075,6 +3101,7 @@ HKEY_CURRENT_USER\Environment
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -3130,6 +3157,7 @@ HKEY_CURRENT_USER\Environment
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -3140,6 +3168,7 @@ HKEY_CURRENT_USER\Environment
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();
@@ -3150,6 +3179,7 @@ HKEY_CURRENT_USER\Environment
             None,
             false,
             AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
             false,
         )
         .unwrap();

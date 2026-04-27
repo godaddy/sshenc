@@ -127,16 +127,18 @@ fn keygen_require_user_presence_persists_as_access_policy_any() {
         .args(["delete", &label, "-y"])));
 }
 
-/// Without `--require-user-presence` (and no `--auth-policy`), the
-/// metadata records `access_policy: "none"`. Pinned alongside the
-/// positive case so a default flip would surface as a regression.
+/// `--auth-policy none` records `access_policy: "none"` in the
+/// `.meta`. Independent of the new default-flip — this checks the
+/// explicit-no-presence escape hatch keeps working.
 #[test]
 #[ignore = "requires docker"]
-fn keygen_default_persists_as_access_policy_none() {
-    if skip_if_no_docker("keygen_default_persists_as_access_policy_none") {
+fn keygen_explicit_auth_policy_none_persists_as_access_policy_none() {
+    if skip_if_no_docker("keygen_explicit_auth_policy_none_persists_as_access_policy_none") {
         return;
     }
-    if skip_unless_key_creation_cheap("keygen_default_persists_as_access_policy_none") {
+    if skip_unless_key_creation_cheap(
+        "keygen_explicit_auth_policy_none_persists_as_access_policy_none",
+    ) {
         return;
     }
     let env = SshencEnv::new().expect("env");
@@ -160,7 +162,7 @@ fn keygen_default_persists_as_access_policy_none() {
     assert_eq!(
         parsed.get("access_policy").and_then(|v| v.as_str()),
         Some("none"),
-        "expected access_policy=none with default flags; got: {meta}"
+        "expected access_policy=none with --auth-policy none; got: {meta}"
     );
 
     drop(run(env

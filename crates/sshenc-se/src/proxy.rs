@@ -34,12 +34,55 @@
 
 use crate::backend::KeyBackend;
 use enclaveapp_core::metadata;
+use enclaveapp_core::types::PresenceMode;
 use sshenc_agent_proto::client;
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;
 use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyLabel, KeyMetadata};
 use sshenc_core::pubkey::SshPublicKey;
 use std::path::PathBuf;
+
+/// Wire encoding for [`PresenceMode`] in the
+/// `SSH_AGENTC_SSHENC_GENERATE_KEY` extension. Kept in one place so
+/// the agent and the proxy can never disagree on the mapping. See
+/// [`PresenceMode::migration_default`] for the legacy fallback.
+pub fn presence_mode_to_wire(mode: PresenceMode) -> u8 {
+    match mode {
+        PresenceMode::Cached => 0,
+        PresenceMode::Strict => 1,
+        PresenceMode::None => 2,
+    }
+}
+
+pub fn presence_mode_from_wire(byte: u8) -> Option<PresenceMode> {
+    match byte {
+        0 => Some(PresenceMode::Cached),
+        1 => Some(PresenceMode::Strict),
+        2 => Some(PresenceMode::None),
+        _ => None,
+    }
+}
+
+/// Read the `presence_mode` field out of `app_specific`. Returns
+/// `None` if the field is absent or unrecognized; the caller applies
+/// the migration default.
+pub fn presence_mode_from_app_specific(app_specific: &serde_json::Value) -> Option<PresenceMode> {
+    let s = app_specific.get("presence_mode")?.as_str()?;
+    match s {
+        "cached" => Some(PresenceMode::Cached),
+        "strict" => Some(PresenceMode::Strict),
+        "none" => Some(PresenceMode::None),
+        _ => None,
+    }
+}
+
+pub fn presence_mode_to_app_specific_str(mode: PresenceMode) -> &'static str {
+    match mode {
+        PresenceMode::Cached => "cached",
+        PresenceMode::Strict => "strict",
+        PresenceMode::None => "none",
+    }
+}
 
 /// `KeyBackend` that serves reads from `.pub` / `.meta` files and
 /// forwards every write-side op to `sshenc-agent`. Has no code
@@ -138,6 +181,7 @@ impl KeyBackend for AgentProxyBackend {
             opts.label.as_str(),
             opts.comment.as_deref(),
             opts.access_policy.as_ffi_value() as u32,
+            presence_mode_to_wire(opts.presence_mode),
         )
         .ok_or_else(|| {
             Self::agent_refused(
@@ -172,9 +216,10 @@ impl KeyBackend for AgentProxyBackend {
         };
 
         Ok(KeyInfo {
-            metadata: KeyMetadata::new(
+            metadata: KeyMetadata::with_presence_mode(
                 opts.label.clone(),
                 opts.access_policy,
+                Some(opts.presence_mode),
                 opts.comment.clone(),
             ),
             public_key_bytes: public_bytes,
@@ -223,9 +268,15 @@ impl KeyBackend for AgentProxyBackend {
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
         let pub_file_path = self.persisted_pub_file_path(&meta, label);
+        let presence_mode = presence_mode_from_app_specific(&meta.app_specific);
 
         Ok(KeyInfo {
-            metadata: KeyMetadata::new(owned_label, meta.access_policy, comment),
+            metadata: KeyMetadata::with_presence_mode(
+                owned_label,
+                meta.access_policy,
+                presence_mode,
+                comment,
+            ),
             public_key_bytes: public_bytes,
             fingerprint_sha256: fp_sha256,
             fingerprint_md5: fp_md5,

@@ -3,7 +3,7 @@
 
 //! Key domain models and metadata types.
 
-use enclaveapp_core::types::AccessPolicy;
+use enclaveapp_core::types::{AccessPolicy, PresenceMode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
@@ -120,24 +120,55 @@ pub struct KeyMetadata {
     pub algorithm: KeyAlgorithm,
     /// Persisted access policy for signing.
     pub access_policy: AccessPolicy,
+    /// User-presence prompt cadence. `None` means the key signs
+    /// silently; `Cached` batches one prompt per cache-TTL window;
+    /// `Strict` prompts on every signature.
+    ///
+    /// Backwards compatibility: legacy `.meta` files written before
+    /// this field existed deserialize without it. Call
+    /// [`KeyMetadata::effective_presence_mode`] to read the value
+    /// with the legacy migration default applied.
+    #[serde(default)]
+    pub presence_mode: Option<PresenceMode>,
     /// Optional comment for the SSH public key line.
     pub comment: Option<String>,
 }
 
 impl KeyMetadata {
     pub fn new(label: KeyLabel, access_policy: AccessPolicy, comment: Option<String>) -> Self {
+        Self::with_presence_mode(label, access_policy, None, comment)
+    }
+
+    /// Construct metadata with an explicit presence mode. Pass
+    /// `None` for `presence_mode` to leave the field unset; the
+    /// migration default in [`Self::effective_presence_mode`] then
+    /// preserves legacy behaviour.
+    pub fn with_presence_mode(
+        label: KeyLabel,
+        access_policy: AccessPolicy,
+        presence_mode: Option<PresenceMode>,
+        comment: Option<String>,
+    ) -> Self {
         let app_tag = label.app_tag();
         KeyMetadata {
             label,
             app_tag,
             algorithm: KeyAlgorithm::EcdsaP256,
             access_policy,
+            presence_mode,
             comment,
         }
     }
 
+    /// Return the effective `PresenceMode`. If the field is unset
+    /// (legacy `.meta`), apply [`PresenceMode::migration_default`].
+    pub fn effective_presence_mode(&self) -> PresenceMode {
+        self.presence_mode
+            .unwrap_or_else(|| PresenceMode::migration_default(self.access_policy))
+    }
+
     pub fn requires_user_presence(&self) -> bool {
-        self.access_policy != AccessPolicy::None
+        self.effective_presence_mode() != PresenceMode::None
     }
 }
 
@@ -179,6 +210,10 @@ pub struct KeyGenOptions {
     pub label: KeyLabel,
     pub comment: Option<String>,
     pub access_policy: AccessPolicy,
+    /// User-presence prompt cadence. `Cached` (default) batches
+    /// prompts within the wrapping-key cache TTL; `Strict` prompts
+    /// per sign; `None` does not prompt.
+    pub presence_mode: PresenceMode,
     /// If set, write the public key to this path.
     pub write_pub_path: Option<PathBuf>,
 }

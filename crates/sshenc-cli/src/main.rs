@@ -54,12 +54,24 @@ enum Commands {
         #[arg(long)]
         print_pub: bool,
 
-        /// Require user presence (Touch ID or password) for each signing operation.
+        /// Require a user-presence prompt for *every* signature, instead
+        /// of the default cached cadence (one prompt per cache-TTL window).
+        /// Mutually exclusive with `--no-user-presence`.
         #[arg(long)]
+        strict: bool,
+
+        /// Generate a key with no user-presence requirement at all. Signs
+        /// silently. Mutually exclusive with `--strict`.
+        #[arg(long, conflicts_with = "strict")]
+        no_user_presence: bool,
+
+        /// Deprecated alias for `--strict`. Kept for backwards compatibility
+        /// with scripts written against the pre-default-presence build.
+        #[arg(long, hide = true)]
         require_user_presence: bool,
 
         /// Authentication policy: none, any (Touch ID or password), biometric (Touch ID only), password.
-        /// Overrides --require-user-presence if both are specified.
+        /// Overrides --strict / --no-user-presence if both are specified.
         #[arg(long, value_parser = ["none", "any", "biometric", "password"])]
         auth_policy: Option<String>,
 
@@ -298,6 +310,8 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
             write_pub,
             no_pub_file,
             print_pub,
+            strict,
+            no_user_presence,
             require_user_presence,
             auth_policy,
             json,
@@ -345,8 +359,18 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 }
             }
             let comment = comment.or_else(default_comment);
-            let access_policy =
-                selected_access_policy(auth_policy.as_deref(), require_user_presence)?;
+            if require_user_presence {
+                eprintln!(
+                    "warning: --require-user-presence is deprecated; use --strict instead. \
+                     Treating it as --strict for this run."
+                );
+            }
+            let strict_effective = strict || require_user_presence;
+            let (access_policy, presence_mode) = selected_access_and_presence(
+                auth_policy.as_deref(),
+                strict_effective,
+                no_user_presence,
+            )?;
             backup::run_with_backup(pub_path.as_deref(), paired_private_path.as_deref(), || {
                 commands::keygen(
                     backend,
@@ -355,6 +379,7 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                     pub_path.clone(),
                     print_pub,
                     access_policy,
+                    presence_mode,
                     json,
                 )
             })
@@ -428,25 +453,43 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
     }
 }
 
-fn selected_access_policy(
+fn selected_access_and_presence(
     auth_policy: Option<&str>,
-    require_user_presence: bool,
-) -> Result<AccessPolicy> {
+    strict: bool,
+    no_user_presence: bool,
+) -> Result<(AccessPolicy, enclaveapp_core::types::PresenceMode)> {
+    use enclaveapp_core::types::PresenceMode;
+
+    // Explicit --auth-policy wins over the strict / no-presence flags.
+    // The presence mode is then derived from whether the chosen access
+    // policy needs a prompt at all and which cadence the caller asked
+    // for via `--strict`.
     if let Some(policy) = auth_policy {
-        return match policy {
-            "any" => Ok(AccessPolicy::Any),
-            "biometric" => Ok(AccessPolicy::BiometricOnly),
-            "password" => Ok(AccessPolicy::PasswordOnly),
-            "none" => Ok(AccessPolicy::None),
+        let access = match policy {
+            "any" => AccessPolicy::Any,
+            "biometric" => AccessPolicy::BiometricOnly,
+            "password" => AccessPolicy::PasswordOnly,
+            "none" => AccessPolicy::None,
             other => anyhow::bail!("unknown access policy: {other}"),
         };
+        let mode = match (access, strict) {
+            (AccessPolicy::None, _) => PresenceMode::None,
+            (_, true) => PresenceMode::Strict,
+            (_, false) => PresenceMode::Cached,
+        };
+        return Ok((access, mode));
     }
 
-    Ok(if require_user_presence {
-        AccessPolicy::Any
-    } else {
-        AccessPolicy::None
-    })
+    // No explicit `--auth-policy`. Default is user-presence required
+    // with the `Cached` cadence; `--strict` keeps the policy but
+    // prompts per-sign; `--no-user-presence` opts out entirely.
+    if no_user_presence {
+        return Ok((AccessPolicy::None, PresenceMode::None));
+    }
+    if strict {
+        return Ok((AccessPolicy::Any, PresenceMode::Strict));
+    }
+    Ok((AccessPolicy::Any, PresenceMode::Cached))
 }
 
 /// Generate a default SSH key comment: user@hostname (same as ssh-keygen).

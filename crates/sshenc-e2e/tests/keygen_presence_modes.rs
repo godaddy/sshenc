@@ -95,13 +95,12 @@ fn keygen_default_writes_cached_user_presence() {
     env.start_agent().expect("start agent");
 
     let label = unique_label("presence-default");
-    let kg = run(env.sshenc_cmd().expect("sshenc").args([
-        "keygen",
-        "--label",
-        &label,
-        "--no-pub-file",
-    ]))
-    .expect("sshenc keygen");
+    let kg =
+        run(env
+            .sshenc_cmd()
+            .expect("sshenc")
+            .args(["keygen", "--label", &label, "--no-pub-file"]))
+        .expect("sshenc keygen");
     assert!(kg.succeeded(), "keygen failed: {}", kg.stderr);
 
     let meta = read_meta(&label);

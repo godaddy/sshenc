@@ -258,6 +258,10 @@ path = "tests/ssh_client_feats.rs"
 name = "git_fetch_and_partial_clone"
 path = "tests/git_fetch_and_partial_clone.rs"
 
+[[test]]
+name = "agent_lifecycle_edges_2"
+path = "tests/agent_lifecycle_edges_2.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

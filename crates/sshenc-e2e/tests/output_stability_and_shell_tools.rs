@@ -377,3 +377,114 @@ fn ssh_copy_id_appends_sshenc_pubkey_to_authorized_keys() {
         .expect("sshenc cmd")
         .args(["delete", &label, "-y"])));
 }
+
+/// `ssh-copy-id -n -i <path>/<label>.pub` (dry-run mode) prints
+/// what it *would* install but doesn't actually mutate the
+/// remote's authorized_keys.
+#[test]
+#[ignore = "requires docker"]
+fn ssh_copy_id_dry_run_does_not_mutate_remote() {
+    if skip_if_no_docker("ssh_copy_id_dry_run_does_not_mutate_remote") {
+        return;
+    }
+    if !sshenc_e2e::extended_enabled() && !sshenc_e2e::software_mode() {
+        eprintln!("skip: needs to mint a second key");
+        return;
+    }
+    let mut env = SshencEnv::new().expect("env");
+    let enclave = shared_enclave_pubkey(&env).expect("shared enclave");
+    env.start_agent().expect("start agent");
+
+    let container = SshdContainer::start(&[&enclave]).expect("sshd");
+
+    // Mint a second key for dry-run.
+    let label = format!(
+        "copy-id-dryrun-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    );
+    let kg = run(env.sshenc_cmd().expect("sshenc cmd").args([
+        "keygen",
+        "--label",
+        &label,
+        "--auth-policy",
+        "none",
+        "--no-pub-file",
+    ]))
+    .expect("keygen second");
+    assert!(kg.succeeded(), "keygen: {}", kg.stderr);
+    let second_pub_path = env.ssh_dir().join(format!("{label}.pub"));
+    let exported = run(env
+        .sshenc_cmd()
+        .expect("sshenc cmd")
+        .args(["export-pub", &label]))
+    .expect("export-pub");
+    assert!(exported.succeeded(), "export-pub: {}", exported.stderr);
+    std::fs::create_dir_all(env.ssh_dir()).expect("mkdir ssh dir");
+    std::fs::write(&second_pub_path, &exported.stdout).expect("write second pub");
+
+    // Snapshot remote authorized_keys before the dry-run.
+    let before = run(env
+        .ssh_cmd(&container)
+        .arg("-o")
+        .arg(format!("IdentityAgent={}", env.socket_path().display()))
+        .arg("sshtest@127.0.0.1")
+        .arg("cat /home/sshtest/.ssh/authorized_keys"))
+    .expect("cat before");
+    assert!(before.succeeded(), "cat before: {}", before.stderr);
+
+    // Run ssh-copy-id with -n (dry-run).
+    let mut cmd = env.scrubbed_command("ssh-copy-id");
+    cmd.arg("-n")
+        .arg("-f")
+        .arg("-i")
+        .arg(&second_pub_path)
+        .arg("-p")
+        .arg(container.host_port.to_string())
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!(
+            "UserKnownHostsFile={}",
+            env.known_hosts().display()
+        ))
+        .arg("-o")
+        .arg(format!("IdentityAgent={}", env.socket_path().display()))
+        .arg("-o")
+        .arg("PreferredAuthentications=publickey")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("sshtest@127.0.0.1");
+    let outcome = run(&mut cmd).expect("ssh-copy-id -n");
+    assert!(
+        outcome.succeeded(),
+        "ssh-copy-id -n failed; stdout:\n{}\nstderr:\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+
+    // The remote authorized_keys must be unchanged.
+    let after = run(env
+        .ssh_cmd(&container)
+        .arg("-o")
+        .arg(format!("IdentityAgent={}", env.socket_path().display()))
+        .arg("sshtest@127.0.0.1")
+        .arg("cat /home/sshtest/.ssh/authorized_keys"))
+    .expect("cat after");
+    assert!(after.succeeded(), "cat after: {}", after.stderr);
+    assert_eq!(
+        before.stdout, after.stdout,
+        "remote authorized_keys was modified despite ssh-copy-id -n (dry-run); \
+         before:\n{}\nafter:\n{}",
+        before.stdout, after.stdout
+    );
+
+    // Cleanup.
+    drop(run(env
+        .sshenc_cmd()
+        .expect("sshenc cmd")
+        .args(["delete", &label, "-y"])));
+}

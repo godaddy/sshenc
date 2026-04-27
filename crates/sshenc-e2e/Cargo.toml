@@ -274,6 +274,10 @@ path = "tests/misc_corners_round_7.rs"
 name = "misc_corners_round_8"
 path = "tests/misc_corners_round_8.rs"
 
+[[test]]
+name = "misc_corners_round_9"
+path = "tests/misc_corners_round_9.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

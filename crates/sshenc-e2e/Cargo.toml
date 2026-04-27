@@ -322,6 +322,14 @@ path = "tests/git_commit_message_variants_and_notes.rs"
 name = "git_mv_and_rm_signed_commits"
 path = "tests/git_mv_and_rm_signed_commits.rs"
 
+[[test]]
+name = "git_bisect_and_restore_on_signed_chain"
+path = "tests/git_bisect_and_restore_on_signed_chain.rs"
+
+[[test]]
+name = "ssh_config_host_negation_and_multipattern"
+path = "tests/ssh_config_host_negation_and_multipattern.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

@@ -318,6 +318,10 @@ path = "tests/git_hooks_with_signing.rs"
 name = "git_commit_message_variants_and_notes"
 path = "tests/git_commit_message_variants_and_notes.rs"
 
+[[test]]
+name = "git_mv_and_rm_signed_commits"
+path = "tests/git_mv_and_rm_signed_commits.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

@@ -8,7 +8,7 @@
 //! refactor accidentally drops args, mangles arg ordering, or
 //! changes what gets exec'd, these workflows silently break.
 //!
-//! Two scenarios:
+//! Three scenarios:
 //! - `find-principals`: after a `sshenc -Y sign`, asking sshenc
 //!   to look up which principal in `allowed_signers` produced
 //!   that signature returns the right name.
@@ -16,6 +16,10 @@
 //!   a principal lookup (useful when trust is established by
 //!   other means, e.g. signature attached to a known-good
 //!   payload).
+//! - `match-principals`: filters the allowed_signers file by a
+//!   principal pattern, returning the matching lines. Pin the
+//!   forwarding for this op, since callers may use it to
+//!   confirm a key/principal pair is authorized before signing.
 
 #![cfg(unix)]
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
@@ -156,6 +160,58 @@ fn y_check_novalidate_verifies_well_formed_signature() {
     assert!(
         !bad_status,
         "check-novalidate accepted tampered payload — verification didn't run"
+    );
+}
+
+/// `sshenc -Y match-principals -f <allowed_signers> -I <principal>`
+/// returns the matching principal line(s) and exits 0 when the
+/// principal exists in the file.
+#[test]
+#[ignore = "requires docker"]
+fn y_match_principals_filters_signers() {
+    if skip_if_no_docker("y_match_principals_filters_signers") {
+        return;
+    }
+    let (env, _data, allowed) = setup_signed("git");
+
+    let out = run(env
+        .sshenc_cmd()
+        .expect("sshenc cmd")
+        .arg("-Y")
+        .arg("match-principals")
+        .arg("-f")
+        .arg(&allowed)
+        .arg("-I")
+        .arg(PRINCIPAL))
+    .expect("sshenc -Y match-principals");
+    assert!(
+        out.succeeded(),
+        "sshenc -Y match-principals failed; stdout:\n{}\nstderr:\n{}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains(PRINCIPAL),
+        "expected principal '{PRINCIPAL}' in match-principals output; got:\n{}",
+        out.stdout
+    );
+
+    // A principal that isn't in allowed_signers must fail.
+    let miss = run(env
+        .sshenc_cmd()
+        .expect("sshenc cmd")
+        .arg("-Y")
+        .arg("match-principals")
+        .arg("-f")
+        .arg(&allowed)
+        .arg("-I")
+        .arg("not-in-file@example.test"))
+    .expect("sshenc -Y match-principals miss");
+    assert!(
+        !miss.succeeded(),
+        "match-principals on a non-matching principal should fail; stdout:\n{}\nstderr:\n{}",
+        miss.stdout,
+        miss.stderr
     );
 }
 

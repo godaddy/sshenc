@@ -426,6 +426,22 @@ path = "tests/gitenc_gpg_format_openpgp_fallback.rs"
 name = "cli_label_control_chars"
 path = "tests/cli_label_control_chars.rs"
 
+[[test]]
+name = "git_plumbing_and_large_file_signing"
+path = "tests/git_plumbing_and_large_file_signing.rs"
+
+[[test]]
+name = "ssh_keygen_known_hosts_find_and_remove"
+path = "tests/ssh_keygen_known_hosts_find_and_remove.rs"
+
+[[test]]
+name = "ssh_config_keepalive_and_qos_directives"
+path = "tests/ssh_config_keepalive_and_qos_directives.rs"
+
+[[test]]
+name = "agent_concurrent_keygen_and_sign"
+path = "tests/agent_concurrent_keygen_and_sign.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

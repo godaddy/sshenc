@@ -378,6 +378,22 @@ path = "tests/git_ref_ops_with_signing.rs"
 name = "cli_first_run_and_keys_dir_robustness"
 path = "tests/cli_first_run_and_keys_dir_robustness.rs"
 
+[[test]]
+name = "git_show_signature_and_gc"
+path = "tests/git_show_signature_and_gc.rs"
+
+[[test]]
+name = "agent_protocol_truncated_frame_and_rsa_flag"
+path = "tests/agent_protocol_truncated_frame_and_rsa_flag.rs"
+
+[[test]]
+name = "commit_empty_stdin_and_y_sign_long_namespace"
+path = "tests/commit_empty_stdin_and_y_sign_long_namespace.rs"
+
+[[test]]
+name = "ssh_config_include_directive"
+path = "tests/ssh_config_include_directive.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

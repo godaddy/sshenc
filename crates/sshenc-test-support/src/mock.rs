@@ -184,6 +184,7 @@ mod tests {
             label: KeyLabel::new(label).unwrap(),
             comment: Some("test".into()),
             access_policy: AccessPolicy::None,
+            presence_mode: sshenc_core::PresenceMode::None,
             write_pub_path: None,
         }
     }
@@ -265,6 +266,7 @@ mod tests {
             label: KeyLabel::new("no-comment").unwrap(),
             comment: None,
             access_policy: AccessPolicy::None,
+            presence_mode: sshenc_core::PresenceMode::None,
             write_pub_path: None,
         };
         let info = backend.generate(&opts).unwrap();
@@ -284,6 +286,7 @@ mod tests {
             label: KeyLabel::new("pub-write-key").unwrap(),
             comment: Some("test@host".into()),
             access_policy: AccessPolicy::None,
+            presence_mode: sshenc_core::PresenceMode::None,
             write_pub_path: Some(pub_path.clone()),
         };
         let info = backend.generate(&opts).unwrap();

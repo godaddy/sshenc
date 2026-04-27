@@ -94,6 +94,12 @@ pub enum AgentRequest {
         /// `AccessPolicy::as_ffi_value()` — 0 None, 1 Any, 2
         /// BiometricOnly, 3 PasswordOnly. Any other value is rejected.
         access_policy: u32,
+        /// `PresenceMode` discriminant — 0 Cached, 1 Strict, 2 None.
+        /// Optional on the wire for backwards compatibility: when the
+        /// payload ends after `access_policy`, the agent applies
+        /// [`PresenceMode::migration_default`] based on the access
+        /// policy. Newer clients always send this byte.
+        presence_mode: Option<u8>,
     },
     /// `SSH_AGENTC_SSHENC_RENAME_KEY` (sshenc extension): relabel an
     /// existing key on disk and in the keychain. Used by `sshenc
@@ -169,10 +175,16 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
             let label = wire::read_string(&mut cursor)?;
             let comment = wire::read_string(&mut cursor)?;
             let access_policy = wire::read_u32(&mut cursor)?;
+            // `presence_mode` is appended by newer clients. Old clients
+            // (pre-presence-mode) end the payload at `access_policy`.
+            // A legacy payload deserializes here with `presence_mode =
+            // None`; the server applies the migration default.
+            let presence_mode = wire::read_u8(&mut cursor).ok();
             Ok(AgentRequest::GenerateKey {
                 label,
                 comment,
                 access_policy,
+                presence_mode,
             })
         }
         SSH_AGENTC_SSHENC_RENAME_KEY => {
@@ -244,11 +256,15 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
             label,
             comment,
             access_policy,
+            presence_mode,
         } => {
             let mut buf = vec![SSH_AGENTC_SSHENC_GENERATE_KEY];
             wire::write_string(&mut buf, label);
             wire::write_string(&mut buf, comment);
             buf.extend_from_slice(&access_policy.to_be_bytes());
+            if let Some(mode) = presence_mode {
+                buf.push(*mode);
+            }
             buf
         }
         AgentRequest::RenameKey {
@@ -725,6 +741,7 @@ mod tests {
             label: b"gen-test".to_vec(),
             comment: b"jay@box".to_vec(),
             access_policy: 0,
+            presence_mode: Some(0),
         };
         let payload = serialize_request(&original);
         assert_eq!(payload[0], SSH_AGENTC_SSHENC_GENERATE_KEY);
@@ -734,10 +751,12 @@ mod tests {
                 label,
                 comment,
                 access_policy,
+                presence_mode,
             } => {
                 assert_eq!(label, b"gen-test");
                 assert_eq!(comment, b"jay@box");
                 assert_eq!(access_policy, 0);
+                assert_eq!(presence_mode, Some(0));
             }
             other => panic!("expected GenerateKey, got {other:?}"),
         }
@@ -750,6 +769,7 @@ mod tests {
                 label: b"pol-test".to_vec(),
                 comment: Vec::new(),
                 access_policy: policy,
+                presence_mode: Some(0),
             };
             let parsed = parse_request(&serialize_request(&original)).unwrap();
             match parsed {
@@ -767,10 +787,38 @@ mod tests {
             label: b"empty-comment".to_vec(),
             comment: Vec::new(),
             access_policy: 2,
+            presence_mode: Some(1),
         };
         let parsed = parse_request(&serialize_request(&original)).unwrap();
         match parsed {
             AgentRequest::GenerateKey { comment, .. } => assert!(comment.is_empty()),
+            other => panic!("expected GenerateKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_generate_key_payload_without_presence_mode_decodes() {
+        // Hand-serialize a payload missing the trailing presence_mode
+        // byte (older clients write only label, comment, access_policy).
+        // The parser must accept it and yield `presence_mode = None`,
+        // letting the agent apply the migration default.
+        let mut payload = vec![SSH_AGENTC_SSHENC_GENERATE_KEY];
+        wire::write_string(&mut payload, b"legacy");
+        wire::write_string(&mut payload, b"comment");
+        payload.extend_from_slice(&1_u32.to_be_bytes());
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::GenerateKey {
+                label,
+                comment,
+                access_policy,
+                presence_mode,
+            } => {
+                assert_eq!(label, b"legacy");
+                assert_eq!(comment, b"comment");
+                assert_eq!(access_policy, 1);
+                assert!(presence_mode.is_none());
+            }
             other => panic!("expected GenerateKey, got {other:?}"),
         }
     }

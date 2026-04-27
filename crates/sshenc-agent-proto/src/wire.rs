@@ -78,6 +78,17 @@ pub fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {
         .map_err(|e| Error::AgentProtocol(format!("failed to read u32: {e}")))
 }
 
+/// Read a single byte from a cursor. Returns `Err` if the cursor is at
+/// EOF — used by extensions that append optional trailing bytes.
+pub fn read_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8> {
+    use std::io::Read;
+    let mut buf = [0_u8; 1];
+    cursor
+        .read_exact(&mut buf)
+        .map_err(|e| Error::AgentProtocol(format!("failed to read u8: {e}")))?;
+    Ok(buf[0])
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

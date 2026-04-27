@@ -12,7 +12,7 @@ use enclaveapp_app_storage::{
     AccessPolicy, AppSigningBackend, BackendKind, EnclaveKeyManager, EnclaveSigner, StorageConfig,
 };
 use enclaveapp_core::metadata;
-use enclaveapp_core::types::KeyType;
+use enclaveapp_core::types::{KeyType, PresenceMode};
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;
 use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyLabel, KeyMetadata};
@@ -55,6 +55,11 @@ pub struct SshencBackend {
     /// backend when `SSHENC_FORCE_SOFTWARE` is set and the
     /// `force-software` feature is compiled in.
     backend: BackendImpl,
+    /// Wrapping-key cache TTL, plumbed through to
+    /// [`EnclaveSigner::sign_with_presence`] so the macOS LAContext
+    /// reuse window stays aligned with the wrapping-key cache. `0`
+    /// disables caching at every layer (per-sign prompts).
+    cache_ttl: std::time::Duration,
 }
 
 /// Resolve the effective wrapping-key cache TTL, honoring the
@@ -154,6 +159,7 @@ impl SshencBackend {
                     pub_dir,
                     keys_dir,
                     backend: BackendImpl::Software(signer),
+                    cache_ttl,
                 });
             }
         }
@@ -173,6 +179,7 @@ impl SshencBackend {
             pub_dir,
             keys_dir,
             backend: BackendImpl::Platform(backend),
+            cache_ttl,
         })
     }
 
@@ -261,7 +268,8 @@ impl KeyBackend for SshencBackend {
             .generate(label_str, KeyType::Signing, opts.access_policy)
             .map_err(|e| map_err("generate", e))?;
 
-        // Save app-specific metadata (comment, git_name, git_email)
+        // Save app-specific metadata (comment, git_name, git_email,
+        // presence_mode)
         let mut meta = compat::load_sshenc_meta(&self.keys_dir, label_str)
             .map_err(|e| map_err("load_meta", e))?;
         if let Some(ref comment) = opts.comment {
@@ -274,6 +282,10 @@ impl KeyBackend for SshencBackend {
             ),
             None => meta.set_app_field("pub_file_path", serde_json::Value::Null),
         }
+        meta.set_app_field(
+            "presence_mode",
+            crate::proxy::presence_mode_to_app_specific_str(opts.presence_mode),
+        );
         metadata::save_meta(&self.keys_dir, label_str, &meta)
             .map_err(|e| map_err("save_meta", e))?;
 
@@ -293,9 +305,10 @@ impl KeyBackend for SshencBackend {
         };
 
         Ok(KeyInfo {
-            metadata: KeyMetadata::new(
+            metadata: KeyMetadata::with_presence_mode(
                 opts.label.clone(),
                 opts.access_policy,
+                Some(opts.presence_mode),
                 opts.comment.clone(),
             ),
             public_key_bytes: public_bytes,
@@ -339,9 +352,15 @@ impl KeyBackend for SshencBackend {
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
         let pub_file = self.persisted_pub_file_path(&meta, label);
+        let presence_mode = crate::proxy::presence_mode_from_app_specific(&meta.app_specific);
 
         Ok(KeyInfo {
-            metadata: KeyMetadata::new(KeyLabel::new(label)?, meta.access_policy, comment),
+            metadata: KeyMetadata::with_presence_mode(
+                KeyLabel::new(label)?,
+                meta.access_policy,
+                presence_mode,
+                comment,
+            ),
             public_key_bytes: public_bytes,
             fingerprint_sha256: fp_sha256,
             fingerprint_md5: fp_md5,
@@ -369,6 +388,28 @@ impl KeyBackend for SshencBackend {
         self.signer()
             .sign(label, data)
             .map_err(|e| map_err("sign", e))
+    }
+
+    fn sign_with_presence(
+        &self,
+        label: &str,
+        data: &[u8],
+        mode: PresenceMode,
+        cache_ttl_secs: u64,
+    ) -> Result<Vec<u8>> {
+        drop(KeyLabel::new(label)?);
+        // Prefer the caller-supplied TTL when non-zero, otherwise
+        // fall back to the backend's own configured TTL. The agent
+        // always passes its config-derived TTL, but other callers
+        // (CLI subcommands signing locally) pick up the default.
+        let effective_ttl = if cache_ttl_secs == 0 {
+            self.cache_ttl.as_secs()
+        } else {
+            cache_ttl_secs
+        };
+        self.signer()
+            .sign_with_presence(label, data, mode, effective_ttl)
+            .map_err(|e| map_err("sign_with_presence", e))
     }
 
     fn is_available(&self) -> bool {
@@ -411,6 +452,7 @@ mod tests {
             pub_dir,
             keys_dir: sshenc_keys_dir(),
             backend: BackendImpl::Platform(backend),
+            cache_ttl: std::time::Duration::ZERO,
         })
     }
 

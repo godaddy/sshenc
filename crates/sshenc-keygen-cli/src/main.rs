@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use clap::Parser;
+use enclaveapp_core::types::PresenceMode;
 use sshenc_core::backup;
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
@@ -40,8 +41,20 @@ struct Cli {
     #[arg(long)]
     no_pub_file: bool,
 
-    /// Require user presence (Touch ID / password) for each signing operation.
+    /// Require a user-presence prompt for *every* signature, instead
+    /// of the default cached cadence (one prompt per cache-TTL window).
+    /// Mutually exclusive with `--no-user-presence`.
     #[arg(long)]
+    strict: bool,
+
+    /// Generate a key with no user-presence requirement at all. Signs
+    /// silently. Mutually exclusive with `--strict`.
+    #[arg(long, conflicts_with = "strict")]
+    no_user_presence: bool,
+
+    /// Deprecated alias for `--strict`. Kept for backwards compatibility
+    /// with scripts written against the pre-default-presence build.
+    #[arg(long, hide = true)]
     require_user_presence: bool,
 
     /// Suppress public key output to stdout.
@@ -107,10 +120,22 @@ fn main() -> Result<()> {
 
     let comment = cli.comment.or_else(default_comment);
 
-    let access_policy = if cli.require_user_presence {
-        AccessPolicy::Any
+    if cli.require_user_presence {
+        eprintln!(
+            "warning: --require-user-presence is deprecated; use --strict instead. \
+             Treating it as --strict for this run."
+        );
+    }
+    let strict = cli.strict || cli.require_user_presence;
+
+    // Default policy: `Cached` user presence with `AccessPolicy::Any`.
+    // Explicit opt-outs flip the policy in either direction.
+    let (access_policy, presence_mode) = if cli.no_user_presence {
+        (AccessPolicy::None, PresenceMode::None)
+    } else if strict {
+        (AccessPolicy::Any, PresenceMode::Strict)
     } else {
-        AccessPolicy::None
+        (AccessPolicy::Any, PresenceMode::Cached)
     };
 
     let key_label = KeyLabel::new(&cli.label)?;
@@ -118,6 +143,7 @@ fn main() -> Result<()> {
         label: key_label,
         comment,
         access_policy,
+        presence_mode,
         write_pub_path: write_pub.clone(),
     };
 

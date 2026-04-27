@@ -6,6 +6,7 @@
 //! This allows the real Secure Enclave backend to be swapped out with a mock
 //! for testing on non-macOS systems or in CI without hardware access.
 
+use enclaveapp_core::types::PresenceMode;
 use sshenc_core::error::Result;
 use sshenc_core::key::{KeyGenOptions, KeyInfo};
 
@@ -40,6 +41,28 @@ pub trait KeyBackend: Send + Sync {
     /// Sign data using the key identified by label.
     /// Returns the raw signature bytes (DER-encoded ECDSA for the real backend).
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>>;
+
+    /// Sign with explicit user-presence cadence.
+    ///
+    /// `mode` controls whether the platform prompt is batched within
+    /// `cache_ttl_secs` ([`PresenceMode::Cached`]), required per sign
+    /// ([`PresenceMode::Strict`]), or skipped entirely ([`PresenceMode::None`]).
+    /// `cache_ttl_secs == 0` collapses `Cached` into `Strict`.
+    ///
+    /// The default impl ignores `mode` / `cache_ttl_secs` and falls
+    /// back to [`Self::sign`]. The real backend on macOS overrides
+    /// this to plumb a reusable `LAContext` to CryptoKit; mocks and
+    /// the agent-proxy backend keep the default.
+    fn sign_with_presence(
+        &self,
+        label: &str,
+        data: &[u8],
+        mode: PresenceMode,
+        cache_ttl_secs: u64,
+    ) -> Result<Vec<u8>> {
+        let _ = (mode, cache_ttl_secs);
+        self.sign(label, data)
+    }
 
     /// Check if the backend is available (e.g., Secure Enclave hardware present).
     fn is_available(&self) -> bool;

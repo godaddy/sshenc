@@ -753,13 +753,22 @@ fn handle_request(
                 return Ok(AgentResponse::Failure);
             }
 
-            let should_verify = match prompt_policy {
-                PromptPolicy::Always => true,
-                PromptPolicy::Never => false,
-                PromptPolicy::KeyDefault => key.metadata.access_policy != AccessPolicy::None,
+            // Resolve the effective presence mode for this sign:
+            //
+            // - `PromptPolicy::Always` overrides the per-key value to
+            //   `Strict` (one prompt per signature, no batching).
+            // - `PromptPolicy::Never` overrides to `None` (no prompt).
+            // - `PromptPolicy::KeyDefault` honours the per-key
+            //   `presence_mode` from the key's `.meta` file, with the
+            //   migration default for legacy `.meta` files.
+            let key_mode = key.metadata.effective_presence_mode();
+            let effective_mode = match prompt_policy {
+                PromptPolicy::Always => enclaveapp_core::types::PresenceMode::Strict,
+                PromptPolicy::Never => enclaveapp_core::types::PresenceMode::None,
+                PromptPolicy::KeyDefault => key_mode,
             };
 
-            if should_verify {
+            if effective_mode != enclaveapp_core::types::PresenceMode::None {
                 // On macOS the Secure Enclave enforces user presence during
                 // SecKeyCreateSignature — the biometric/password prompt fires
                 // automatically.  On Windows the TPM backend enforces it via
@@ -777,8 +786,17 @@ fn handle_request(
                 }
             }
 
-            // Sign with Secure Enclave
-            let der_sig = backend.sign(key.metadata.label.as_str(), &data)?;
+            // Sign with Secure Enclave. Pass `0` for cache_ttl so the
+            // backend uses its own stored TTL (the same value the
+            // wrapping-key cache uses); macOS plumbs this into the
+            // `LAContext.touchIDAuthenticationAllowableReuseDuration`
+            // for `Cached` mode.
+            let der_sig = backend.sign_with_presence(
+                key.metadata.label.as_str(),
+                &data,
+                effective_mode,
+                0,
+            )?;
             let ssh_sig = signature::der_to_ssh_signature(&der_sig)?;
 
             tracing::debug!(
@@ -795,6 +813,7 @@ fn handle_request(
             label,
             comment,
             access_policy,
+            presence_mode,
         } => {
             let label_str = match std::str::from_utf8(&label) {
                 Ok(s) => s,
@@ -850,10 +869,29 @@ fn handle_request(
                 }
             };
 
+            // Decode the optional presence_mode byte (newer clients
+            // always send it; legacy clients omit it). When absent or
+            // unrecognised, fall back to the migration default — which
+            // matches pre-presence-mode semantics bit-for-bit.
+            let presence = match presence_mode {
+                Some(byte) => match sshenc_se::proxy::presence_mode_from_wire(byte) {
+                    Some(mode) => mode,
+                    None => {
+                        tracing::warn!(
+                            presence_mode = byte,
+                            "generate_key: unknown presence_mode discriminant"
+                        );
+                        return Ok(AgentResponse::Failure);
+                    }
+                },
+                None => enclaveapp_core::types::PresenceMode::migration_default(policy),
+            };
+
             let opts = KeyGenOptions {
                 label: label_owned,
                 comment: comment_opt,
                 access_policy: policy,
+                presence_mode: presence,
                 write_pub_path: None,
             };
 
@@ -1077,6 +1115,7 @@ mod tests {
             label: KeyLabel::new("test-key").unwrap(),
             comment: Some("test".into()),
             access_policy: AccessPolicy::None,
+            presence_mode: enclaveapp_core::types::PresenceMode::None,
             write_pub_path: None,
         };
         backend.generate(&opts).unwrap();
@@ -1133,6 +1172,7 @@ mod tests {
                 label: KeyLabel::new("allowed").unwrap(),
                 comment: None,
                 access_policy: AccessPolicy::None,
+                presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
             })
             .unwrap();
@@ -1141,6 +1181,7 @@ mod tests {
                 label: KeyLabel::new("blocked").unwrap(),
                 comment: None,
                 access_policy: AccessPolicy::None,
+                presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
             })
             .unwrap();
@@ -1308,6 +1349,7 @@ mod tests {
                 label: b"generated-by-agent".to_vec(),
                 comment: b"test-comment".to_vec(),
                 access_policy: 0,
+                presence_mode: None,
             },
             &backend,
             &empty_labels(),
@@ -1336,6 +1378,7 @@ mod tests {
                 label: b"bad-policy".to_vec(),
                 comment: Vec::new(),
                 access_policy: 99,
+                presence_mode: None,
             },
             &backend,
             &empty_labels(),
@@ -1356,6 +1399,7 @@ mod tests {
                 label: b"not-on-allow-list".to_vec(),
                 comment: Vec::new(),
                 access_policy: 0,
+                presence_mode: None,
             },
             &backend,
             &allowed,
@@ -1374,6 +1418,7 @@ mod tests {
                 label: vec![0xFF, 0xFE],
                 comment: Vec::new(),
                 access_policy: 0,
+                presence_mode: None,
             },
             &backend,
             &empty_labels(),
@@ -1391,6 +1436,7 @@ mod tests {
                 label: b"no-comment-key".to_vec(),
                 comment: Vec::new(),
                 access_policy: 0,
+                presence_mode: None,
             },
             &backend,
             &empty_labels(),
@@ -1490,6 +1536,7 @@ mod tests {
                 label: KeyLabel::new("other").unwrap(),
                 comment: Some("other".into()),
                 access_policy: AccessPolicy::None,
+                presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
             })
             .unwrap();
@@ -1499,6 +1546,7 @@ mod tests {
                 label: KeyLabel::new("default").unwrap(),
                 comment: Some("default".into()),
                 access_policy: AccessPolicy::None,
+                presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
             })
             .unwrap();
@@ -1528,6 +1576,7 @@ mod tests {
                 label: KeyLabel::new("no-comment").unwrap(),
                 comment: None,
                 access_policy: AccessPolicy::None,
+                presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
             })
             .unwrap();

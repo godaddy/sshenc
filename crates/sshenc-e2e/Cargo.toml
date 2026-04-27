@@ -358,6 +358,18 @@ path = "tests/rsync_archive_and_delete.rs"
 name = "export_pub_flag_combos"
 path = "tests/export_pub_flag_combos.rs"
 
+[[test]]
+name = "inspect_export_pub_on_deleted_label"
+path = "tests/inspect_export_pub_on_deleted_label.rs"
+
+[[test]]
+name = "agent_pubkey_byte_stable_across_restart"
+path = "tests/agent_pubkey_byte_stable_across_restart.rs"
+
+[[test]]
+name = "git_autocrlf_with_signing"
+path = "tests/git_autocrlf_with_signing.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

@@ -454,6 +454,18 @@ path = "tests/git_branch_navigation_and_diff_raw.rs"
 name = "gitenc_overrides_global_signingkey"
 path = "tests/gitenc_overrides_global_signingkey.rs"
 
+[[test]]
+name = "git_no_commit_staging_then_signed"
+path = "tests/git_no_commit_staging_then_signed.rs"
+
+[[test]]
+name = "git_detached_head_commit_signs"
+path = "tests/git_detached_head_commit_signs.rs"
+
+[[test]]
+name = "git_stash_inspection_and_merge_ff_only"
+path = "tests/git_stash_inspection_and_merge_ff_only.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

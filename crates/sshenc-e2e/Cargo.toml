@@ -394,6 +394,22 @@ path = "tests/commit_empty_stdin_and_y_sign_long_namespace.rs"
 name = "ssh_config_include_directive"
 path = "tests/ssh_config_include_directive.rs"
 
+[[test]]
+name = "keygen_label_length_boundary"
+path = "tests/keygen_label_length_boundary.rs"
+
+[[test]]
+name = "gitenc_under_locale_variance"
+path = "tests/gitenc_under_locale_variance.rs"
+
+[[test]]
+name = "ssh_config_ipv6_literal"
+path = "tests/ssh_config_ipv6_literal.rs"
+
+[[test]]
+name = "git_filter_branch_re_signs"
+path = "tests/git_filter_branch_re_signs.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

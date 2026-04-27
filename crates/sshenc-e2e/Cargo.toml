@@ -370,6 +370,14 @@ path = "tests/agent_pubkey_byte_stable_across_restart.rs"
 name = "git_autocrlf_with_signing"
 path = "tests/git_autocrlf_with_signing.rs"
 
+[[test]]
+name = "git_ref_ops_with_signing"
+path = "tests/git_ref_ops_with_signing.rs"
+
+[[test]]
+name = "cli_first_run_and_keys_dir_robustness"
+path = "tests/cli_first_run_and_keys_dir_robustness.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

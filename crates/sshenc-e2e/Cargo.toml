@@ -302,6 +302,10 @@ path = "tests/git_push_tags_and_delete.rs"
 name = "cli_input_and_socket_path_validation"
 path = "tests/cli_input_and_socket_path_validation.rs"
 
+[[test]]
+name = "git_tag_force_rebase_abort_and_am"
+path = "tests/git_tag_force_rebase_abort_and_am.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }

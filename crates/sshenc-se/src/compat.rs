@@ -38,7 +38,7 @@ pub fn load_sshenc_meta(
         && (raw.get("comment").is_some() || raw.get("auth_policy").is_some())
     {
         let auth_policy_int = match raw.get("auth_policy") {
-            None => 0i32,
+            None => 0_i32,
             Some(v) => {
                 let n = v.as_i64().ok_or_else(|| {
                     enclaveapp_core::Error::Serialization(format!(

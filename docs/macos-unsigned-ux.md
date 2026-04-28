@@ -185,20 +185,63 @@ secure default.
 
 ### 2. Stable Developer ID code signing
 
-Solves both unsigned-only problems:
+Fixes one of the two unsigned-only problems:
 
-- The wrapping-key `.userPresence` ACL would actually install (no
-  more `errSecParam` fallback), restoring the second presence layer
-  the design intended.
-- The legacy ACL's dependency on cdhash goes away in favour of team
-  identity, so the post-update password dialog disappears.
+- **Fixed by signing alone:** The legacy keychain ACL's dependency on
+  cdhash goes away in favour of team identity. The post-update
+  login-password dialog (`brew upgrade sshenc` regression) disappears
+  because every signed binary on the user's machine carries the same
+  Developer-ID identity, not a new ad-hoc cdhash per build.
 
-The current architecture comment at
-`libenclaveapp/crates/enclaveapp-app-storage/src/lib.rs` ~line 95
-frames the userPresence-ACL design as a way to *escape* code-signature
-binding. That stops being the right framing once the binary is signed
-under a stable Developer ID; signing makes the legacy ACL benign and
-re-enables the data-protection-keychain path simultaneously.
+- **Not fixed by signing alone:** The wrapping-key `.userPresence`
+  ACL still doesn't install — `errSecParam -50` still fires on the
+  legacy keychain. Originally I expected stable signing to be enough
+  here; empirical testing on a `Developer ID Application: Jeremiah
+  Gowdy (W2YG5ZG9D6)`-signed, hardened-runtime, notarized
+  `sshenc-agent` proved otherwise. The `.userPresence` ACL only
+  installs in the **Data Protection keychain**, which requires the
+  caller to claim a `keychain-access-groups` entitlement.
+
+Why that's a wall, not a follow-up: `keychain-access-groups` is a
+**restricted entitlement** in macOS terms. AMFI (Apple Mobile File
+Integrity) refuses to launch any binary that claims a restricted
+entitlement without a matching provisioning profile:
+
+```
+amfid: Restricted entitlements not validated, bailing out.
+       Error: "No matching profile found" (Code=-413)
+```
+
+Provisioning profiles for restricted entitlements are issued for
+`.app` bundles distributed via the Mac App Store or via Apple's
+"Developer ID with Provisioning Profile" flow that targets
+notarized `.app` bundles. There is no documented path to a
+provisioning profile for a Mach-O CLI binary distributed as a
+Homebrew bottle / tarball. So for Homebrew-shipped CLI tools,
+the wrapping-key userPresence gate is unreachable on macOS today
+without restructuring the distribution as `.app` bundles — which
+would defeat the CLI distribution model.
+
+What we do instead:
+
+- The wrapping-key cache + reusable LAContext (item #1 above) is the
+  load-bearing UX win. With it, a typical 5-minute window of git +
+  ssh activity costs **one** fingerprint regardless of how many
+  signs happen. The wrapping-key gate not firing is a defence-in-
+  depth gap, not a user-visible UX gap.
+- The threat model in `wrapping-key-cache.md` already accepts a
+  same-UID attacker that can read the wrapping-key keychain item;
+  the LAContext window is the practical mitigation Apple gives non-
+  MAS callers.
+- libenclaveapp ships a clean API for the access-group path
+  (`StorageConfig::keychain_access_group`,
+  `KeychainConfig::with_access_group`, the reusable workflow's
+  `macos_entitlements_plist` input) so that any future consumer
+  packaged as a `.app` bundle with a provisioning profile can opt in
+  without further plumbing. sshenc as a CLI doesn't enable it, and
+  the bridge logs an explicit
+  `enclaveapp: Data Protection keychain rejected access group ... (errSecMissingEntitlement) — binary lacks the matching keychain-access-groups entitlement`
+  if a misconfigured caller asks for it without an entitlement.
 
 ## Cleanup notes
 

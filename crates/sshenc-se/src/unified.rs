@@ -173,6 +173,17 @@ impl SshencBackend {
             force_keyring,
             wrapping_key_user_presence: true,
             wrapping_key_cache_ttl: cache_ttl,
+            // Data Protection keychain access group is left unset.
+            // Routing through the DP keychain would require a
+            // `keychain-access-groups` entitlement, which is a
+            // restricted entitlement — AMFI refuses to launch the
+            // binary without a matching provisioning profile, and
+            // Apple does not issue provisioning profiles for raw CLI
+            // binaries distributed via Homebrew tarballs. See
+            // `docs/macos-unsigned-ux.md` § "Stable Developer ID
+            // code signing" for the full rationale. The bridge falls
+            // back gracefully if a future caller does set this.
+            keychain_access_group: None,
         })?;
 
         Ok(Self {
@@ -446,6 +457,7 @@ mod tests {
             force_keyring: false,
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
+            keychain_access_group: None,
         })
         .ok()?;
         Some(SshencBackend {

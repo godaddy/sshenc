@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Core error type shared across sshenc crates.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("key not found: {label}")]
     KeyNotFound { label: String },

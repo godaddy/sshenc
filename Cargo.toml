@@ -92,6 +92,9 @@ libc = "0.2"
 rand = "0.8"
 
 [workspace.lints.rust]
+# "deny" rather than "forbid": the Swift FFI bridge (sshenc-ffi-apple)
+# and the Windows named-pipe security-descriptor code require unsafe blocks.
+# FFI projects are the documented exception in the guild lint rules.
 unsafe_code = "deny"
 future_incompatible = { level = "deny", priority = -1 }
 ambiguous_negative_literals = "warn"

@@ -56,6 +56,7 @@ base64 = "0.22"
 hex = "0.4"
 
 # Crypto / hashing
+p256 = { version = "0.13", features = ["ecdsa"] }
 sha2 = "0.10"
 md-5 = "0.10"
 

@@ -14,9 +14,9 @@ use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::AccessPolicy;
 use sshenc_se::KeyBackend;
-use std::collections::HashSet;
 #[cfg(unix)]
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "linux")]
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -563,6 +563,7 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
     prompt_policy: PromptPolicy,
 ) -> Result<()> {
     tracing::debug!("new agent connection");
+    let mut blob_cache: HashMap<Vec<u8>, String> = HashMap::new();
 
     loop {
         // Read message length
@@ -586,7 +587,13 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
 
         // Parse and handle
         let request = message::parse_request(&payload)?;
-        let response = handle_request(request, backend, allowed_labels, prompt_policy)?;
+        let response = handle_request(
+            request,
+            backend,
+            allowed_labels,
+            prompt_policy,
+            &mut blob_cache,
+        )?;
         let response_payload = message::serialize_response(&response);
 
         // Write response
@@ -608,6 +615,7 @@ fn handle_blocking_connection(
 
     // Wrap socket2::Socket in a helper that implements Read/Write.
     let mut stream = SocketReadWriter(conn);
+    let mut blob_cache: HashMap<Vec<u8>, String> = HashMap::new();
 
     loop {
         // Read 4-byte message length (big-endian)
@@ -641,7 +649,13 @@ fn handle_blocking_connection(
                 return;
             }
         };
-        let response = match handle_request(request, backend, allowed_labels, prompt_policy) {
+        let response = match handle_request(
+            request,
+            backend,
+            allowed_labels,
+            prompt_policy,
+            &mut blob_cache,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("unix socket request error: {e}");
@@ -685,36 +699,37 @@ fn handle_request(
     backend: &dyn KeyBackend,
     allowed_labels: &HashSet<String>,
     prompt_policy: PromptPolicy,
+    blob_cache: &mut HashMap<Vec<u8>, String>,
 ) -> Result<AgentResponse> {
     match request {
         AgentRequest::RequestIdentities => {
             tracing::debug!("handling identity request");
 
             let keys = backend.list()?;
-            let mut identities: Vec<(bool, Identity)> = keys
-                .into_iter()
-                .filter(|k| {
-                    allowed_labels.is_empty() || allowed_labels.contains(k.metadata.label.as_str())
-                })
-                .filter_map(|k| {
+            blob_cache.clear();
+            let mut identities: Vec<(bool, Identity)> = Vec::new();
+            for k in keys {
+                let Ok(pubkey) =
+                    SshPublicKey::from_sec1_bytes(&k.public_key_bytes, k.metadata.comment.clone())
+                else {
+                    continue;
+                };
+                let blob = pubkey.to_wire_format();
+                blob_cache.insert(blob.clone(), k.metadata.label.as_str().to_string());
+                if allowed_labels.is_empty() || allowed_labels.contains(k.metadata.label.as_str()) {
                     let is_default = k.metadata.label.as_str() == "default";
-                    let pubkey = SshPublicKey::from_sec1_bytes(
-                        &k.public_key_bytes,
-                        k.metadata.comment.clone(),
-                    )
-                    .ok()?;
-                    Some((
+                    identities.push((
                         is_default,
                         Identity {
-                            key_blob: pubkey.to_wire_format(),
+                            key_blob: blob,
                             comment: k
                                 .metadata
                                 .comment
                                 .unwrap_or_else(|| k.metadata.label.as_str().to_string()),
                         },
-                    ))
-                })
-                .collect();
+                    ));
+                }
+            }
             // Present "default" key first so SSH tries it before others
             identities.sort_by_key(|(is_default, _)| !*is_default);
             let identities: Vec<Identity> = identities.into_iter().map(|(_, id)| id).collect();
@@ -729,29 +744,48 @@ fn handle_request(
                 "handling sign request"
             );
 
-            // Find which SE key matches this blob
-            let keys = backend.list()?;
-            let matching_key = keys.into_iter().find(|k| {
-                if let Ok(pubkey) = SshPublicKey::from_sec1_bytes(&k.public_key_bytes, None) {
-                    pubkey.to_wire_format() == key_blob
-                } else {
-                    false
+            // Resolve the label: warm cache first, full list() if cold or stale.
+            let label = if let Some(l) = blob_cache.get(&key_blob) {
+                l.clone()
+            } else {
+                let keys = backend.list()?;
+                blob_cache.clear();
+                for k in &keys {
+                    if let Ok(pubkey) = SshPublicKey::from_sec1_bytes(&k.public_key_bytes, None) {
+                        blob_cache.insert(
+                            pubkey.to_wire_format(),
+                            k.metadata.label.as_str().to_string(),
+                        );
+                    }
                 }
-            });
-
-            let Some(key) = matching_key else {
-                tracing::warn!("no matching key for sign request");
-                return Ok(AgentResponse::Failure);
+                match blob_cache.get(&key_blob) {
+                    Some(l) => l.clone(),
+                    None => {
+                        tracing::warn!("no matching key for sign request");
+                        return Ok(AgentResponse::Failure);
+                    }
+                }
             };
 
-            // Check allowed labels (O(n) scan; acceptable for small key counts)
-            if !allowed_labels.is_empty() && !allowed_labels.contains(key.metadata.label.as_str()) {
-                tracing::warn!(
-                    label = key.metadata.label.as_str(),
-                    "key not in allowed list"
-                );
+            // Check allowed labels
+            if !allowed_labels.is_empty() && !allowed_labels.contains(label.as_str()) {
+                tracing::warn!(label = label.as_str(), "key not in allowed list");
                 return Ok(AgentResponse::Failure);
             }
+
+            // Fetch key metadata for presence mode. Uses a targeted single-key
+            // lookup instead of a full list() when the cache is warm.
+            let key = match backend.get(label.as_str()) {
+                Ok(k) => k,
+                Err(_) => {
+                    tracing::warn!(
+                        label = label.as_str(),
+                        "key lookup failed; evicting from cache"
+                    );
+                    blob_cache.remove(&key_blob);
+                    return Ok(AgentResponse::Failure);
+                }
+            };
 
             // Resolve the effective presence mode for this sign:
             //
@@ -780,7 +814,7 @@ fn handle_request(
                 #[cfg(not(any(target_os = "macos", windows)))]
                 {
                     tracing::warn!(
-                        label = key.metadata.label.as_str(),
+                        label = label.as_str(),
                         "user verification requested but software backend cannot enforce it"
                     );
                 }
@@ -791,16 +825,11 @@ fn handle_request(
             // wrapping-key cache uses); macOS plumbs this into the
             // `LAContext.touchIDAuthenticationAllowableReuseDuration`
             // for `Cached` mode.
-            let der_sig = backend.sign_with_presence(
-                key.metadata.label.as_str(),
-                &data,
-                effective_mode,
-                0,
-            )?;
+            let der_sig = backend.sign_with_presence(label.as_str(), &data, effective_mode, 0)?;
             let ssh_sig = signature::der_to_ssh_signature(&der_sig)?;
 
             tracing::debug!(
-                label = key.metadata.label.as_str(),
+                label = label.as_str(),
                 sig_len = ssh_sig.len(),
                 "signing complete"
             );
@@ -898,6 +927,7 @@ fn handle_request(
             match backend.generate(&opts) {
                 Ok(info) => {
                     tracing::info!(label = label_str, "generate_key: succeeded");
+                    blob_cache.clear();
                     Ok(AgentResponse::GenerateResponse {
                         public_key: info.public_key_bytes,
                     })
@@ -946,6 +976,7 @@ fn handle_request(
             match backend.rename(old_str, new_str) {
                 Ok(()) => {
                     tracing::info!(old = old_str, new = new_str, "rename_key: succeeded");
+                    blob_cache.clear();
                     Ok(AgentResponse::Success)
                 }
                 Err(e) => {
@@ -981,6 +1012,7 @@ fn handle_request(
             match backend.delete(label_str) {
                 Ok(()) => {
                     tracing::info!(label = label_str, "delete_key: succeeded");
+                    blob_cache.clear();
                     Ok(AgentResponse::Success)
                 }
                 Err(e) => {
@@ -1137,6 +1169,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         match resp {
@@ -1156,6 +1189,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         match resp {
@@ -1192,6 +1226,7 @@ mod tests {
             &backend,
             &allowed,
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         match resp {
@@ -1214,6 +1249,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         match resp {
@@ -1236,6 +1272,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1256,6 +1293,7 @@ mod tests {
             &backend,
             &allowed,
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1269,6 +1307,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1286,6 +1325,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Success));
@@ -1307,6 +1347,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1329,6 +1370,7 @@ mod tests {
             &backend,
             &allowed,
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1354,6 +1396,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         match resp {
@@ -1383,6 +1426,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1404,6 +1448,7 @@ mod tests {
             &backend,
             &allowed,
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1423,6 +1468,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1441,6 +1487,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::GenerateResponse { .. }));
@@ -1457,6 +1504,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
@@ -1477,6 +1525,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
 
@@ -1556,6 +1605,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         match resp {
@@ -1586,6 +1636,7 @@ mod tests {
             &backend,
             &empty_labels(),
             PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
         )
         .unwrap();
         match resp {

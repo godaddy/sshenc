@@ -348,9 +348,15 @@ mod tests {
         std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
 
         let result = load_sshenc_meta(&dir, "k");
-        assert!(result.is_err(), "non-integer auth_policy should return an error");
+        assert!(
+            result.is_err(),
+            "non-integer auth_policy should return an error"
+        );
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("auth_policy"), "error should name the field: {msg}");
+        assert!(
+            msg.contains("auth_policy"),
+            "error should name the field: {msg}"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

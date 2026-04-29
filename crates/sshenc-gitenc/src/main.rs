@@ -30,21 +30,73 @@
 //! configure git to use the system ssh directly; gitenc itself
 //! does not expose an alternative.
 
+use clap::Parser;
 use enclaveapp_core::types::validate_label;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "gitenc",
+    about = "Git wrapper that selects sshenc Secure Enclave identities for SSH transport and commit signing",
+    long_about = "gitenc runs git with GIT_SSH_COMMAND set so SSH transport goes through an \
+                  sshenc-managed Secure Enclave (or TPM / software-backed) key. With --config, \
+                  it instead writes the current repository's git config so future plain `git` \
+                  invocations use the chosen sshenc identity for both SSH and commit signing.\n\n\
+                  Without --label, gitenc uses the sshenc agent's default identity. All arguments \
+                  after the gitenc options are passed verbatim to git; use `gitenc <cmd> --help` \
+                  or `gitenc -- --help` to read git's own help.",
+    version,
+    disable_help_subcommand = true
+)]
+struct Cli {
+    /// Use the sshenc key with this label for SSH transport and commit signing.
+    #[arg(long, short = 'l', value_name = "LABEL")]
+    label: Option<String>,
+
+    /// Configure the current git repo (via `git config`) to use the chosen
+    /// sshenc key. With no label, the repo is configured to use the agent's
+    /// default key. Sets core.sshCommand, gpg.format, gpg.ssh.program,
+    /// user.signingkey, commit.gpgsign, and gpg.ssh.allowedSignersFile.
+    #[arg(long)]
+    config: bool,
+
+    /// In normal mode: arguments passed verbatim to git.
+    /// In --config mode: optional positional key label (alternative to --label).
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
 fn main() {
     enclaveapp_core::process::harden_process();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let parsed = parse_args(&args);
+    let cli = Cli::parse();
 
-    match parsed {
-        ParsedArgs::Config(label) => configure_repo(label.as_deref()),
-        ParsedArgs::Run { label, git_args } => run_git(label.as_deref(), &git_args),
+    if cli.config {
+        let label = match resolve_config_label(cli.label.as_deref(), &cli.args) {
+            Ok(l) => l,
+            Err(err) => exit_arg_error(&err),
+        };
+        configure_repo(label.as_deref());
+    } else {
+        run_git(cli.label.as_deref(), &cli.args);
+    }
+}
+
+fn resolve_config_label(
+    label_flag: Option<&str>,
+    positional: &[String],
+) -> Result<Option<String>, String> {
+    match (label_flag, positional) {
+        (Some(_), rest) if !rest.is_empty() => {
+            Err("--config takes either --label NAME or one positional NAME, not both".into())
+        }
+        (Some(l), _) => Ok(Some(l.to_string())),
+        (None, []) => Ok(None),
+        (None, [single]) => Ok(Some(single.clone())),
+        (None, _) => Err("--config takes at most one positional argument".into()),
     }
 }
 
@@ -170,15 +222,6 @@ fn configure_repo(label: Option<&str>) {
             }
         }
     }
-}
-
-#[derive(Debug)]
-enum ParsedArgs {
-    Config(Option<String>),
-    Run {
-        label: Option<String>,
-        git_args: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -335,217 +378,192 @@ fn exit_invalid_label(err: &str) -> ! {
     std::process::exit(2);
 }
 
-fn parse_args(args: &[String]) -> ParsedArgs {
-    if !args.is_empty() && args[0] == "--config" {
-        // Support both: gitenc --config <label> AND gitenc --config --label <label>
-        if args.len() >= 3 && (args[1] == "--label" || args[1] == "-l") {
-            return ParsedArgs::Config(Some(args[2].clone()));
-        }
-        let label = args.get(1).cloned();
-        return ParsedArgs::Config(label);
-    }
-
-    if args.len() >= 2 && (args[0] == "--label" || args[0] == "-l") {
-        ParsedArgs::Run {
-            label: Some(args[1].clone()),
-            git_args: args[2..].to_vec(),
-        }
-    } else {
-        ParsedArgs::Run {
-            label: None,
-            git_args: args.to_vec(),
-        }
-    }
+#[allow(clippy::print_stderr, clippy::exit)]
+fn exit_arg_error(err: &str) -> ! {
+    eprintln!("gitenc: {err}");
+    std::process::exit(2);
 }
 
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_string()).collect()
     }
 
+    fn parse(args: &[&str]) -> Cli {
+        let mut full = vec!["gitenc"];
+        full.extend(args.iter().copied());
+        Cli::try_parse_from(full).unwrap()
+    }
+
+    fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut full = vec!["gitenc"];
+        full.extend(args.iter().copied());
+        Cli::try_parse_from(full)
+    }
+
     #[test]
-    fn test_parse_args_long_label() {
-        let args = s(&[
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parse_long_label() {
+        let cli = parse(&[
             "--label",
             "github-work",
             "clone",
             "git@github.com:org/repo.git",
         ]);
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, Some("github-work".to_string()));
-                assert_eq!(git_args, s(&["clone", "git@github.com:org/repo.git"]));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+        assert_eq!(cli.label.as_deref(), Some("github-work"));
+        assert!(!cli.config);
+        assert_eq!(cli.args, s(&["clone", "git@github.com:org/repo.git"]));
     }
 
     #[test]
-    fn test_parse_args_short_label() {
-        let args = s(&["-l", "mykey", "push", "origin", "main"]);
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, Some("mykey".to_string()));
-                assert_eq!(git_args, s(&["push", "origin", "main"]));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn parse_short_label() {
+        let cli = parse(&["-l", "mykey", "push", "origin", "main"]);
+        assert_eq!(cli.label.as_deref(), Some("mykey"));
+        assert_eq!(cli.args, s(&["push", "origin", "main"]));
     }
 
     #[test]
-    fn test_parse_args_no_label() {
-        let args = s(&["pull", "--rebase"]);
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, None);
-                assert_eq!(git_args, s(&["pull", "--rebase"]));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn parse_no_label() {
+        let cli = parse(&["pull", "--rebase"]);
+        assert_eq!(cli.label, None);
+        assert_eq!(cli.args, s(&["pull", "--rebase"]));
     }
 
     #[test]
-    fn test_parse_args_empty() {
-        let args: Vec<String> = Vec::new();
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, None);
-                assert!(git_args.is_empty());
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn parse_empty_args() {
+        let cli = parse(&[]);
+        assert_eq!(cli.label, None);
+        assert!(cli.args.is_empty());
+        assert!(!cli.config);
     }
 
     #[test]
-    fn test_parse_args_label_no_value() {
-        let args = s(&["--label"]);
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, None);
-                assert_eq!(git_args, s(&["--label"]));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn parse_label_requires_value() {
+        // Under the old hand-rolled parser, `gitenc --label` fell through to
+        // git as a literal arg. Under clap it errors with "missing value",
+        // which is the correct UX — git would have rejected `--label` anyway.
+        let err = try_parse(&["--label"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]
-    fn test_parse_args_config_with_label() {
-        let args = s(&["--config", "github-work"]);
-        match parse_args(&args) {
-            ParsedArgs::Config(label) => {
-                assert_eq!(label, Some("github-work".to_string()));
-            }
-            other => panic!("expected Config, got {other:?}"),
-        }
+    fn parse_config_with_positional_label() {
+        let cli = parse(&["--config", "github-work"]);
+        assert!(cli.config);
+        let label = resolve_config_label(cli.label.as_deref(), &cli.args).unwrap();
+        assert_eq!(label.as_deref(), Some("github-work"));
     }
 
     #[test]
-    fn test_parse_args_config_without_label() {
-        let args = s(&["--config"]);
-        match parse_args(&args) {
-            ParsedArgs::Config(label) => {
-                assert_eq!(label, None);
-            }
-            other => panic!("expected Config, got {other:?}"),
-        }
+    fn parse_config_without_label() {
+        let cli = parse(&["--config"]);
+        assert!(cli.config);
+        let label = resolve_config_label(cli.label.as_deref(), &cli.args).unwrap();
+        assert_eq!(label, None);
     }
 
     #[test]
-    fn test_parse_args_config_with_label_flag() {
-        // gitenc --config --label my-key
-        let args = s(&["--config", "--label", "my-key"]);
-        match parse_args(&args) {
-            ParsedArgs::Config(label) => {
-                assert_eq!(label, Some("my-key".to_string()));
-            }
-            other => panic!("expected Config, got {other:?}"),
-        }
+    fn parse_config_with_label_flag() {
+        let cli = parse(&["--config", "--label", "my-key"]);
+        assert!(cli.config);
+        let label = resolve_config_label(cli.label.as_deref(), &cli.args).unwrap();
+        assert_eq!(label.as_deref(), Some("my-key"));
     }
 
     #[test]
-    fn test_parse_args_config_with_short_label_flag() {
-        // gitenc --config -l my-key
-        let args = s(&["--config", "-l", "my-key"]);
-        match parse_args(&args) {
-            ParsedArgs::Config(label) => {
-                assert_eq!(label, Some("my-key".to_string()));
-            }
-            other => panic!("expected Config, got {other:?}"),
-        }
+    fn parse_config_with_short_label_flag() {
+        let cli = parse(&["--config", "-l", "my-key"]);
+        assert!(cli.config);
+        let label = resolve_config_label(cli.label.as_deref(), &cli.args).unwrap();
+        assert_eq!(label.as_deref(), Some("my-key"));
     }
 
     #[test]
-    fn test_parse_args_label_only_no_git_args() {
-        // gitenc --label mykey (no git subcommand)
-        let args = s(&["--label", "mykey"]);
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, Some("mykey".to_string()));
-                assert!(git_args.is_empty());
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn config_rejects_both_label_flag_and_positional() {
+        let cli = parse(&["--config", "--label", "a", "b"]);
+        let err = resolve_config_label(cli.label.as_deref(), &cli.args).unwrap_err();
+        assert!(err.contains("either"));
     }
 
     #[test]
-    fn test_parse_args_passthrough_git_args() {
-        // gitenc status --short
-        let args = s(&["status", "--short"]);
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, None);
-                assert_eq!(git_args, s(&["status", "--short"]));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn config_rejects_multiple_positionals() {
+        let cli = parse(&["--config", "a", "b"]);
+        let err = resolve_config_label(cli.label.as_deref(), &cli.args).unwrap_err();
+        assert!(err.contains("at most one"));
     }
 
     #[test]
-    fn test_parse_args_push_origin_main() {
-        let args = s(&["push", "origin", "main"]);
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, None);
-                assert_eq!(git_args, s(&["push", "origin", "main"]));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn parse_help_long_first_arg_is_intercepted_by_clap() {
+        // clap's help flag prints help and returns DisplayHelp on try_parse.
+        let err = try_parse(&["--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
     #[test]
-    fn test_parse_args_label_with_double_dash_separator() {
-        // gitenc --label mykey -- push origin main
-        let args = s(&["--label", "mykey", "--", "push", "origin", "main"]);
-        match parse_args(&args) {
-            ParsedArgs::Run { label, git_args } => {
-                assert_eq!(label, Some("mykey".to_string()));
-                assert_eq!(git_args, s(&["--", "push", "origin", "main"]));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn parse_help_short_first_arg_is_intercepted_by_clap() {
+        let err = try_parse(&["-h"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
     #[test]
-    fn test_build_ssh_command_with_valid_label() {
+    fn parse_help_after_positional_passes_through_to_git() {
+        // `gitenc status --help` — clap stops parsing flags after the first
+        // trailing-var-arg token, so --help goes into args verbatim.
+        let cli = parse(&["status", "--help"]);
+        assert_eq!(cli.args, s(&["status", "--help"]));
+    }
+
+    #[test]
+    fn parse_double_dash_passes_through_to_git() {
+        let cli = parse(&["--", "--help"]);
+        // clap consumes the `--` separator; everything after it goes to args.
+        assert_eq!(cli.args, s(&["--help"]));
+    }
+
+    #[test]
+    fn parse_version_first_arg_is_intercepted_by_clap() {
+        let err = try_parse(&["--version"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn parse_label_with_double_dash_separator() {
+        let cli = parse(&["--label", "mykey", "--", "push", "origin", "main"]);
+        assert_eq!(cli.label.as_deref(), Some("mykey"));
+        assert_eq!(cli.args, s(&["push", "origin", "main"]));
+    }
+
+    #[test]
+    fn build_ssh_command_with_valid_label() {
         let command = build_ssh_command(Some("github-work")).unwrap();
         assert_eq!(command, "sshenc ssh --label github-work --");
     }
 
     #[test]
-    fn test_build_ssh_command_rejects_invalid_label() {
+    fn build_ssh_command_rejects_invalid_label() {
         let err = build_ssh_command(Some("bad;label")).unwrap_err();
         assert!(err.to_lowercase().contains("label"));
     }
 
     #[test]
-    fn test_configure_repo_with_temp_git_repo() {
-        let dir = std::env::temp_dir().join("sshenc-test-configure-repo");
-        // Clean up from any prior run
-        drop(std::fs::remove_dir_all(&dir));
+    fn configure_repo_with_temp_git_repo() {
+        let dir = std::env::temp_dir().join(format!(
+            "sshenc-test-configure-repo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
 
         let status = Command::new("git")
@@ -599,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn test_configure_repo_entries_without_label_sets_default_signing_key() {
+    fn configure_repo_entries_without_label_sets_default_signing_key() {
         let entries = configure_repo_entries(None, "/tmp/home", "/tmp/sshenc", None).unwrap();
         assert!(entries
             .iter()
@@ -613,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn test_configure_repo_named_label_uses_label_pub() {
+    fn configure_repo_named_label_uses_label_pub() {
         let entries =
             configure_repo_entries(Some("github-work"), "/tmp/home", "/tmp/sshenc", None).unwrap();
 
@@ -623,13 +641,13 @@ mod tests {
     }
 
     #[test]
-    fn test_signing_key_path_rejects_invalid_label() {
+    fn signing_key_path_rejects_invalid_label() {
         let err = signing_key_path("/tmp/home", "../escape").unwrap_err();
         assert!(err.to_lowercase().contains("label"));
     }
 
     #[test]
-    fn test_parse_git_key_metadata_reads_app_specific_fields() {
+    fn parse_git_key_metadata_reads_app_specific_fields() {
         let parsed = parse_git_key_metadata(
             r#"{
                 "label":"work",
@@ -650,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_git_key_metadata_reads_legacy_top_level_fields() {
+    fn parse_git_key_metadata_reads_legacy_top_level_fields() {
         let parsed = parse_git_key_metadata(
             r#"{
                 "label":"work",
@@ -667,9 +685,15 @@ mod tests {
     }
 
     #[test]
-    fn test_configure_repo_entries_uses_recorded_pub_file_path() {
-        let dir = std::env::temp_dir().join("sshenc-test-gitenc-pub");
-        drop(std::fs::remove_dir_all(&dir));
+    fn configure_repo_entries_uses_recorded_pub_file_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "sshenc-test-gitenc-pub-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let pub_path = dir.join("custom.pub");
         std::fs::write(&pub_path, "ssh-ed25519 AAAATEST test\n").unwrap();
@@ -692,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_configure_repo_entries_rejects_missing_recorded_pub_file_path() {
+    fn configure_repo_entries_rejects_missing_recorded_pub_file_path() {
         let metadata = GitKeyMetadata {
             git_name: None,
             git_email: None,

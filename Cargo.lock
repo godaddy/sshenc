@@ -1460,6 +1460,7 @@ dependencies = [
 name = "sshenc-gitenc"
 version = "0.0.0-dev"
 dependencies = [
+ "clap",
  "dirs",
  "enclaveapp-core",
  "serde_json",

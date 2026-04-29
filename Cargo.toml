@@ -92,6 +92,14 @@ libc = "0.2"
 rand = "0.8"
 
 [workspace.lints.rust]
+# "deny" rather than "forbid": two crates legitimately need `unsafe`.
+#  - sshenc-pkcs11 exports the PKCS#11 C ABI (C_Initialize, C_Finalize,
+#    C_GetInfo, C_GetSlotList, C_GetFunctionList, plus the function-list
+#    table). Every exported entry point is `unsafe extern "C"` by spec.
+#  - sshenc-agent-proto on Windows wraps the named-pipe API
+#    (WaitNamedPipeW, ReadFile, WriteFile) — direct Win32 calls that
+#    cannot be expressed in safe Rust.
+# FFI surfaces are the documented exception in the guild lint rules.
 unsafe_code = "deny"
 future_incompatible = { level = "deny", priority = -1 }
 ambiguous_negative_literals = "warn"

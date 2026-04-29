@@ -37,7 +37,17 @@ pub fn load_sshenc_meta(
     if raw.get("key_type").is_none()
         && (raw.get("comment").is_some() || raw.get("auth_policy").is_some())
     {
-        let auth_policy_int = raw.get("auth_policy").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let auth_policy_int = match raw.get("auth_policy") {
+            None => 0_i32,
+            Some(v) => {
+                let n = v.as_i64().ok_or_else(|| {
+                    enclaveapp_core::Error::Serialization(format!(
+                        "auth_policy in '{label}.meta' is not an integer: {v}"
+                    ))
+                })?;
+                n as i32
+            }
+        };
         let access_policy = AccessPolicy::from_ffi_value(auth_policy_int);
         let created = raw
             .get("created")
@@ -322,6 +332,47 @@ mod tests {
 
         let result = load_sshenc_meta(&dir, "bad");
         assert!(result.is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_auth_policy_string_returns_error() {
+        // A string where an integer is expected should fail, not silently
+        // default to AccessPolicy::None.
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "auth_policy": "corrupted"
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let result = load_sshenc_meta(&dir, "k");
+        assert!(
+            result.is_err(),
+            "non-integer auth_policy should return an error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("auth_policy"),
+            "error should name the field: {msg}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_format_auth_policy_null_returns_error() {
+        // Explicit null is also not a valid integer and should fail.
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "auth_policy": null
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let result = load_sshenc_meta(&dir, "k");
+        assert!(result.is_err(), "null auth_policy should return an error");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

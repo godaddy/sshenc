@@ -1,11 +1,31 @@
 # sshenc
 
-Hardware-backed SSH key management.
+Hardware-backed SSH key management, with first-class git identity and
+commit signing.
 
 `sshenc` generates SSH keys inside the Secure Enclave (macOS), TPM 2.0
 (Windows/Linux), or a software fallback and serves them via a standard SSH
-agent. Private key material never leaves the hardware -- it can't be
+agent. Private key material never leaves the hardware — it can't be
 exported, copied, or stolen from disk.
+
+Bundled with `sshenc` is **`gitenc`**, a git wrapper that makes per-repo
+identity management painless:
+
+- **Pick the git/ssh identity for any repo with one command.** `gitenc --config work`
+  pins a repository to a named hardware key — work, personal, open-source,
+  client-A, whatever you've created. No more juggling `~/.ssh/config`
+  `Host` aliases or rewriting remote URLs.
+- **One-shot identity for ad-hoc commands.** `gitenc --label personal clone …`
+  uses a specific hardware key for a single git operation without changing
+  any config.
+- **SSH-key-based commit signing, configured automatically.** The same
+  `gitenc --config NAME` call wires up `gpg.format=ssh`, `gpg.ssh.program`,
+  `user.signingkey`, and `commit.gpgsign=true` so every commit in that repo
+  is signed by the Secure Enclave / TPM key. GitHub shows them as "Verified"
+  once you add the key as a Signing Key.
+- **Auth and signing share one hardware key.** No separate GPG key to
+  manage, back up, or lose. The same non-exportable key that authenticates
+  your `git push` also signs the commit.
 
 Your existing SSH keys in `~/.ssh` continue to work alongside hardware-backed
 keys. Nothing breaks when you install sshenc.

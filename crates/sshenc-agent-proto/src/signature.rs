@@ -10,6 +10,7 @@
 //! The Secure Enclave returns DER-encoded ECDSA signatures, so we need
 //! to convert between DER and SSH wire format.
 
+use p256::ecdsa::Signature;
 use sshenc_core::error::{Error, Result};
 use sshenc_core::key::KeyAlgorithm;
 use sshenc_core::pubkey::write_ssh_string;
@@ -19,94 +20,50 @@ use sshenc_core::pubkey::write_ssh_string;
 /// DER format: SEQUENCE { INTEGER r, INTEGER s }
 /// SSH format: string("ecdsa-sha2-nistp256") || string(mpint(r) || mpint(s))
 pub fn der_to_ssh_signature(der: &[u8]) -> Result<Vec<u8>> {
-    let (r, s) = parse_der_signature(der)?;
+    // Parse DER via the p256 crate. from_der() validates the encoding and
+    // returns a normalized (r, s) pair — each a 32-byte P-256 scalar.
+    let sig = Signature::from_der(der)
+        .map_err(|_| Error::AgentProtocol("invalid DER-encoded ECDSA signature".into()))?;
 
-    // Build the inner signature blob: mpint(r) || mpint(s)
+    // to_bytes() returns the fixed-size r || s concatenation (64 bytes total).
+    let sig_bytes = sig.to_bytes();
+    let r = &sig_bytes[..32];
+    let s = &sig_bytes[32..];
+
     let mut inner = Vec::new();
-    write_ssh_mpint(&mut inner, &r);
-    write_ssh_mpint(&mut inner, &s);
+    write_ssh_mpint(&mut inner, r);
+    write_ssh_mpint(&mut inner, s);
 
-    // Build the outer signature: string(algorithm) || string(inner)
-    let mut sig = Vec::new();
-    write_ssh_string(&mut sig, KeyAlgorithm::EcdsaP256.ssh_key_type().as_bytes());
-    write_ssh_string(&mut sig, &inner);
+    let mut result = Vec::new();
+    write_ssh_string(
+        &mut result,
+        KeyAlgorithm::EcdsaP256.ssh_key_type().as_bytes(),
+    );
+    write_ssh_string(&mut result, &inner);
 
-    Ok(sig)
-}
-
-/// Parse a DER-encoded ECDSA signature into (r, s) byte vectors.
-fn parse_der_signature(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-    if der.len() < 6 {
-        return Err(Error::AgentProtocol("DER signature too short".into()));
-    }
-    if der[0] != 0x30 {
-        return Err(Error::AgentProtocol(format!(
-            "expected SEQUENCE tag (0x30), got 0x{:02x}",
-            der[0]
-        )));
-    }
-
-    let (seq_len, offset) = read_der_length(&der[1..])?;
-    let seq_data = &der[offset + 1..];
-    if seq_data.len() < seq_len {
-        return Err(Error::AgentProtocol("DER sequence truncated".into()));
-    }
-
-    let (r, rest) = read_der_integer(seq_data)?;
-    let (s, _) = read_der_integer(rest)?;
-
-    Ok((r, s))
-}
-
-/// Read a DER length field. Returns (length, bytes_consumed).
-fn read_der_length(data: &[u8]) -> Result<(usize, usize)> {
-    if data.is_empty() {
-        return Err(Error::AgentProtocol("unexpected end of DER data".into()));
-    }
-    if data[0] < 0x80 {
-        Ok((data[0] as usize, 1))
-    } else {
-        let num_bytes = (data[0] & 0x7F) as usize;
-        if num_bytes == 0 || num_bytes > 4 || data.len() < 1 + num_bytes {
-            return Err(Error::AgentProtocol("invalid DER length".into()));
-        }
-        let mut len = 0_usize;
-        for i in 0..num_bytes {
-            len = (len << 8) | (data[1 + i] as usize);
-        }
-        Ok((len, 1 + num_bytes))
-    }
-}
-
-/// Read a DER INTEGER, returning (value_bytes, remaining_data).
-fn read_der_integer(data: &[u8]) -> Result<(Vec<u8>, &[u8])> {
-    if data.len() < 2 {
-        return Err(Error::AgentProtocol("DER integer too short".into()));
-    }
-    if data[0] != 0x02 {
-        return Err(Error::AgentProtocol(format!(
-            "expected INTEGER tag (0x02), got 0x{:02x}",
-            data[0]
-        )));
-    }
-
-    let (len, offset) = read_der_length(&data[1..])?;
-    let start = 1 + offset;
-    if data.len() < start + len {
-        return Err(Error::AgentProtocol("DER integer truncated".into()));
-    }
-
-    let value = data[start..start + len].to_vec();
-    let rest = &data[start + len..];
-    Ok((value, rest))
+    Ok(result)
 }
 
 /// Write an SSH mpint (multi-precision integer) to a buffer.
-/// SSH mpints are big-endian, with a leading zero byte if the high bit is set.
+///
+/// SSH mpints are big-endian unsigned integers. A leading zero byte is
+/// required when the high bit of the most significant byte is set, to
+/// distinguish the value from a negative integer in the wire format.
+/// p256 returns normalized 32-byte field elements (no leading zeros), so
+/// this function adds the zero prefix as needed rather than stripping one.
 fn write_ssh_mpint(buf: &mut Vec<u8>, value: &[u8]) {
-    // Strip leading zeros (but keep at least one byte)
+    // Strip any redundant leading zeros first (guards against callers that
+    // pass DER-style padding), then add the required SSH leading zero if
+    // the high bit of the remaining first byte is set.
     let stripped = strip_leading_zeros(value);
-    write_ssh_string(buf, stripped);
+    if stripped.first().is_some_and(|b| b & 0x80 != 0) {
+        let mut padded = Vec::with_capacity(1 + stripped.len());
+        padded.push(0x00);
+        padded.extend_from_slice(stripped);
+        write_ssh_string(buf, &padded);
+    } else {
+        write_ssh_string(buf, stripped);
+    }
 }
 
 /// Strip leading zero bytes, keeping at least one byte.
@@ -116,10 +73,6 @@ fn strip_leading_zeros(data: &[u8]) -> &[u8] {
     }
     let mut i = 0;
     while i < data.len() - 1 && data[i] == 0 {
-        // Keep a leading zero if the next byte has high bit set (positive mpint)
-        if data[i + 1] & 0x80 != 0 {
-            break;
-        }
         i += 1;
     }
     &data[i..]
@@ -178,7 +131,9 @@ mod tests {
     #[test]
     fn test_strip_leading_zeros() {
         assert_eq!(strip_leading_zeros(&[0, 0, 1, 2]), &[1, 2]);
-        assert_eq!(strip_leading_zeros(&[0, 0x80, 1]), &[0, 0x80, 1]); // keep zero before high bit
+        // Leading zero before a high-bit byte is stripped; write_ssh_mpint
+        // re-adds it when encoding the SSH mpint.
+        assert_eq!(strip_leading_zeros(&[0, 0x80, 1]), &[0x80, 1]);
         assert_eq!(strip_leading_zeros(&[1, 2, 3]), &[1, 2, 3]);
         assert_eq!(strip_leading_zeros(&[0]), &[0]);
     }
@@ -306,11 +261,13 @@ mod tests {
 
     #[test]
     fn test_der_to_ssh_signature_maximum_length_p256() {
-        // Maximum P-256 DER: 33 bytes per integer (leading 0x00 + 32 bytes with high bit set)
-        let mut r = vec![0x00_u8];
-        r.extend_from_slice(&[0xFF; 32]);
-        let mut s = vec![0x00_u8];
-        s.extend_from_slice(&[0x80; 32]);
+        // P-256 DER with 33-byte integers: the leading 0x00 appears when the
+        // high bit of the integer is set. Use values well within the P-256 order
+        // (0x80 followed by 0x01 bytes) so p256 accepts the signature.
+        let mut r = vec![0x00_u8, 0x80];
+        r.extend_from_slice(&[0x01; 30]);
+        let mut s = vec![0x00_u8, 0x80];
+        s.extend_from_slice(&[0x02; 30]);
         let der = make_der_signature(&r, &s);
         let ssh_sig = der_to_ssh_signature(&der).unwrap();
 
@@ -321,9 +278,9 @@ mod tests {
         let (parsed_r, remaining) = sshenc_core::pubkey::read_ssh_string(inner).unwrap();
         let (parsed_s, _) = sshenc_core::pubkey::read_ssh_string(remaining).unwrap();
 
-        // Leading zeros should be preserved since next byte has high bit set
+        // write_ssh_mpint adds the leading zero when the high bit is set.
         assert_eq!(parsed_r[0], 0x00);
-        assert_eq!(parsed_r[1], 0xFF);
+        assert_eq!(parsed_r[1], 0x80);
         assert_eq!(parsed_s[0], 0x00);
         assert_eq!(parsed_s[1], 0x80);
     }
@@ -333,12 +290,7 @@ mod tests {
         // First byte is 0x31 (SET) instead of 0x30 (SEQUENCE)
         let bad = vec![0x31, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02];
         let result = der_to_ssh_signature(&bad);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("SEQUENCE") || err_msg.contains("0x30"),
-            "error should mention SEQUENCE tag: {err_msg}"
-        );
+        assert!(result.is_err(), "wrong DER tag should fail");
     }
 
     #[test]

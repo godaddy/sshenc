@@ -12,6 +12,7 @@ sshenc-core = { workspace = true }
 enclaveapp-core = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
+p256 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

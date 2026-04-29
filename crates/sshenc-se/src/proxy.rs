@@ -410,8 +410,9 @@ mod tests {
     fn ssh_sig_to_der_handles_high_bit_values() {
         // r with high bit set on first byte — DER needs a leading
         // zero to stay positive. SSH mpint mirrors that. Round-trip
-        // must preserve the representation.
-        let r = vec![0xFF_u8; 32];
+        // must preserve the representation. Use 0x80 (within P-256 order)
+        // rather than 0xFF (which exceeds the order and is rejected by p256).
+        let r = vec![0x80_u8; 32];
         let s = vec![0x42_u8; 32];
         let mut inner = Vec::new();
         inner.push(0x02);

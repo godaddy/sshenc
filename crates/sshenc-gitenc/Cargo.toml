@@ -12,6 +12,7 @@ name = "gitenc"
 path = "src/main.rs"
 
 [dependencies]
+clap = { workspace = true }
 dirs = { workspace = true }
 enclaveapp-core = { workspace = true }
 sshenc-core = { workspace = true }

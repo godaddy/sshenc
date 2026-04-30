@@ -1395,6 +1395,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "enclaveapp-core",
+ "p256",
  "sshenc-core",
  "thiserror",
  "tracing",

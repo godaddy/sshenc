@@ -15,12 +15,25 @@ jobs:
       targets: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]'
       linux_deps: "libdbus-1-dev pkg-config libtss2-dev"
       unix_binaries: "sshenc sshenc-keygen sshenc-agent gitenc sshenc-tpm-bridge"
+      # macOS doesn't ship sshenc-tpm-bridge — it's a stdio bridge
+      # for WSL talking to a Windows TPM 2.0, not relevant on macOS
+      # which routes through CryptoKit / Secure Enclave directly.
+      macos_binaries: "sshenc sshenc-keygen sshenc-agent gitenc"
       windows_binaries: "sshenc.exe sshenc-keygen.exe sshenc-agent.exe gitenc.exe sshenc-tpm-bridge.exe"
       wix_file: "installer/sshenc.wxs"
       extra_packaging: '{"unix_libs":"libsshenc_pkcs11.dylib libsshenc_pkcs11.so","windows_dlls":"sshenc_pkcs11.dll"}'
       homebrew: '{"tap_repo":"godaddy/homebrew-sshenc","formula_class":"Sshenc","description":"Hardware-backed SSH key management"}'
       scoop: '{"bucket_repo":"godaddy/scoop-sshenc","description":"Hardware-backed SSH key management (Windows TPM 2.0)","has_winget":true}'
       macos_signing_identity: "Developer ID Application: Jeremiah Gowdy (W2YG5ZG9D6)"
+      # Bundle the macOS binaries into a `.app` so AMFI accepts the
+      # `keychain-access-groups` entitlement that lets the
+      # wrapping-key `.userPresence` ACL install. The Homebrew
+      # formula generation symlinks the CLIs out of the bundle's
+      # `Contents/MacOS/` into `bin/` so user-facing invocation is
+      # unchanged. See
+      # `libenclaveapp/docs/macos-app-bundle-distribution.md`.
+      macos_bundle_id: "com.libenclaveapp.sshenc"
+      macos_entitlements_plist: "installer/sshenc.entitlements"
     secrets:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
@@ -29,3 +42,4 @@ jobs:
       NOTARIZATION_API_KEY: ${{ secrets.NOTARIZATION_API_KEY }}
       NOTARIZATION_KEY_ID: ${{ secrets.NOTARIZATION_KEY_ID }}
       NOTARIZATION_ISSUER_ID: ${{ secrets.NOTARIZATION_ISSUER_ID }}
+      MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}

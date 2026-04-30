@@ -62,16 +62,28 @@ sshenc install
 
 ### Linux — standalone tarball
 
-Two builds are published with every release; pick whichever suits your
-distro.
-
-**musl (recommended for portability)** — statically linked against musl
-libc, no runtime dependencies, runs on any Linux x86_64 (Ubuntu / Debian /
-RHEL / Arch / Alpine / WSL / containers, including older or stripped-down
-environments where `glibc` is too old for the gnu build):
+Four builds are published with every release — two architectures
+(x86_64 and aarch64) × two libc flavours (gnu and musl). Pick whichever
+suits your hardware and distro:
 
 ```sh
+# Detect your architecture
+uname -m   # x86_64 → use x86_64-* tarball
+           # aarch64 / arm64 → use aarch64-* tarball
+```
+
+**musl (recommended for portability)** — statically linked against musl
+libc, no runtime dependencies, runs on any Linux of the matching arch
+(Ubuntu / Debian / RHEL / Arch / Alpine / WSL / containers, including
+older or stripped-down environments where `glibc` is too old for the gnu
+build):
+
+```sh
+# x86_64:
 curl -L https://github.com/godaddy/sshenc/releases/latest/download/sshenc-x86_64-unknown-linux-musl.tar.gz | tar xz
+# aarch64 (Pi 4/5, Graviton, Apple Silicon Linux VMs):
+curl -L https://github.com/godaddy/sshenc/releases/latest/download/sshenc-aarch64-unknown-linux-musl.tar.gz | tar xz
+
 sudo install -m 755 sshenc sshenc-agent sshenc-keygen gitenc sshenc-tpm-bridge /usr/local/bin/
 sshenc install
 ```
@@ -89,7 +101,11 @@ desktop distro); `libtss2` is required only if you use
 `sshenc-tpm-bridge`.
 
 ```sh
+# x86_64:
 curl -L https://github.com/godaddy/sshenc/releases/latest/download/sshenc-x86_64-unknown-linux-gnu.tar.gz | tar xz
+# aarch64:
+curl -L https://github.com/godaddy/sshenc/releases/latest/download/sshenc-aarch64-unknown-linux-gnu.tar.gz | tar xz
+
 sudo install -m 755 sshenc sshenc-agent sshenc-keygen gitenc sshenc-tpm-bridge /usr/local/bin/
 sudo install -m 755 libsshenc_pkcs11.so /usr/local/lib/
 sshenc install

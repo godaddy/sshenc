@@ -13,9 +13,30 @@ use enclaveapp_wsl::install::WslInstallConfig;
 fn make_config() -> WslInstallConfig {
     WslInstallConfig {
         app_name: "sshenc".to_string(),
-        shell_block: r#"# sshenc: Bridge WSL to Windows sshenc-agent via named pipe relay.
-# All SSH operations (ssh, git, scp, sftp) use the Windows TPM keys.
-if command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1; then
+        shell_block: r#"# sshenc: pick the best available agent transport for this WSL distro.
+#
+# Preference order:
+#   1. Native sshenc-agent installed inside the distro. The native agent
+#      handles SSH-protocol traffic locally and uses the JSON-RPC TPM
+#      bridge to Windows for actual signing — no SSH-protocol stream
+#      traverses the WSL/Windows boundary, which avoids the
+#      socat+npiperelay race that intermittently surfaces as
+#      "sshenc-agent refused generate" on the GenerateKey extension.
+#   2. socat + npiperelay relay to the Windows agent's named pipe.
+#      Works for everyday sign / list operations; the GenerateKey
+#      extension is racy under this transport.
+#   3. Plain Windows SSH for git only — last-resort fallback when
+#      neither option is available.
+if command -v sshenc-agent >/dev/null 2>&1; then
+    export SSH_AUTH_SOCK="$HOME/.sshenc/agent.sock"
+    _sshenc_pid="$HOME/.sshenc/agent.pid"
+    if [ ! -S "$SSH_AUTH_SOCK" ] || ! kill -0 "$(cat "$_sshenc_pid" 2>/dev/null)" 2>/dev/null; then
+        mkdir -p "$HOME/.sshenc"
+        rm -f "$SSH_AUTH_SOCK"
+        sshenc-agent --socket "$SSH_AUTH_SOCK" >/dev/null 2>&1
+    fi
+    unset _sshenc_pid
+elif command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1; then
     export SSH_AUTH_SOCK="$HOME/.sshenc/agent.sock"
     _sshenc_pid="$HOME/.sshenc/bridge.pid"
     # Start bridge if not already running (atomic check via pid file)

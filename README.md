@@ -32,17 +32,18 @@ keys. Nothing breaks when you install sshenc.
 
 ## Installation
 
-**[Download latest release](https://github.com/godaddy/sshenc/releases/latest)** — pre-built binaries for macOS and Windows.
+**[Download latest release](https://github.com/godaddy/sshenc/releases/latest)** — pre-built signed-and-notarized binaries for macOS, Linux, and Windows. No Rust toolchain or Apple Developer account required.
 
-### Homebrew (macOS)
+### Homebrew (macOS or Linux)
 
 ```sh
 brew tap godaddy/sshenc
 brew install sshenc
 ```
 
-Pre-built binaries for Apple Silicon and Intel. No Rust toolchain or Apple
-Developer account needed.
+On macOS this installs the signed-and-notarized `sshenc.app` bundle and
+symlinks the CLIs into `bin/`. On Linux (linuxbrew) it installs the
+prebuilt Linux binaries straight into the Homebrew prefix.
 
 ### Windows — MSI installer
 
@@ -59,15 +60,38 @@ scoop install sshenc
 sshenc install
 ```
 
-### Linux -- tarball
+### Linux — standalone tarball
 
-Download `sshenc-x86_64-unknown-linux-gnu.tar.gz` from the
-[latest release](https://github.com/godaddy/sshenc/releases). Extract and
-copy the binaries to a directory in your PATH:
+Two builds are published with every release; pick whichever suits your
+distro.
+
+**musl (recommended for portability)** — statically linked against musl
+libc, no runtime dependencies, runs on any Linux x86_64 (Ubuntu / Debian /
+RHEL / Arch / Alpine / WSL / containers, including older or stripped-down
+environments where `glibc` is too old for the gnu build):
 
 ```sh
-tar xzf sshenc-x86_64-unknown-linux-gnu.tar.gz
-sudo cp sshenc sshenc-agent sshenc-keygen gitenc /usr/local/bin/
+curl -L https://github.com/godaddy/sshenc/releases/latest/download/sshenc-x86_64-unknown-linux-musl.tar.gz | tar xz
+sudo install -m 755 sshenc sshenc-agent sshenc-keygen gitenc sshenc-tpm-bridge /usr/local/bin/
+sshenc install
+```
+
+The musl build does not include `libsshenc_pkcs11.so` — that's a
+dynamic-library that can't be statically linked. If you need the PKCS#11
+provider (only relevant for tools that load PKCS#11 modules directly,
+e.g. `ssh -o PKCS11Provider=...`), use the gnu build below.
+
+**gnu (dynamic-linked)** — full feature set including
+`libsshenc_pkcs11.so`. Built on Ubuntu 22.04, so it requires `glibc` 2.35+
+(works on Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch — does **not** run on
+RHEL 8 / CentOS 7). `libdbus-1` is required (already present on any
+desktop distro); `libtss2` is required only if you use
+`sshenc-tpm-bridge`.
+
+```sh
+curl -L https://github.com/godaddy/sshenc/releases/latest/download/sshenc-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -m 755 sshenc sshenc-agent sshenc-keygen gitenc sshenc-tpm-bridge /usr/local/bin/
+sudo install -m 755 libsshenc_pkcs11.so /usr/local/lib/
 sshenc install
 ```
 

@@ -34,6 +34,24 @@ keys. Nothing breaks when you install sshenc.
 
 **[Download latest release](https://github.com/godaddy/sshenc/releases/latest)** — pre-built signed-and-notarized binaries for macOS, Linux, and Windows. No Rust toolchain or Apple Developer account required.
 
+> **How releases are built.** Every binary in every published release is
+> compiled in the open by [GitHub Actions](https://github.com/godaddy/sshenc/actions/workflows/release.yml)
+> from the corresponding tag's source on this repository — not on a
+> developer's laptop. Each release page links to the workflow run that
+> produced it, so you can audit the exact source commit, runner image,
+> Rust toolchain version, and build/sign/notarize steps. macOS binaries
+> are signed with the team's Developer ID Application identity inside
+> a runner-scoped temporary keychain and submitted to Apple's notary
+> service; Windows binaries are signed by the same path; the macOS
+> `.app` bundle has its provisioning profile embedded at build time.
+> If you want to verify reproducibility, every step of the pipeline
+> is visible in the workflow logs.
+
+If you'd rather build from source — for any reason, including not
+trusting our CI — see [§ From source](#from-source-macos) below. Note
+that local source builds on macOS have a different UX than the signed
+release binaries; see that section for the specifics.
+
 ### Homebrew (macOS or Linux)
 
 ```sh
@@ -113,6 +131,10 @@ sshenc install
 
 ### From source (macOS)
 
+The signed Homebrew install above is the recommended path for most users.
+Build from source if you specifically want to inspect or modify the code,
+audit the build yourself, or distrust the release pipeline.
+
 Requires Rust 1.75+, Xcode command line tools, and macOS (Apple Silicon or
 T2 Mac).
 
@@ -122,10 +144,41 @@ cd sshenc
 make install
 ```
 
-No code signing is required. `cargo build` produces linker-signed binaries
-that macOS trusts for CryptoKit Secure Enclave access out of the box.
+`cargo build` produces ad-hoc / linker-signed binaries that macOS accepts
+for CryptoKit Secure Enclave operations out of the box — no Apple Developer
+account or codesigning identity required. **The Secure Enclave still works;
+your keys are still hardware-bound.**
+
+What's different vs. the signed Homebrew install:
+
+- **Per-rebuild keychain prompt.** Every fresh `cargo build` produces a
+  binary with a new ad-hoc code-signing hash, so the first time the new
+  binary touches the wrapping-key keychain item, the legacy keychain ACL
+  pops a one-time *Allow / login password* dialog. Click Always Allow.
+  This repeats once per rebuild. The signed Homebrew binaries don't have
+  this — the cdhash is stable across upgrades because every release shares
+  the same Developer ID identity.
+- **No wrapping-key user-presence gate.** The `.userPresence` ACL on the
+  AES wrapping key (a defense-in-depth layer that requires a Touch ID
+  prompt to fetch the key from the keychain) only installs when the
+  binary carries a `keychain-access-groups` entitlement, which requires
+  an embedded provisioning profile, which requires the `.app` bundle
+  pattern that only the signed Homebrew install uses. Local source
+  builds fall back to the legacy keychain — the agent log explicitly
+  surfaces the downgrade. **The SE-level user-presence gate (per-key
+  Touch ID at sign time) is unaffected** and continues to work.
+- **No Gatekeeper "Notarized Developer ID" trust.** Local builds aren't
+  notarized; if you `xattr -w com.apple.quarantine` and try `spctl --assess`
+  it'll reject. Practically: launching the binary directly from your shell
+  works; downloading it from a browser would not.
+
+`docs/macos-unsigned-ux.md` has the full empirical UX analysis behind
+these distinctions if you want the details.
 
 ### From source (Windows)
+
+The signed Scoop / MSI install above is the recommended path. Build from
+source if you specifically want to inspect or modify the code.
 
 Requires Rust 1.75+ and Visual Studio Build Tools.
 
@@ -136,7 +189,16 @@ cargo build --workspace --release
 # Copy binaries to a directory in your PATH
 ```
 
+The locally-built binaries are unsigned; Windows SmartScreen may warn
+on first run. Behaviour against the TPM is identical to the signed
+release build.
+
 ### From source (Linux)
+
+The Homebrew (linuxbrew) or standalone-tarball install above is the
+recommended path. Build from source if you want to inspect / modify the
+code, target an architecture or libc flavour we don't publish a binary
+for, or distrust the release pipeline.
 
 Requires Rust 1.75+. For TPM support, install `tpm2-tss` development
 libraries (`libtss2-dev` on Debian/Ubuntu, `tpm2-tss-devel` on Fedora).
@@ -148,6 +210,9 @@ cargo build --workspace --release
 sudo cp target/release/sshenc target/release/sshenc-agent target/release/sshenc-keygen target/release/gitenc /usr/local/bin/
 sshenc install
 ```
+
+Linux has no signing-related UX delta between local builds and release
+binaries — the binary works the same either way.
 
 ## Quick start
 

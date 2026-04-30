@@ -147,6 +147,59 @@ impl AgentProxyBackend {
         }
     }
 
+    /// After a successful `generate` over the wire, persist the SEC1
+    /// public-key cache and the JSON metadata under `keys_dir` so the
+    /// proxy's read-only ops (`get` / `list` / `inspect` /
+    /// `export-pub`) can find the freshly-created key on the next
+    /// invocation. This duplicates the persistence step
+    /// [`crate::unified::SshencBackend::generate`] performs on the
+    /// agent's host — necessary because the CLI's `keys_dir` and the
+    /// agent's `keys_dir` are NOT the same path when the agent runs
+    /// on a different OS than the CLI (the WSL → Windows
+    /// socat/named-pipe case).
+    fn cache_key_artifacts_locally(
+        &self,
+        opts: &KeyGenOptions,
+        public_bytes: &[u8],
+        pub_file_path: Option<&std::path::Path>,
+    ) -> Result<()> {
+        metadata::ensure_dir(&self.keys_dir).map_err(|e| map_meta_err("ensure_keys_dir", e))?;
+
+        // SEC1 public-key cache — `metadata::load_pub_key` reads this
+        // back during `get` and would otherwise fail with KeyNotFound.
+        metadata::save_pub_key(&self.keys_dir, opts.label.as_str(), public_bytes)
+            .map_err(|e| map_meta_err("save_pub_key", e))?;
+
+        // JSON `.meta`. Mirror the field set written by
+        // `SshencBackend::generate`: comment, pub_file_path,
+        // presence_mode. Use the same load-or-init helper so we
+        // preserve any unexpected app-specific fields a future agent
+        // may have already written on a shared filesystem.
+        let mut meta = crate::compat::load_sshenc_meta(&self.keys_dir, opts.label.as_str())
+            .map_err(|e| map_meta_err("load_meta", e))?;
+        // `load_sshenc_meta` returns a default with AccessPolicy::None
+        // when the file is absent — overwrite with the policy we just
+        // generated under so subsequent `inspect` shows the right value.
+        meta.access_policy = opts.access_policy;
+        if let Some(ref comment) = opts.comment {
+            meta.set_app_field("comment", comment.clone());
+        }
+        match pub_file_path {
+            Some(path) => meta.set_app_field(
+                "pub_file_path",
+                path.as_os_str().to_string_lossy().to_string(),
+            ),
+            None => meta.set_app_field("pub_file_path", serde_json::Value::Null),
+        }
+        meta.set_app_field(
+            "presence_mode",
+            presence_mode_to_app_specific_str(opts.presence_mode),
+        );
+        metadata::save_meta(&self.keys_dir, opts.label.as_str(), &meta)
+            .map_err(|e| map_meta_err("save_meta", e))?;
+        Ok(())
+    }
+
     /// Match [`SshencBackend::persisted_pub_file_path`] semantics:
     /// prefer an explicit `pub_file_path` recorded in metadata,
     /// otherwise probe `pub_dir/<label>.pub`. Disk-only; never
@@ -214,6 +267,20 @@ impl KeyBackend for AgentProxyBackend {
         } else {
             None
         };
+
+        // Mirror the metadata + SEC1 cache that `SshencBackend::generate`
+        // writes on the agent's host. When the CLI and agent run on the
+        // same host this is a redundant idempotent write to the same
+        // `.pub` / `.meta` paths the agent just wrote. When the CLI
+        // sits in WSL and reaches a Windows agent over socat / the
+        // OpenSSH named pipe, the agent's writes land under
+        // `%APPDATA%\sshenc\keys` on Windows and the WSL keys_dir
+        // would otherwise be empty — making subsequent
+        // `inspect` / `export-pub` / `list` fail with
+        // `load_pub_key: key not found`. Persisting locally here
+        // restores the read-side invariants AgentProxyBackend depends
+        // on without expanding the wire protocol.
+        self.cache_key_artifacts_locally(opts, &public_bytes, pub_file_path.as_deref())?;
 
         Ok(KeyInfo {
             metadata: KeyMetadata::with_presence_mode(
@@ -294,7 +361,24 @@ impl KeyBackend for AgentProxyBackend {
                      (check agent logs)"
                 ),
             )
-        })
+        })?;
+        // Symmetrical to `cache_key_artifacts_locally`: when CLI and
+        // agent share keys_dir the agent already removed these; when
+        // they don't (WSL → Windows agent) the local cache would
+        // otherwise stay around as ghost entries surfaced by `list`.
+        // Failures here are not fatal — the authoritative state is in
+        // the hardware key store, not the cache.
+        let pub_path = self.keys_dir.join(format!("{label}.pub"));
+        let meta_path = self.keys_dir.join(format!("{label}.meta"));
+        let meta_hmac = self.keys_dir.join(format!("{label}.meta.hmac"));
+        for p in [pub_path, meta_path, meta_hmac] {
+            if let Err(e) = std::fs::remove_file(&p) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!(path = %p.display(), error = %e, "post-delete cache cleanup");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn rename(&self, old_label: &str, new_label: &str) -> Result<()> {
@@ -430,5 +514,163 @@ mod tests {
         let ssh_sig = der_to_ssh_signature(&der_original).unwrap();
         let der_round = ssh_sig_to_der(&ssh_sig).unwrap();
         assert_eq!(der_round, der_original);
+    }
+
+    // ---- Local cache after agent-side generate (Issue: WSL → Windows
+    // agent leaves CLI keys_dir empty, breaking inspect/list) ----
+
+    use sshenc_core::key::KeyGenOptions;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CACHE_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn cache_test_dirs() -> (PathBuf, PathBuf) {
+        let id = CACHE_TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("sshenc-proxy-cache-{}-{id}", std::process::id(),));
+        let keys = base.join("keys");
+        let pubs = base.join("pub");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::create_dir_all(&pubs).unwrap();
+        (keys, pubs)
+    }
+
+    fn make_backend(keys: PathBuf, pubs: PathBuf, sock: PathBuf) -> AgentProxyBackend {
+        AgentProxyBackend {
+            keys_dir: keys,
+            pub_dir: pubs,
+            socket_path: sock,
+        }
+    }
+
+    fn p256_pub_bytes() -> Vec<u8> {
+        // Valid P-256 generator G in uncompressed SEC1 form
+        // (`0x04 || Gx || Gy`). The canonical generator coordinates
+        // are spelled out byte-for-byte so the test stays free of any
+        // hex-decode dependency. Source: SEC2 §2.4.2.
+        let gx: [u8; 32] = [
+            0x6B, 0x17, 0xD1, 0xF2, 0xE1, 0x2C, 0x42, 0x47, 0xF8, 0xBC, 0xE6, 0xE5, 0x63, 0xA4,
+            0x40, 0xF2, 0x77, 0x03, 0x7D, 0x81, 0x2D, 0xEB, 0x33, 0xA0, 0xF4, 0xA1, 0x39, 0x45,
+            0xD8, 0x98, 0xC2, 0x96,
+        ];
+        let gy: [u8; 32] = [
+            0x4F, 0xE3, 0x42, 0xE2, 0xFE, 0x1A, 0x7F, 0x9B, 0x8E, 0xE7, 0xEB, 0x4A, 0x7C, 0x0F,
+            0x9E, 0x16, 0x2B, 0xCE, 0x33, 0x57, 0x6B, 0x31, 0x5E, 0xCE, 0xCB, 0xB6, 0x40, 0x68,
+            0x37, 0xBF, 0x51, 0xF5,
+        ];
+        let mut bytes = Vec::with_capacity(65);
+        bytes.push(0x04);
+        bytes.extend_from_slice(&gx);
+        bytes.extend_from_slice(&gy);
+        bytes
+    }
+
+    #[test]
+    fn cache_key_artifacts_writes_pub_and_meta_to_keys_dir() {
+        let (keys_dir, pub_dir) = cache_test_dirs();
+        let backend = make_backend(keys_dir.clone(), pub_dir, PathBuf::from("/dev/null"));
+
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("ub-test").unwrap(),
+            comment: Some("test@host".into()),
+            access_policy: enclaveapp_core::AccessPolicy::None,
+            presence_mode: PresenceMode::None,
+            write_pub_path: None,
+        };
+        let pub_bytes = p256_pub_bytes();
+        backend
+            .cache_key_artifacts_locally(&opts, &pub_bytes, None)
+            .unwrap();
+
+        // SEC1 .pub cache landed where load_pub_key reads it.
+        let cached_pub = metadata::load_pub_key(&keys_dir, "ub-test").unwrap();
+        assert_eq!(cached_pub, pub_bytes);
+
+        // .meta carries the comment, presence_mode, null pub_file_path.
+        let meta = crate::compat::load_sshenc_meta(&keys_dir, "ub-test").unwrap();
+        assert_eq!(
+            meta.app_specific.get("comment").and_then(|v| v.as_str()),
+            Some("test@host")
+        );
+        assert_eq!(
+            meta.app_specific
+                .get("presence_mode")
+                .and_then(|v| v.as_str()),
+            Some("none")
+        );
+        assert!(meta
+            .app_specific
+            .get("pub_file_path")
+            .map(serde_json::Value::is_null)
+            .unwrap_or(false));
+        std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cache_key_artifacts_records_pub_file_path_when_present() {
+        let (keys_dir, pub_dir) = cache_test_dirs();
+        let backend = make_backend(
+            keys_dir.clone(),
+            pub_dir.clone(),
+            PathBuf::from("/dev/null"),
+        );
+
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("with-pub").unwrap(),
+            comment: None,
+            access_policy: enclaveapp_core::AccessPolicy::Any,
+            presence_mode: PresenceMode::Cached,
+            write_pub_path: None,
+        };
+        let pub_bytes = p256_pub_bytes();
+        let pub_file = pub_dir.join("with-pub.pub");
+        backend
+            .cache_key_artifacts_locally(&opts, &pub_bytes, Some(&pub_file))
+            .unwrap();
+
+        let meta = crate::compat::load_sshenc_meta(&keys_dir, "with-pub").unwrap();
+        assert_eq!(meta.access_policy, enclaveapp_core::AccessPolicy::Any);
+        assert_eq!(
+            meta.app_specific
+                .get("pub_file_path")
+                .and_then(|v| v.as_str()),
+            Some(pub_file.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            meta.app_specific
+                .get("presence_mode")
+                .and_then(|v| v.as_str()),
+            Some("cached")
+        );
+        std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cache_then_get_round_trips_via_disk_only() {
+        // Once cache_key_artifacts_locally has run, AgentProxyBackend::get
+        // (which reads only from keys_dir, never the agent) must return
+        // the same KeyInfo. This is the exact path that was failing
+        // for `sshenc inspect` after a WSL → Windows agent keygen.
+        let (keys_dir, pub_dir) = cache_test_dirs();
+        let backend = make_backend(keys_dir.clone(), pub_dir, PathBuf::from("/dev/null"));
+
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("rt-key").unwrap(),
+            comment: Some("round@trip".into()),
+            access_policy: enclaveapp_core::AccessPolicy::None,
+            presence_mode: PresenceMode::None,
+            write_pub_path: None,
+        };
+        let pub_bytes = p256_pub_bytes();
+        backend
+            .cache_key_artifacts_locally(&opts, &pub_bytes, None)
+            .unwrap();
+
+        let info = backend.get("rt-key").unwrap();
+        assert_eq!(info.metadata.label.as_str(), "rt-key");
+        assert_eq!(info.metadata.comment.as_deref(), Some("round@trip"));
+        assert_eq!(info.public_key_bytes, pub_bytes);
+        assert!(info.fingerprint_sha256.starts_with("SHA256:"));
+        std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
     }
 }

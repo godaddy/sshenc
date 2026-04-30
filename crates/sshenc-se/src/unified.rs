@@ -173,17 +173,23 @@ impl SshencBackend {
             force_keyring,
             wrapping_key_user_presence: true,
             wrapping_key_cache_ttl: cache_ttl,
-            // Data Protection keychain access group is left unset.
-            // Routing through the DP keychain would require a
-            // `keychain-access-groups` entitlement, which is a
-            // restricted entitlement — AMFI refuses to launch the
-            // binary without a matching provisioning profile, and
-            // Apple does not issue provisioning profiles for raw CLI
-            // binaries distributed via Homebrew tarballs. See
-            // `docs/macos-unsigned-ux.md` § "Stable Developer ID
-            // code signing" for the full rationale. The bridge falls
-            // back gracefully if a future caller does set this.
-            keychain_access_group: None,
+            // Data Protection keychain access group. Released sshenc
+            // ships as a `.app` bundle (`com.libenclaveapp.sshenc`)
+            // signed with a Developer ID Application identity and an
+            // embedded provisioning profile that entitles
+            // `W2YG5ZG9D6.*` keychain access groups, so SecItemAdd
+            // accepts `kSecUseDataProtectionKeychain: true` +
+            // `kSecAttrAccessGroup` and the wrapping-key
+            // `.userPresence` ACL actually fires.
+            //
+            // Ad-hoc / unsigned local builds fall back to the legacy
+            // keychain via the bridge's `errSecMissingEntitlement`
+            // handler — same UX as before this opt-in. See
+            // `libenclaveapp/docs/macos-app-bundle-distribution.md`
+            // for the full pattern and `docs/macos-unsigned-ux.md` for
+            // why CLI distribution can't reach the DP keychain
+            // without the .app-bundle pattern.
+            keychain_access_group: Some("W2YG5ZG9D6.com.libenclaveapp.sshenc".into()),
         })?;
 
         Ok(Self {

@@ -66,4 +66,44 @@ pub trait KeyBackend: Send + Sync {
 
     /// Check if the backend is available (e.g., Secure Enclave hardware present).
     fn is_available(&self) -> bool;
+
+    // --- FIDO2 / WebAuthn SK key methods --------------------------
+    //
+    // Default impls error / return empty so existing trait
+    // implementors (mock backend, agent-proxy backend) keep
+    // compiling. Only `SshencBackend` overrides these. The agent
+    // calls these when serving identities and sign requests so SK
+    // keys appear alongside legacy keys to ssh.exe / git.
+
+    /// True if `label` resolves to an SK key. Default: false.
+    fn is_sk_label(&self, _label: &str) -> bool {
+        false
+    }
+
+    /// Enumerate SK key labels persisted on disk. Default: empty.
+    fn sk_list_labels(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Load full SK key info. Default: error.
+    fn sk_get(&self, label: &str) -> Result<KeyInfo> {
+        Err(sshenc_core::error::Error::Other(format!(
+            "sk_get not supported on this backend (label '{label}')"
+        )))
+    }
+
+    /// Sign with an SK key. Default: error.
+    fn sk_sign(&self, label: &str, _data: &[u8]) -> Result<Vec<u8>> {
+        Err(sshenc_core::error::Error::Other(format!(
+            "sk_sign not supported on this backend (label '{label}')"
+        )))
+    }
+
+    /// Delete an SK key (including its platform-credential entry).
+    /// Default: error.
+    fn sk_delete(&self, label: &str) -> Result<()> {
+        Err(sshenc_core::error::Error::Other(format!(
+            "sk_delete not supported on this backend (label '{label}')"
+        )))
+    }
 }

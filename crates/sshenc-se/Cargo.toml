@@ -8,11 +8,16 @@ rust-version.workspace = true
 repository.workspace = true
 
 [features]
-default = []
+default = ["webauthn-sk"]
 # Compiles in a software-only signing backend and lets the runtime
 # `SSHENC_FORCE_SOFTWARE=1` env var select it instead of the platform
 # hardware backend. Test-only — never enabled in shipping builds.
 force-software = ["dep:enclaveapp-test-software"]
+# Compiles in the FIDO2 SK / WebAuthn key path (`sshenc keygen --strong`).
+# When disabled, sshenc only knows the legacy ecdsa-sha2-nistp256 path.
+# Default-on; gate exists so build profiles that don't want the WebAuthn
+# surface area can opt out at compile time.
+webauthn-sk = ["dep:enclaveapp-windows-webauthn"]
 
 [dependencies]
 sshenc-core = { workspace = true }
@@ -20,7 +25,10 @@ sshenc-agent-proto = { workspace = true }
 enclaveapp-core = { workspace = true }
 enclaveapp-app-storage = { workspace = true }
 enclaveapp-test-software = { workspace = true, optional = true }
+enclaveapp-windows-webauthn = { workspace = true, optional = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }

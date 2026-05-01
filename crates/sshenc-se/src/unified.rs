@@ -250,6 +250,245 @@ impl SshencBackend {
             None => self.find_pub_file(label),
         }
     }
+
+    /// Generate an SK (FIDO2 / WebAuthn) key. See [`crate::sk`] for
+    /// the full design notes. This is an inherent method because
+    /// `KeyBackend::generate` takes the legacy `KeyGenOptions` and
+    /// extending the trait would touch every implementor / mock.
+    /// Persists app-specific metadata (`algorithm`, `credential_id`,
+    /// `rp_id`) alongside the standard fields so subsequent
+    /// `sk_sign`/`sk_get`/`sk_delete` calls can pick the SK path
+    /// up by just loading `.meta`.
+    #[cfg(feature = "webauthn-sk")]
+    pub fn sk_generate(&self, opts: &sshenc_core::key::SkKeyGenOptions) -> Result<KeyInfo> {
+        let label_str = opts.label.as_str();
+
+        if std::fs::metadata(self.keys_dir.join(format!("{label_str}.meta"))).is_ok() {
+            return Err(Error::DuplicateLabel {
+                label: label_str.to_string(),
+            });
+        }
+
+        let info = crate::sk::generate(opts)?;
+
+        // Persist as `enclaveapp_core::KeyMeta` with SK-specific
+        // app_specific fields. Old loaders see `algorithm` as a
+        // string they don't understand and fall through to legacy
+        // assumptions; new loaders pivot on it. base64 the
+        // credential_id for a human-inspectable .meta file.
+        let mut meta = metadata::KeyMeta::new(label_str, KeyType::Signing, AccessPolicy::Any);
+        meta.set_app_field("algorithm", "sk-ecdsa-sha2-nistp256");
+        if let Some(ref cid) = info.metadata.credential_id {
+            use base64::engine::general_purpose::STANDARD;
+            use base64::Engine;
+            meta.set_app_field("credential_id_b64", STANDARD.encode(cid));
+        }
+        if let Some(ref rp) = info.metadata.rp_id {
+            meta.set_app_field("rp_id", rp.clone());
+        }
+        if let Some(ref c) = opts.comment {
+            meta.set_app_field("comment", c.clone());
+        }
+        match opts.write_pub_path.as_ref() {
+            Some(path) => meta.set_app_field(
+                "pub_file_path",
+                path.as_os_str().to_string_lossy().to_string(),
+            ),
+            None => meta.set_app_field("pub_file_path", serde_json::Value::Null),
+        }
+        metadata::save_meta(&self.keys_dir, label_str, &meta)
+            .map_err(|e| map_err("save_meta", e))?;
+
+        Ok(info)
+    }
+
+    /// True if `label` resolves to an SK key (peeked from the
+    /// stored metadata's `algorithm` app_specific field). Returns
+    /// false for legacy keys and for missing metadata.
+    ///
+    /// This is the inherent implementation -- the same-named trait
+    /// method (`KeyBackend::is_sk_label`) delegates here. The
+    /// `same_name_method` clippy lint complains about the name
+    /// collision, but the duplication is intentional: it lets
+    /// concrete-type callers (`SshencBackend::is_sk_label(...)`)
+    /// avoid trait-object dispatch on a hot path.
+    #[cfg(feature = "webauthn-sk")]
+    #[allow(clippy::same_name_method)]
+    pub fn is_sk_label(&self, label: &str) -> bool {
+        match compat::load_sshenc_meta(&self.keys_dir, label) {
+            Ok(m) => m.get_app_field("algorithm") == Some("sk-ecdsa-sha2-nistp256"),
+            Err(_) => false,
+        }
+    }
+
+    /// Load full key info for an SK key. Returns `Err` if the
+    /// label is not an SK key.
+    #[cfg(feature = "webauthn-sk")]
+    #[allow(clippy::same_name_method)]
+    pub fn sk_get(&self, label: &str) -> Result<KeyInfo> {
+        drop(KeyLabel::new(label)?);
+        let meta =
+            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        if meta.get_app_field("algorithm") != Some("sk-ecdsa-sha2-nistp256") {
+            return Err(Error::Other(format!("key '{label}' is not an SK key")));
+        }
+
+        let credential_id = meta
+            .get_app_field("credential_id_b64")
+            .ok_or_else(|| Error::Other(format!("SK key '{label}' missing credential_id")))?;
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let credential_id = STANDARD.decode(credential_id).map_err(Error::Base64)?;
+        let rp_id = meta
+            .get_app_field("rp_id")
+            .ok_or_else(|| Error::Other(format!("SK key '{label}' missing rp_id")))?
+            .to_string();
+        let comment = meta.get_app_field("comment").map(|s| s.to_string());
+
+        // For the public-key bytes we read the .pub file the keygen
+        // step wrote (the SK pub line embeds the SEC1 point). If
+        // the user deleted the .pub file we can't reconstruct -- SK
+        // keys, unlike CNG keys, have no provider-side enumeration
+        // to fall back on.
+        let pub_file = self.persisted_pub_file_path(&meta, label);
+        let ssh_line = pub_file
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "SK key '{label}' .pub file missing -- cannot reconstruct public key bytes"
+                ))
+            })?;
+        let parsed_line = ssh_line.trim().splitn(3, ' ').collect::<Vec<_>>();
+        if parsed_line.len() < 2 {
+            return Err(Error::InvalidPublicKey(format!(
+                "SK key '{label}' .pub file is malformed"
+            )));
+        }
+        let blob = STANDARD.decode(parsed_line[1]).map_err(Error::Base64)?;
+        // Wire format: string(type) string(curve) string(Q) string(application)
+        let (key_type, rest) = sshenc_core::pubkey::read_ssh_string(&blob)?;
+        if key_type != b"sk-ecdsa-sha2-nistp256@openssh.com" {
+            return Err(Error::InvalidPublicKey(format!(
+                "SK key '{label}' .pub file has wrong key type: {:?}",
+                std::str::from_utf8(key_type)
+            )));
+        }
+        let (_curve, rest) = sshenc_core::pubkey::read_ssh_string(rest)?;
+        let (q, _rest) = sshenc_core::pubkey::read_ssh_string(rest)?;
+        let public_key_bytes = q.to_vec();
+
+        let pubkey = sshenc_core::pubkey::SshSkPublicKey::from_sec1_bytes(
+            &public_key_bytes,
+            rp_id.clone(),
+            comment.clone(),
+        )?;
+        let (fp_sha256, fp_md5) = fingerprint::sk_fingerprints(&pubkey);
+
+        let metadata_out = KeyMetadata::for_sk(
+            KeyLabel::new(label)?,
+            AccessPolicy::Any,
+            Some(PresenceMode::Strict),
+            comment,
+            credential_id,
+            rp_id,
+        );
+
+        Ok(KeyInfo {
+            metadata: metadata_out,
+            public_key_bytes,
+            fingerprint_sha256: fp_sha256,
+            fingerprint_md5: fp_md5,
+            pub_file_path: pub_file,
+        })
+    }
+
+    /// Sign with an SK key. The `data` bytes go straight into
+    /// WebAuthn as `pbClientDataJSON`; the OS hashes them with
+    /// SHA-256, the TPM signs `authenticator_data || that_hash`,
+    /// and we wrap the result in the OpenSSH SK signature blob.
+    #[cfg(feature = "webauthn-sk")]
+    #[allow(clippy::same_name_method)]
+    pub fn sk_sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
+        drop(KeyLabel::new(label)?);
+        let meta =
+            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        if meta.get_app_field("algorithm") != Some("sk-ecdsa-sha2-nistp256") {
+            return Err(Error::Other(format!("key '{label}' is not an SK key")));
+        }
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let credential_id = meta
+            .get_app_field("credential_id_b64")
+            .ok_or_else(|| Error::Other(format!("SK key '{label}' missing credential_id")))?;
+        let credential_id = STANDARD.decode(credential_id).map_err(Error::Base64)?;
+        let rp_id = meta
+            .get_app_field("rp_id")
+            .ok_or_else(|| Error::Other(format!("SK key '{label}' missing rp_id")))?;
+
+        crate::sk::sign(&credential_id, rp_id, data)
+    }
+
+    /// Delete an SK key: remove the persisted `.meta` and `.pub`
+    /// files, AND ask Windows to remove the platform credential
+    /// from the user's passkey list (so the chooser scope shrinks).
+    #[allow(clippy::same_name_method)]
+    #[cfg(feature = "webauthn-sk")]
+    pub fn sk_delete(&self, label: &str) -> Result<()> {
+        drop(KeyLabel::new(label)?);
+        let meta =
+            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        if meta.get_app_field("algorithm") != Some("sk-ecdsa-sha2-nistp256") {
+            return Err(Error::Other(format!("key '{label}' is not an SK key")));
+        }
+
+        // Best-effort platform-credential cleanup; if the user
+        // already deleted it via Settings -> Passkeys, just move on.
+        if let Some(cred_b64) = meta.get_app_field("credential_id_b64") {
+            use base64::engine::general_purpose::STANDARD;
+            use base64::Engine;
+            if let Ok(cred_id) = STANDARD.decode(cred_b64) {
+                drop(crate::sk::delete_platform_credential(&cred_id));
+            }
+        }
+
+        // Remove .meta and .pub side-state.
+        let meta_path = self.keys_dir.join(format!("{label}.meta"));
+        drop(std::fs::remove_file(&meta_path));
+        if let Some(pub_path) = self.persisted_pub_file_path(&meta, label) {
+            drop(std::fs::remove_file(pub_path));
+        }
+        Ok(())
+    }
+
+    /// List all SK key labels by scanning `.meta` files in the
+    /// keys directory and filtering for the SK algorithm marker.
+    /// Distinct from the trait `list()` (which enumerates legacy
+    #[allow(clippy::same_name_method)]
+    /// keys via the platform key manager).
+    #[cfg(feature = "webauthn-sk")]
+    pub fn sk_list_labels(&self) -> Result<Vec<String>> {
+        let read = match std::fs::read_dir(&self.keys_dir) {
+            Ok(r) => r,
+            Err(_) => return Ok(Vec::new()), // dir missing == no keys
+        };
+        let mut out = Vec::new();
+        for entry in read.flatten() {
+            let path = entry.path();
+            let label = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if path.extension().and_then(|s| s.to_str()) != Some("meta") {
+                continue;
+            }
+            if self.is_sk_label(&label) {
+                out.push(label);
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
 }
 
 /// Map an enclaveapp_core error to an sshenc_core error.
@@ -431,6 +670,35 @@ impl KeyBackend for SshencBackend {
 
     fn is_available(&self) -> bool {
         self.key_manager().is_available()
+    }
+
+    // SK trait method overrides delegate to the inherent methods of
+    // the same name. `Self::method(self, ...)` resolves to the
+    // inherent (preferred over trait method when both exist).
+
+    #[cfg(feature = "webauthn-sk")]
+    fn is_sk_label(&self, label: &str) -> bool {
+        Self::is_sk_label(self, label)
+    }
+
+    #[cfg(feature = "webauthn-sk")]
+    fn sk_list_labels(&self) -> Result<Vec<String>> {
+        Self::sk_list_labels(self)
+    }
+
+    #[cfg(feature = "webauthn-sk")]
+    fn sk_get(&self, label: &str) -> Result<KeyInfo> {
+        Self::sk_get(self, label)
+    }
+
+    #[cfg(feature = "webauthn-sk")]
+    fn sk_sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
+        Self::sk_sign(self, label, data)
+    }
+
+    #[cfg(feature = "webauthn-sk")]
+    fn sk_delete(&self, label: &str) -> Result<()> {
+        Self::sk_delete(self, label)
     }
 }
 

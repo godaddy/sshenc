@@ -78,6 +78,19 @@ enum Commands {
         /// Output in JSON format.
         #[arg(long)]
         json: bool,
+
+        /// Use the FIDO2 / Windows Hello platform-authenticator path
+        /// instead of the legacy CNG / Secure Enclave path. Produces an
+        /// `sk-ecdsa-sha2-nistp256@openssh.com` key whose private
+        /// material is sealed by the TPM and gated by a hardware-
+        /// enforced Hello gesture. UX cost: a one-entry "save your
+        /// passkey" interstitial at make time and a one-entry
+        /// confirmation interstitial before the gesture at every
+        /// sign. Requires Windows Hello to be enrolled. Mutually
+        /// exclusive with `--auth-policy` and presence flags --
+        /// the platform authenticator chooses verification mode.
+        #[arg(long)]
+        strong: bool,
     },
 
     /// List all sshenc-managed Secure Enclave keys.
@@ -315,6 +328,7 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
             require_user_presence,
             auth_policy,
             json,
+            strong,
         } => {
             let pub_path = if no_pub_file {
                 None
@@ -359,6 +373,21 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 }
             }
             let comment = comment.or_else(default_comment);
+            if strong {
+                // SK / WebAuthn keygen runs in the CLI process directly
+                // (not over the agent), because the platform-authenticator
+                // call needs an HWND with foreground claim and the CLI
+                // has the user's console window. The legacy
+                // `AccessPolicy` / `PresenceMode` flags don't apply --
+                // the platform authenticator picks UV mode.
+                if strict || no_user_presence || require_user_presence || auth_policy.is_some() {
+                    anyhow::bail!(
+                        "--strong is mutually exclusive with --strict, --no-user-presence, \
+                         and --auth-policy (the platform authenticator chooses UV mode)"
+                    );
+                }
+                return commands::keygen_sk(&label, comment, pub_path, print_pub, json);
+            }
             if require_user_presence {
                 eprintln!(
                     "warning: --require-user-presence is deprecated; use --strict instead. \

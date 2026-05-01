@@ -121,6 +121,269 @@ impl SshPublicKey {
     }
 }
 
+/// An SSH FIDO2 SK public key (`sk-ecdsa-sha2-nistp256@openssh.com`).
+///
+/// Wire format per `PROTOCOL.u2f`:
+/// ```text
+///   string  "sk-ecdsa-sha2-nistp256@openssh.com"
+///   string  "nistp256"
+///   string  ec_point   (uncompressed: 0x04 || X || Y, 65 bytes)
+///   string  application  (the SSH-side RP identifier; SHA-256
+///                         hashed by sshd to compare with rpIdHash)
+/// ```
+///
+/// The `application` value is what gets SHA-256'd into the
+/// `rpIdHash` slot of the WebAuthn `authenticator_data` -- so for
+/// sshenc SK keys we set `application = rp_id` we used at make-
+/// credential time (e.g. `sshenc-<keyhash>.local`). The verifier
+/// reconstructs the same hash from this string when checking
+/// signatures.
+#[derive(Debug, Clone)]
+pub struct SshSkPublicKey {
+    /// Uncompressed SEC1 EC point: 0x04 || X (32) || Y (32).
+    ec_point: Vec<u8>,
+    /// SSH application string (= our RP ID for sshenc keys).
+    application: String,
+    /// Optional comment.
+    comment: Option<String>,
+}
+
+impl SshSkPublicKey {
+    /// Build an SK public key from its component parts. `x` and `y`
+    /// are the 32-byte ECDSA P-256 coordinates returned by the
+    /// platform authenticator.
+    pub fn from_xy(
+        x: &[u8; 32],
+        y: &[u8; 32],
+        application: String,
+        comment: Option<String>,
+    ) -> Self {
+        let mut ec_point = Vec::with_capacity(65);
+        ec_point.push(0x04);
+        ec_point.extend_from_slice(x);
+        ec_point.extend_from_slice(y);
+        SshSkPublicKey {
+            ec_point,
+            application,
+            comment,
+        }
+    }
+
+    /// Construct from a pre-formed uncompressed SEC1 EC point.
+    pub fn from_sec1_bytes(
+        bytes: &[u8],
+        application: String,
+        comment: Option<String>,
+    ) -> Result<Self> {
+        if bytes.len() != 65 {
+            return Err(Error::InvalidPublicKey(format!(
+                "expected 65 bytes for uncompressed P-256 point, got {}",
+                bytes.len()
+            )));
+        }
+        if bytes[0] != 0x04 {
+            return Err(Error::InvalidPublicKey(
+                "expected uncompressed point (0x04 prefix)".into(),
+            ));
+        }
+        Ok(SshSkPublicKey {
+            ec_point: bytes.to_vec(),
+            application,
+            comment,
+        })
+    }
+
+    /// Encode as an SSH wire-format blob (the contents of the
+    /// `<base64-blob>` portion of an authorized_keys line).
+    pub fn to_wire_format(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(160);
+        write_ssh_string(
+            &mut buf,
+            KeyAlgorithm::SkEcdsaP256.ssh_key_type().as_bytes(),
+        );
+        write_ssh_string(
+            &mut buf,
+            KeyAlgorithm::SkEcdsaP256.ssh_curve_id().as_bytes(),
+        );
+        write_ssh_string(&mut buf, &self.ec_point);
+        write_ssh_string(&mut buf, self.application.as_bytes());
+        buf
+    }
+
+    /// Format as an OpenSSH public key line.
+    pub fn to_openssh_line(&self) -> String {
+        let blob = self.to_wire_format();
+        let encoded = STANDARD.encode(&blob);
+        let key_type = KeyAlgorithm::SkEcdsaP256.ssh_key_type();
+        match &self.comment {
+            Some(c) => format!("{key_type} {encoded} {c}"),
+            None => format!("{key_type} {encoded}"),
+        }
+    }
+
+    /// Returns the SSH application string (the RP-id we registered
+    /// the credential under).
+    pub fn application(&self) -> &str {
+        &self.application
+    }
+
+    /// Returns the uncompressed SEC1 EC point bytes.
+    pub fn ec_point(&self) -> &[u8] {
+        &self.ec_point
+    }
+
+    /// Returns the comment, if any.
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+}
+
+/// Encode an SSH SK signature blob from a DER-encoded ECDSA
+/// signature, the platform-authenticator flags byte, and the
+/// monotonic counter.
+///
+/// Wire format:
+/// ```text
+///   string  "sk-ecdsa-sha2-nistp256@openssh.com"
+///   string  ecdsa_signature_blob   // mpint r || mpint s
+///   byte    flags                  // bit 0 = UP, bit 2 = UV
+///   uint32  counter
+/// ```
+///
+/// The DER-encoded signature is SEQUENCE { INTEGER r, INTEGER s };
+/// we extract r and s, encode each as an SSH `mpint` (length-
+/// prefixed two's-complement big-endian, with a leading zero byte
+/// if the high bit of the magnitude is set), and wrap them in an
+/// SSH `string`.
+pub fn encode_sk_signature_blob(der_signature: &[u8], flags: u8, counter: u32) -> Result<Vec<u8>> {
+    let (r, s) = parse_der_ecdsa_signature(der_signature)?;
+
+    let mut sig_inner = Vec::with_capacity(80);
+    write_mpint(&mut sig_inner, r);
+    write_mpint(&mut sig_inner, s);
+
+    let mut out = Vec::with_capacity(160);
+    write_ssh_string(
+        &mut out,
+        KeyAlgorithm::SkEcdsaP256.ssh_key_type().as_bytes(),
+    );
+    write_ssh_string(&mut out, &sig_inner);
+    out.push(flags);
+    // `write_u32` to a `Vec<u8>` is infallible; surface the
+    // io::Error via `?` instead of panic'ing to keep the
+    // `unwrap_in_result` lint happy.
+    out.write_u32::<BigEndian>(counter)?;
+    Ok(out)
+}
+
+/// Parse a DER-encoded ECDSA signature into raw `(r, s)` byte
+/// slices. The bytes are the *magnitude* with leading zeros from
+/// the DER INTEGER encoding stripped -- i.e. canonical big-endian
+/// big integer bytes. Caller wraps each in `mpint` for SSH.
+fn parse_der_ecdsa_signature(der: &[u8]) -> Result<(&[u8], &[u8])> {
+    if der.len() < 2 || der[0] != 0x30 {
+        return Err(Error::InvalidSignature(
+            "DER ECDSA signature must start with SEQUENCE (0x30)".into(),
+        ));
+    }
+    // Length octet: short form (single byte, < 0x80) or long form.
+    let (seq_body, _) = parse_der_length(&der[1..])?;
+    if seq_body.is_empty() || seq_body[0] != 0x02 {
+        return Err(Error::InvalidSignature(
+            "expected INTEGER (0x02) for r component".into(),
+        ));
+    }
+    let (r_bytes, after_r) = parse_der_length(&seq_body[1..])?;
+    if after_r.is_empty() || after_r[0] != 0x02 {
+        return Err(Error::InvalidSignature(
+            "expected INTEGER (0x02) for s component".into(),
+        ));
+    }
+    let (s_bytes, _after_s) = parse_der_length(&after_r[1..])?;
+
+    // Strip leading zero byte that DER adds when the high bit of
+    // the magnitude would otherwise make the integer look negative.
+    let r_stripped = strip_der_int_leading_zero(r_bytes);
+    let s_stripped = strip_der_int_leading_zero(s_bytes);
+    Ok((r_stripped, s_stripped))
+}
+
+fn parse_der_length(buf: &[u8]) -> Result<(&[u8], &[u8])> {
+    if buf.is_empty() {
+        return Err(Error::InvalidSignature("DER buffer empty".into()));
+    }
+    let first = buf[0];
+    if first < 0x80 {
+        let len = first as usize;
+        let rest = &buf[1..];
+        if rest.len() < len {
+            return Err(Error::InvalidSignature(
+                "DER short-form length exceeds buffer".into(),
+            ));
+        }
+        Ok((&rest[..len], &rest[len..]))
+    } else {
+        let count = (first & 0x7f) as usize;
+        if count == 0 || count > 4 {
+            return Err(Error::InvalidSignature(
+                "unsupported DER long-form length".into(),
+            ));
+        }
+        if buf.len() < 1 + count {
+            return Err(Error::InvalidSignature(
+                "DER long-form length truncated".into(),
+            ));
+        }
+        let mut len: usize = 0;
+        for &b in &buf[1..=count] {
+            len = (len << 8) | (b as usize);
+        }
+        let rest = &buf[1 + count..];
+        if rest.len() < len {
+            return Err(Error::InvalidSignature(
+                "DER long-form length exceeds buffer".into(),
+            ));
+        }
+        Ok((&rest[..len], &rest[len..]))
+    }
+}
+
+fn strip_der_int_leading_zero(int_bytes: &[u8]) -> &[u8] {
+    if int_bytes.len() > 1 && int_bytes[0] == 0x00 && int_bytes[1] >= 0x80 {
+        &int_bytes[1..]
+    } else {
+        int_bytes
+    }
+}
+
+/// Write an SSH `mpint` (length-prefixed two's-complement
+/// big-endian). For positive integers (which ECDSA r and s always
+/// are): if the high bit of the first byte is set, prepend a 0
+/// byte to disambiguate from negative values.
+pub fn write_mpint(buf: &mut Vec<u8>, magnitude: &[u8]) {
+    // Strip leading zeros from the magnitude itself (RFC 4251
+    // requires no leading zero bytes unless needed to keep the
+    // value positive).
+    let mut start = 0;
+    while start < magnitude.len() && magnitude[start] == 0 {
+        start += 1;
+    }
+    let trimmed = &magnitude[start..];
+    if trimmed.is_empty() {
+        // Zero is encoded as a zero-length string.
+        write_ssh_string(buf, &[]);
+        return;
+    }
+    if trimmed[0] >= 0x80 {
+        let mut padded = Vec::with_capacity(trimmed.len() + 1);
+        padded.push(0x00);
+        padded.extend_from_slice(trimmed);
+        write_ssh_string(buf, &padded);
+    } else {
+        write_ssh_string(buf, trimmed);
+    }
+}
+
 /// Write an SSH string (uint32 length prefix + data) to a buffer.
 pub fn write_ssh_string(buf: &mut Vec<u8>, data: &[u8]) {
     // Writing to Vec<u8> cannot fail — these expect() calls are unreachable
@@ -482,6 +745,132 @@ mod tests {
         // Valid key type but empty base64 blob
         let line = "ecdsa-sha2-nistp256  comment";
         let result = SshPublicKey::from_openssh_line(line);
+        assert!(result.is_err());
+    }
+
+    // --- SK (FIDO2 / WebAuthn) public key tests ---
+
+    #[test]
+    fn test_sk_pubkey_wire_format_structure() {
+        let x = [0x11_u8; 32];
+        let y = [0x22_u8; 32];
+        let app = "sshenc-test.local".to_string();
+        let key = SshSkPublicKey::from_xy(&x, &y, app.clone(), None);
+        let wire = key.to_wire_format();
+
+        // string("sk-ecdsa-sha2-nistp256@openssh.com") || string("nistp256")
+        //   || string(Q) || string(application)
+        let (key_type, rest) = read_ssh_string(&wire).unwrap();
+        assert_eq!(key_type, b"sk-ecdsa-sha2-nistp256@openssh.com");
+        let (curve, rest) = read_ssh_string(rest).unwrap();
+        assert_eq!(curve, b"nistp256");
+        let (q, rest) = read_ssh_string(rest).unwrap();
+        assert_eq!(q.len(), 65);
+        assert_eq!(q[0], 0x04);
+        assert_eq!(&q[1..33], &x);
+        assert_eq!(&q[33..65], &y);
+        let (application, rest) = read_ssh_string(rest).unwrap();
+        assert_eq!(application, app.as_bytes());
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn test_sk_openssh_line_format() {
+        let x = [0xAA_u8; 32];
+        let y = [0xBB_u8; 32];
+        let key =
+            SshSkPublicKey::from_xy(&x, &y, "sshenc-abc.local".into(), Some("user@host".into()));
+        let line = key.to_openssh_line();
+        assert!(line.starts_with("sk-ecdsa-sha2-nistp256@openssh.com "));
+        assert!(line.ends_with(" user@host"));
+    }
+
+    #[test]
+    fn test_mpint_encodes_high_bit_with_leading_zero() {
+        // 0x80 has the high bit set; mpint must prepend 0x00 to keep
+        // the value positive in two's complement.
+        let mut buf = Vec::new();
+        write_mpint(&mut buf, &[0x80, 0x00, 0x00]);
+        // Length prefix (4 bytes BE = 4) + 0x00 + 0x80 0x00 0x00.
+        assert_eq!(buf, vec![0x00, 0x00, 0x00, 0x04, 0x00, 0x80, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_mpint_strips_leading_zeros() {
+        // RFC 4251: no unnecessary leading zero bytes.
+        let mut buf = Vec::new();
+        write_mpint(&mut buf, &[0x00, 0x00, 0x42]);
+        // Length=1, body=0x42.
+        assert_eq!(buf, vec![0x00, 0x00, 0x00, 0x01, 0x42]);
+    }
+
+    #[test]
+    fn test_mpint_zero_is_empty_string() {
+        let mut buf = Vec::new();
+        write_mpint(&mut buf, &[0x00]);
+        assert_eq!(buf, vec![0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_sk_signature_blob_structure() {
+        // Build a synthetic DER signature: SEQUENCE { INTEGER r, INTEGER s }
+        // where r = 0x01 0x23 ... (32 bytes, no high bit) and s = 0xab cd ... (32 bytes).
+        // The s value's first byte 0xab has the high bit set, so DER will
+        // have prepended a 0x00 byte that we must strip then re-add as the
+        // mpint pad byte.
+        let mut der = Vec::new();
+        der.push(0x30); // SEQUENCE
+        let mut body = Vec::new();
+        body.push(0x02); // INTEGER r
+        body.push(0x20); // length 32
+        body.extend(std::iter::repeat(0x42).take(32));
+        body.push(0x02); // INTEGER s
+        body.push(0x21); // length 33 (DER added a leading 0)
+        body.push(0x00);
+        body.extend(std::iter::repeat(0xab).take(32));
+        der.push(body.len() as u8);
+        der.extend(body);
+
+        let blob = encode_sk_signature_blob(&der, 0x05, 42).expect("encode ok");
+
+        // Expected layout:
+        //   string("sk-ecdsa-sha2-nistp256@openssh.com")
+        //   string(<mpint r || mpint s>)
+        //   byte 0x05 (UP|UV)
+        //   uint32 42
+        let (sig_type, rest) = read_ssh_string(&blob).unwrap();
+        assert_eq!(sig_type, b"sk-ecdsa-sha2-nistp256@openssh.com");
+        let (sig_inner, rest) = read_ssh_string(rest).unwrap();
+
+        // Parse mpint r and mpint s out of sig_inner
+        let (r, rest_inner) = read_ssh_string(sig_inner).unwrap();
+        // r had no high bit so it's 32 bytes flat.
+        assert_eq!(r.len(), 32);
+        assert!(r.iter().all(|b| *b == 0x42));
+        let (s, rest_inner) = read_ssh_string(rest_inner).unwrap();
+        // s had high bit set so mpint added a leading 0.
+        assert_eq!(s.len(), 33);
+        assert_eq!(s[0], 0x00);
+        assert!(s[1..].iter().all(|b| *b == 0xab));
+        assert!(rest_inner.is_empty());
+
+        // After the inner sig string come flags + counter.
+        assert_eq!(rest.len(), 5);
+        assert_eq!(rest[0], 0x05);
+        assert_eq!(&rest[1..5], &42_u32.to_be_bytes());
+    }
+
+    #[test]
+    fn test_parse_der_rejects_non_sequence() {
+        let bad = vec![0x02, 0x01, 0x00];
+        let result = encode_sk_signature_blob(&bad, 0, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_der_rejects_truncated() {
+        let bad = vec![0x30];
+        let result = encode_sk_signature_blob(&bad, 0, 0);
         assert!(result.is_err());
     }
 }

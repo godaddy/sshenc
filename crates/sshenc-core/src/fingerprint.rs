@@ -5,7 +5,7 @@
 //!
 //! Supports SHA-256 (base64, the modern default) and MD5 (hex, legacy) formats.
 
-use crate::pubkey::SshPublicKey;
+use crate::pubkey::{SshPublicKey, SshSkPublicKey};
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
 use md5::{Digest, Md5};
@@ -15,25 +15,43 @@ use sha2::Sha256;
 ///
 /// Returns a string like `SHA256:abc123...` (base64, no padding).
 pub fn fingerprint_sha256(key: &SshPublicKey) -> String {
-    let blob = key.to_wire_format();
-    let hash = Sha256::digest(&blob);
-    let encoded = STANDARD_NO_PAD.encode(hash);
-    format!("SHA256:{encoded}")
+    fingerprint_sha256_of_blob(&key.to_wire_format())
 }
 
 /// MD5 fingerprint of an SSH public key, in the legacy colon-separated hex format.
 ///
 /// Returns a string like `MD5:ab:cd:ef:...`.
 pub fn fingerprint_md5(key: &SshPublicKey) -> String {
-    let blob = key.to_wire_format();
-    let hash = Md5::digest(&blob);
-    let hex_parts: Vec<String> = hash.iter().map(|b| format!("{b:02x}")).collect();
-    format!("MD5:{}", hex_parts.join(":"))
+    fingerprint_md5_of_blob(&key.to_wire_format())
 }
 
 /// Compute both SHA-256 and MD5 fingerprints.
 pub fn fingerprints(key: &SshPublicKey) -> (String, String) {
     (fingerprint_sha256(key), fingerprint_md5(key))
+}
+
+/// Compute both fingerprints for an SK (FIDO2) public key. The
+/// fingerprint is over the SK wire format, which embeds the
+/// `application` string -- so two SK keys with the same EC point
+/// but different RP IDs have different fingerprints, as the SSH
+/// verifier will distinguish them on the wire.
+pub fn sk_fingerprints(key: &SshSkPublicKey) -> (String, String) {
+    let blob = key.to_wire_format();
+    (
+        fingerprint_sha256_of_blob(&blob),
+        fingerprint_md5_of_blob(&blob),
+    )
+}
+
+fn fingerprint_sha256_of_blob(blob: &[u8]) -> String {
+    let hash = Sha256::digest(blob);
+    format!("SHA256:{}", STANDARD_NO_PAD.encode(hash))
+}
+
+fn fingerprint_md5_of_blob(blob: &[u8]) -> String {
+    let hash = Md5::digest(blob);
+    let hex_parts: Vec<String> = hash.iter().map(|b| format!("{b:02x}")).collect();
+    format!("MD5:{}", hex_parts.join(":"))
 }
 
 #[cfg(test)]

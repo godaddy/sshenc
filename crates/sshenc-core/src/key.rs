@@ -11,17 +11,34 @@ use std::path::PathBuf;
 /// Application tag prefix used to identify sshenc-managed keys in the Keychain.
 pub const APP_TAG_PREFIX: &str = "com.sshenc.key.";
 
-/// The key algorithm used by sshenc (Secure Enclave only supports P-256).
+/// The key algorithm used by sshenc.
+///
+/// `EcdsaP256` is the legacy / default path, backed by Secure Enclave
+/// (macOS), Microsoft Platform Crypto Provider (Windows), or
+/// software/keyring/Linux-TPM. Consent on Windows is gated through
+/// `UserConsentVerifier` -- a soft, user-mode UI prompt.
+///
+/// `SkEcdsaP256` is the FIDO2-SK variant, backed by the Windows
+/// Hello platform authenticator via WebAuthN.dll on Windows (and
+/// libfido2 on other platforms once we add support there). Consent
+/// is hardware-enforced -- the TPM will not produce a signature
+/// without an OS-mediated Hello gesture actually firing. The wire
+/// format is `sk-ecdsa-sha2-nistp256@openssh.com` (OpenSSH 8.2+),
+/// supported by stock OpenSSH sshd and GitHub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyAlgorithm {
-    /// ECDSA with NIST P-256 curve (secp256r1).
+    /// ECDSA with NIST P-256 curve (secp256r1). Default path.
     EcdsaP256,
+    /// FIDO2 SK / WebAuthn-backed ECDSA P-256. Opt-in via
+    /// `sshenc keygen --strong` on Hello-enrolled Windows hosts.
+    SkEcdsaP256,
 }
 
 impl fmt::Display for KeyAlgorithm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             KeyAlgorithm::EcdsaP256 => write!(f, "ecdsa-p256"),
+            KeyAlgorithm::SkEcdsaP256 => write!(f, "sk-ecdsa-p256"),
         }
     }
 }
@@ -30,22 +47,33 @@ impl KeyAlgorithm {
     /// Returns the key size in bits.
     pub fn key_bits(&self) -> u32 {
         match self {
-            KeyAlgorithm::EcdsaP256 => 256,
+            KeyAlgorithm::EcdsaP256 | KeyAlgorithm::SkEcdsaP256 => 256,
         }
     }
 
-    /// Returns the SSH key type string.
+    /// Returns the SSH key type string (the leading token in an
+    /// `authorized_keys` line and the type identifier in the SSH
+    /// wire format).
     pub fn ssh_key_type(&self) -> &'static str {
         match self {
             KeyAlgorithm::EcdsaP256 => "ecdsa-sha2-nistp256",
+            KeyAlgorithm::SkEcdsaP256 => "sk-ecdsa-sha2-nistp256@openssh.com",
         }
     }
 
     /// Returns the SSH curve identifier.
     pub fn ssh_curve_id(&self) -> &'static str {
         match self {
-            KeyAlgorithm::EcdsaP256 => "nistp256",
+            KeyAlgorithm::EcdsaP256 | KeyAlgorithm::SkEcdsaP256 => "nistp256",
         }
+    }
+
+    /// True if this algorithm is the FIDO2 SK variant -- i.e. the
+    /// signature blob carries a flags byte and counter, the public
+    /// key wire format includes an `application` string, and signing
+    /// goes through the platform authenticator (WebAuthn on Windows).
+    pub fn is_sk(&self) -> bool {
+        matches!(self, KeyAlgorithm::SkEcdsaP256)
     }
 }
 
@@ -132,6 +160,30 @@ pub struct KeyMetadata {
     pub presence_mode: Option<PresenceMode>,
     /// Optional comment for the SSH public key line.
     pub comment: Option<String>,
+    /// FIDO2 SK credential ID -- opaque blob the platform
+    /// authenticator (Windows Hello / libfido2 / etc.) emits at
+    /// `MakeCredential` time. Used at sign time to address the
+    /// TPM-bound private key. `None` for non-SK algorithms.
+    ///
+    /// Stored as base64 in `.meta` files for human-readable
+    /// inspection. Old `.meta` files without this field deserialize
+    /// to `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "base64_bytes_option"
+    )]
+    pub credential_id: Option<Vec<u8>>,
+    /// FIDO2 SK Relying Party identifier. We use a unique-per-key
+    /// RP (e.g. `sshenc-<keyhash>.local`) so the Windows passkey
+    /// chooser never has more than one entry to display. This is
+    /// also the OpenSSH SK `application` string -- it gets
+    /// SHA-256'd into the `rpIdHash` slot of authenticator data,
+    /// and the SSH verifier reconstructs the same hash from this
+    /// value embedded in the public key wire format. `None` for
+    /// non-SK algorithms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rp_id: Option<String>,
 }
 
 impl KeyMetadata {
@@ -157,6 +209,32 @@ impl KeyMetadata {
             access_policy,
             presence_mode,
             comment,
+            credential_id: None,
+            rp_id: None,
+        }
+    }
+
+    /// Construct metadata for an SK (FIDO2) key. Captures the
+    /// platform-authenticator credential identifier and unique
+    /// per-key RP id alongside the standard fields.
+    pub fn for_sk(
+        label: KeyLabel,
+        access_policy: AccessPolicy,
+        presence_mode: Option<PresenceMode>,
+        comment: Option<String>,
+        credential_id: Vec<u8>,
+        rp_id: String,
+    ) -> Self {
+        let app_tag = label.app_tag();
+        KeyMetadata {
+            label,
+            app_tag,
+            algorithm: KeyAlgorithm::SkEcdsaP256,
+            access_policy,
+            presence_mode,
+            comment,
+            credential_id: Some(credential_id),
+            rp_id: Some(rp_id),
         }
     }
 
@@ -204,7 +282,34 @@ mod base64_bytes {
     }
 }
 
-/// Options for key generation.
+/// Serde helper for base64-encoding optional byte vectors. Used by
+/// SK-specific fields on `KeyMetadata` so the absence of a
+/// credential id doesn't show up as an empty string in `.meta` files.
+mod base64_bytes_option {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(b) => s.serialize_str(&STANDARD.encode(b)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        let opt = Option::<String>::deserialize(d)?;
+        match opt {
+            Some(s) => STANDARD
+                .decode(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Options for key generation (legacy `ecdsa-sha2-nistp256` path).
 #[derive(Debug, Clone)]
 pub struct KeyGenOptions {
     pub label: KeyLabel,
@@ -215,6 +320,19 @@ pub struct KeyGenOptions {
     /// per sign; `None` does not prompt.
     pub presence_mode: PresenceMode,
     /// If set, write the public key to this path.
+    pub write_pub_path: Option<PathBuf>,
+}
+
+/// Options for SK (FIDO2 / WebAuthn) key generation. Kept as a
+/// distinct struct from [`KeyGenOptions`] so the legacy path stays
+/// byte-for-byte unchanged at every callsite (no
+/// `algorithm: KeyAlgorithm` field bleeding into existing literals).
+#[derive(Debug, Clone)]
+pub struct SkKeyGenOptions {
+    pub label: KeyLabel,
+    pub comment: Option<String>,
+    /// If set, write the SK public key (`sk-ecdsa-sha2-nistp256@openssh.com ...`)
+    /// to this path.
     pub write_pub_path: Option<PathBuf>,
 }
 

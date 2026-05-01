@@ -217,6 +217,91 @@ impl AgentProxyBackend {
             }
         }
     }
+
+    /// Build a `KeyInfo` for a SK / FIDO2 key from its `.meta` file.
+    /// Reads the SK wire-format `.pub` from the path the meta
+    /// recorded, parses out the EC point + application string, and
+    /// recomputes the SK fingerprint. Used by the proxy's `get()`
+    /// when the meta carries the `sk-ecdsa-sha2-nistp256` marker.
+    fn sk_keyinfo_from_meta(
+        keys_dir: &std::path::Path,
+        label: &KeyLabel,
+        meta: &enclaveapp_core::KeyMeta,
+        comment: Option<String>,
+    ) -> Result<KeyInfo> {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        use sshenc_core::pubkey::{read_ssh_string, SshSkPublicKey};
+
+        let credential_id_b64 = meta.get_app_field("credential_id_b64").ok_or_else(|| {
+            Error::Other(format!(
+                "SK key '{}' missing credential_id_b64",
+                label.as_str()
+            ))
+        })?;
+        let credential_id = STANDARD.decode(credential_id_b64).map_err(Error::Base64)?;
+        let rp_id = meta
+            .get_app_field("rp_id")
+            .ok_or_else(|| Error::Other(format!("SK key '{}' missing rp_id", label.as_str())))?
+            .to_string();
+
+        let pub_path = meta
+            .get_app_field("pub_file_path")
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "SK key '{}' has no readable .pub file -- regenerate",
+                    label.as_str()
+                ))
+            })?;
+
+        let line = std::fs::read_to_string(&pub_path)?;
+        let parts: Vec<&str> = line.trim().splitn(3, ' ').collect();
+        if parts.len() < 2 {
+            return Err(Error::InvalidPublicKey(format!(
+                "SK key '{}' .pub file is malformed",
+                label.as_str()
+            )));
+        }
+        let blob = STANDARD
+            .decode(parts[1])
+            .map_err(|e| Error::InvalidPublicKey(format!("invalid base64: {e}")))?;
+
+        let (key_type, rest) = read_ssh_string(&blob)?;
+        if key_type != b"sk-ecdsa-sha2-nistp256@openssh.com" {
+            return Err(Error::InvalidPublicKey(format!(
+                "SK key '{}' .pub file has wrong key type",
+                label.as_str()
+            )));
+        }
+        let (_curve, rest) = read_ssh_string(rest)?;
+        let (q, _rest) = read_ssh_string(rest)?;
+        let public_key_bytes = q.to_vec();
+
+        let sk_pubkey =
+            SshSkPublicKey::from_sec1_bytes(&public_key_bytes, rp_id.clone(), comment.clone())?;
+        let (fp_sha256, fp_md5) = fingerprint::sk_fingerprints(&sk_pubkey);
+
+        // Suppress unused-warning when we don't actually use keys_dir
+        // here -- meta resolution already happened via the caller.
+        let _ = keys_dir;
+
+        Ok(KeyInfo {
+            metadata: KeyMetadata::for_sk(
+                label.clone(),
+                meta.access_policy,
+                presence_mode_from_app_specific(&meta.app_specific),
+                comment,
+                credential_id,
+                rp_id,
+            ),
+            public_key_bytes,
+            fingerprint_sha256: fp_sha256,
+            fingerprint_md5: fp_md5,
+            pub_file_path: Some(pub_path),
+        })
+    }
 }
 
 fn map_meta_err(operation: &str, e: enclaveapp_core::Error) -> Error {
@@ -318,20 +403,30 @@ impl KeyBackend for AgentProxyBackend {
     /// calls `load_handle` — if the `.pub` cache is missing the
     /// caller gets a plain "not found" error rather than a silent
     /// fallback that would bypass the agent-only invariant.
+    ///
+    /// SK / FIDO2 keys take a separate path: their `.meta` carries
+    /// an `algorithm: sk-ecdsa-sha2-nistp256` marker, the SSH
+    /// `.pub` lives at the user's chosen path (typically
+    /// `~/.ssh/<label>.pub`) in the SK wire format, and there is
+    /// no SEC1 cache in `keys_dir`. The proxy detects the marker
+    /// and assembles a `KeyInfo` from those sources without going
+    /// through the legacy SEC1 path.
     fn get(&self, label: &str) -> Result<KeyInfo> {
         let owned_label = KeyLabel::new(label)?;
-
-        let public_bytes = metadata::load_pub_key(&self.keys_dir, label)
-            .map_err(|e| map_meta_err("load_pub_key", e))?;
         let meta = crate::compat::load_sshenc_meta(&self.keys_dir, label)
             .map_err(|e| map_meta_err("load_meta", e))?;
-
         let comment = meta
             .app_specific
             .get("comment")
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
+        if meta.get_app_field("algorithm") == Some("sk-ecdsa-sha2-nistp256") {
+            return Self::sk_keyinfo_from_meta(&self.keys_dir, &owned_label, &meta, comment);
+        }
+
+        let public_bytes = metadata::load_pub_key(&self.keys_dir, label)
+            .map_err(|e| map_meta_err("load_pub_key", e))?;
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
         let pub_file_path = self.persisted_pub_file_path(&meta, label);

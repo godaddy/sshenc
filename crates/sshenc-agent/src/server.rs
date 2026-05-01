@@ -1106,7 +1106,18 @@ fn handle_request(
                 return Ok(AgentResponse::Failure);
             }
 
-            match backend.delete(label_str) {
+            // Branch on key type. SK keys go through `sk_delete`,
+            // which also removes the platform credential from the
+            // user's Windows passkey list -- otherwise the OS
+            // accumulates orphaned passkey entries every time the
+            // matrix test churns through fresh SK labels.
+            let result = if backend.is_sk_label(label_str) {
+                tracing::debug!(label = label_str, "dispatching SK delete");
+                backend.sk_delete(label_str)
+            } else {
+                backend.delete(label_str)
+            };
+            match result {
                 Ok(()) => {
                     tracing::info!(label = label_str, "delete_key: succeeded");
                     blob_cache.clear();

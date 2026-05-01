@@ -80,17 +80,28 @@ enum Commands {
         json: bool,
 
         /// Use the FIDO2 / Windows Hello platform-authenticator path
-        /// instead of the legacy CNG / Secure Enclave path. Produces an
+        /// (hardware-enforced consent). On Hello-enrolled Windows
+        /// hosts this is now the default; flag retained for
+        /// scripts that want to be explicit. Produces an
         /// `sk-ecdsa-sha2-nistp256@openssh.com` key whose private
-        /// material is sealed by the TPM and gated by a hardware-
-        /// enforced Hello gesture. UX cost: a one-entry "save your
-        /// passkey" interstitial at make time and a one-entry
-        /// confirmation interstitial before the gesture at every
-        /// sign. Requires Windows Hello to be enrolled. Mutually
-        /// exclusive with `--auth-policy` and presence flags --
-        /// the platform authenticator chooses verification mode.
-        #[arg(long)]
+        /// material is sealed by the TPM and gated by a real Hello
+        /// gesture. Mutually exclusive with `--legacy`,
+        /// `--auth-policy`, and presence flags -- the platform
+        /// authenticator chooses verification mode.
+        #[arg(long, conflicts_with_all = &["legacy", "auth_policy", "strict", "no_user_presence", "require_user_presence"])]
         strong: bool,
+
+        /// Force the legacy Platform-KSP / `UserConsentVerifier` path
+        /// instead of the hardware-enforced SK path that is now the
+        /// default on Hello-enrolled Windows hosts. Use this only if
+        /// you specifically want the soft-consent UX (single
+        /// gesture, no chooser interstitial) and accept that the
+        /// `Verified` Boolean from `UserConsentVerifier` is
+        /// hookable by user-mode code. On macOS / Linux / non-
+        /// Hello Windows this flag is a no-op (legacy is already
+        /// the only path).
+        #[arg(long, conflicts_with = "strong")]
+        legacy: bool,
     },
 
     /// List all sshenc-managed Secure Enclave keys.
@@ -329,6 +340,7 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
             auth_policy,
             json,
             strong,
+            legacy,
         } => {
             let pub_path = if no_pub_file {
                 None
@@ -373,20 +385,60 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 }
             }
             let comment = comment.or_else(default_comment);
-            if strong {
-                // SK / WebAuthn keygen runs in the CLI process directly
-                // (not over the agent), because the platform-authenticator
-                // call needs an HWND with foreground claim and the CLI
-                // has the user's console window. The legacy
-                // `AccessPolicy` / `PresenceMode` flags don't apply --
-                // the platform authenticator picks UV mode.
-                if strict || no_user_presence || require_user_presence || auth_policy.is_some() {
+
+            // Path selection. The hardware-enforced WebAuthn path is
+            // now the default on Hello-enrolled Windows hosts so the
+            // out-of-the-box experience matches macOS (where the
+            // Secure Enclave enforces consent in hardware) instead
+            // of the soft `UserConsentVerifier` Boolean which is
+            // hookable by user-mode code-execution attackers.
+            //
+            //   --legacy ........... force the CNG / UserConsentVerifier path
+            //   --strong ........... force the SK / WebAuthn path (was opt-in)
+            //   --strict / --no-user-presence / --auth-policy ...
+            //                       implicit legacy (those flags are
+            //                       legacy-path-specific concepts)
+            //   (none of the above): SK if Hello is enrolled,
+            //                       legacy if not.
+            //
+            // `--legacy` and `--strong` are clap-level mutually exclusive.
+            let legacy_flag_implied =
+                strict || no_user_presence || require_user_presence || auth_policy.is_some();
+            let use_sk = if legacy {
+                false
+            } else if strong {
+                true
+            } else if legacy_flag_implied {
+                false
+            } else {
+                #[cfg(feature = "webauthn-sk")]
+                {
+                    sshenc_se::sk::is_available()
+                }
+                #[cfg(not(feature = "webauthn-sk"))]
+                {
+                    false
+                }
+            };
+
+            if use_sk {
+                #[cfg(feature = "webauthn-sk")]
+                {
+                    if !strong {
+                        eprintln!(
+                            "info: Windows Hello detected -- creating hardware-enforced SK key. \
+                             Pass --legacy to opt out."
+                        );
+                    }
+                    return commands::keygen_sk(&label, comment, pub_path, print_pub, json);
+                }
+                #[cfg(not(feature = "webauthn-sk"))]
+                {
                     anyhow::bail!(
-                        "--strong is mutually exclusive with --strict, --no-user-presence, \
-                         and --auth-policy (the platform authenticator chooses UV mode)"
+                        "this build of sshenc was compiled without the webauthn-sk feature; \
+                         pass --legacy or rebuild with `--features webauthn-sk`"
                     );
                 }
-                return commands::keygen_sk(&label, comment, pub_path, print_pub, json);
             }
             if require_user_presence {
                 eprintln!(

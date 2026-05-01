@@ -103,15 +103,18 @@ to make unauthorized signing requests.
   `ssh-agent` with unencrypted keys loaded.
 - With user-presence, prompt fatigue (see below) can lead users to approve
   requests reflexively.
-- On the **Windows legacy Platform-KSP path** (default when Hello is
-  not enrolled, or explicitly via `--legacy`), the consent gate is
-  the user-mode `Verified` Boolean from `UserConsentVerifier`. An
-  attacker with code execution as the user can hook the agent
-  process and overwrite that return value, signing without the user
-  ever seeing the prompt. The Windows SK / WebAuthn path (default
-  when Hello is enrolled) does not have this weakness — the gate is
-  enforced outside user-mode. See "Threat: Windows consent-path
-  selection" below.
+- On the **Windows legacy Platform-KSP path with Hello enrolled but
+  bypassed via `--legacy`** (or a pre-v0.6.44 legacy key on a
+  Hello-enrolled host), the consent gate is the user-mode
+  `Verified` Boolean from `UserConsentVerifier`. An attacker with
+  code execution as the user can hook the agent process and
+  overwrite that return value, signing without the user ever seeing
+  the prompt. The default SK path on Hello-enrolled hosts and the
+  no-Hello legacy path (where `NCRYPT_UI_PROTECT_KEY_FLAG` is set
+  and the TPM enforces the gate via the CryptUI password dialog)
+  do **not** have this weakness — the gate is enforced outside
+  user-mode in both cases. See "Threat: Windows consent-path
+  selection" below for the full matrix.
 
 ## Threat: Software Key Ambiguity
 
@@ -163,17 +166,19 @@ approve signing requests without verifying the context.
   Hello via `WebAuthNAuthenticatorGetAssertion`; the TPM/OS will not
   produce a signature without an OS-mediated Hello gesture, so the
   gate is enforced outside user-mode. **Windows on the legacy
-  Platform-KSP path** (used when Hello is not enrolled, when
-  `--legacy` is passed, or when the user pinned a legacy-only flag
-  like `--auth-policy`) does NOT have a TPM-enforced gate — the
-  `NCRYPT_UI_PROTECT_KEY_FLAG` was dropped in libenclaveapp PR #99
-  because on Hello-enrolled hosts it surfaced the legacy CryptUI
-  password dialog instead of Hello biometric, which was both a UX
-  regression and a misleading security signal. The legacy Windows
-  path therefore relies on user-mode `UserConsentVerifier` for the
-  Hello prompt — that prompt is not hardware-enforced and an
-  attacker with code execution as the current user can hook the
-  `Verified` Boolean. **Linux software backend** issues a stderr
+  Platform-KSP path** has two sub-cases that are distinct
+  cryptographically. libenclaveapp PR #99 made the `NCRYPT_UI_PROTECT_KEY_FLAG`
+  conditional rather than unconditional. On a **non-Hello host**
+  the flag IS set, the TPM enforces a hardware UI gate via the
+  legacy CryptUI password dialog, and the agent's user-mode
+  `UserConsentVerifier` check is short-circuited via the
+  `NotAvailable` branch — so the gate is hardware-enforced.
+  On a **Hello-enrolled host where the user opted into legacy via
+  `--legacy`** (or has a pre-v0.6.44 key), the flag is NOT set
+  (otherwise the password dialog would fire on top of Hello, the
+  regression that motivated PR #99) and the agent's
+  `UserConsentVerifier` Boolean IS the gate — that is the only
+  soft-consent sub-path on Windows. **Linux software backend** issues a stderr
   confirmation prompt; **Linux TPM backend** does not currently
   enforce presence at sign time (see libenclaveapp threat model).
 - A key created with `AccessPolicy::None` **will never prompt** on
@@ -194,7 +199,8 @@ correctly:
 | Path | Backend | Consent gate | Default? |
 |------|---------|--------------|:--------:|
 | **SK / WebAuthn** | `WebAuthNAuthenticatorGetAssertion` (TPM via NGC) | OS-mediated Hello gesture; TPM will not produce a signature without it. Gate enforced outside user-mode. | **Yes**, when Hello is enrolled. |
-| **Legacy Platform KSP** | `NCryptSignHash` on `Microsoft Platform Crypto Provider` | `UserConsentVerifier` (WinRT) prompts before each sign, but the `Verified` Boolean is checked in user-mode by the agent. Hookable by any process with code execution as the user. | Yes, when Hello is **not** enrolled, when `--legacy` is passed, or when the user pinned a legacy-only flag (`--strict`, `--no-user-presence`, `--auth-policy`). |
+| **Legacy Platform KSP, no-Hello sub-path** | `NCryptSignHash` with `NCRYPT_UI_PROTECT_KEY_FLAG` set on the key | TPM-enforced via the legacy CryptUI password dialog -- the TPM will not release the key without the OS-mediated UI ack. `UserConsentVerifier` is probed and reports `NotAvailable`, so the agent's user-mode Boolean check is bypassed entirely. Hardware-enforced. | Yes, when Hello is **not** enrolled at keygen time. |
+| **Legacy Platform KSP, Hello-on-disk sub-path** | `NCryptSignHash` (no UI flag set) | `UserConsentVerifier` (WinRT) fires a Hello biometric/PIN prompt, but the `Verified` Boolean is checked in user-mode by the agent. Hookable by any process with code execution as the user. **Soft-consent.** | Only when `--legacy` is passed on a Hello-enrolled host, or when a pre-flip legacy key was created on a Hello-enrolled host before v0.6.44. |
 
 **Mitigations**:
 - `sshenc keygen` autodetects Hello availability via
@@ -217,17 +223,29 @@ correctly:
   trust path.
 
 **Residual risk**:
-- **Legacy path on Hello-enrolled hosts.** A user can deliberately
-  invoke `sshenc keygen --legacy` on a Hello-enrolled host and
-  receive soft consent. The CLI surfaces this as an explicit choice
-  rather than silently downgrading, but the resulting key has the
-  weaker gate.
-- **Pre-flip keys.** Keys created before the v0.6.44 default-flip
-  (or by older sshenc versions) keep their original backend. A
-  Windows user who upgraded sshenc but did not regenerate their key
-  is still on the legacy path. `sshenc inspect` reports the
-  algorithm so users can audit; `sshenc keygen --strong -l <label>`
-  followed by re-deploying the new pubkey upgrades a key.
+- **Legacy path with `--legacy` on a Hello-enrolled host.** This is
+  the only sub-path that uses the user-mode `Verified` Boolean as
+  the consent gate. The user explicitly opted in via `--legacy`, but
+  the resulting key has the soft gate -- an attacker with code
+  execution as the user can hook the agent's Boolean check and sign
+  without the prompt being visible. Mitigation: don't pass
+  `--legacy` on Hello-enrolled hosts unless you specifically need
+  the simpler single-gesture UX and accept the trade-off.
+- **Pre-flip keys on Hello-enrolled hosts.** Keys created before the
+  v0.6.44 default-flip on a Hello-enrolled host took the same
+  Hello-on-disk legacy sub-path (no UI flag, soft Boolean). Users
+  who upgraded sshenc but did not regenerate stay on that gate.
+  `sshenc inspect` reports the algorithm so users can audit;
+  `sshenc keygen --strong -l <label>` followed by re-deploying the
+  new pubkey upgrades a key.
+- **No-Hello legacy is hardware-enforced.** Worth calling out
+  explicitly: a Windows machine without Hello enrolled gets the
+  TPM-side CryptUI password dialog and is **not** vulnerable to
+  the user-mode Boolean hook. The UX is uglier than Hello but the
+  cryptographic gate is hardware-enforced. Users should not feel
+  they need to enroll Hello "for security" -- the TPM gate is
+  already there; Hello (via SK) is a better UX, not a stronger
+  gate, on this sub-path.
 - **WebAuthn `clientDataJSON` brittleness.** The SK path passes the
   raw SSH sign payload as `pbClientDataJSON` to `WebAuthn.dll`,
   relying on the documented Win32 contract that the bytes are not

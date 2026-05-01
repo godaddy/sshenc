@@ -91,15 +91,14 @@ enum Commands {
         #[arg(long, conflicts_with_all = &["legacy", "auth_policy", "strict", "no_user_presence", "require_user_presence"])]
         strong: bool,
 
-        /// Force the legacy Platform-KSP / `UserConsentVerifier` path
-        /// instead of the hardware-enforced SK path that is now the
-        /// default on Hello-enrolled Windows hosts. Use this only if
-        /// you specifically want the soft-consent UX (single
-        /// gesture, no chooser interstitial) and accept that the
-        /// `Verified` Boolean from `UserConsentVerifier` is
-        /// hookable by user-mode code. On macOS / Linux / non-
-        /// Hello Windows this flag is a no-op (legacy is already
-        /// the only path).
+        /// Force the legacy Platform-KSP path instead of the SK /
+        /// WebAuthn path. Both are hardware-enforced -- the choice
+        /// is UX only. SK fires a Windows Hello biometric/PIN prompt
+        /// fronted by a one-entry passkey chooser interstitial;
+        /// legacy fires the older CryptUI password protector dialog
+        /// (TPM enforces the gate via `NCRYPT_UI_PROTECT_KEY_FLAG`).
+        /// On macOS / Linux / non-Hello Windows this flag is a no-op
+        /// (legacy is already the only path).
         #[arg(long, conflicts_with = "strong")]
         legacy: bool,
     },
@@ -426,8 +425,9 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
                 {
                     if !strong {
                         eprintln!(
-                            "info: Windows Hello detected -- creating hardware-enforced SK key. \
-                             Pass --legacy to opt out."
+                            "info: Windows Hello detected -- creating SK / WebAuthn key. \
+                             Pass --legacy for the legacy CryptUI password dialog UX (also \
+                             hardware-enforced, just different prompt)."
                         );
                     }
                     return commands::keygen_sk(&label, comment, pub_path, print_pub, json);

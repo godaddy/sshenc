@@ -41,15 +41,17 @@ sshenc relies on hardware security modules for private key protection:
 - **User-presence is optional per key.** Keys can require Touch ID,
   Windows Hello, or password for each signing operation. This is
   configured at key generation time.
-- **Hardware-enforced consent on Hello-enrolled Windows (default
-  since v0.6.44).** `sshenc keygen` defaults to a FIDO2 / WebAuthn
-  SK key (`sk-ecdsa-sha2-nistp256@openssh.com`) when Windows Hello
-  is enrolled. The TPM/OS will not produce a signature without an
-  OS-mediated Hello gesture — the consent gate is enforced outside
-  user-mode and cannot be bypassed by hooking a Boolean in the
-  agent process. `--legacy` opts back into the soft-consent
-  Platform-KSP path. See `THREAT_MODEL.md` ("Windows consent-path
-  selection") for the per-scenario matrix.
+- **Hardware-enforced consent on Windows.** Every Windows path
+  enforces the consent gate inside the OS / TPM, not in user-mode
+  code. `sshenc keygen` defaults to a FIDO2 / WebAuthn SK key
+  (`sk-ecdsa-sha2-nistp256@openssh.com`) when Hello is enrolled --
+  Hello biometric/PIN gates the TPM via NGC. `--legacy` (or
+  no-Hello hosts) creates a Platform-KSP key with
+  `NCRYPT_UI_PROTECT_KEY_FLAG` set -- the TPM gates via the legacy
+  CryptUI password dialog. There is no software-enforced consent
+  Boolean in either path that an attacker with code execution as
+  the user could hook. See `THREAT_MODEL.md` ("Windows
+  consent-path selection") for the matrix and UX trade-offs.
 - **Agent socket is restricted.** Permissions are set to 0600 (owner-only).
 - **Key namespace isolation.** sshenc only operates on keys it created,
   identified by label prefix and stored in `~/.sshenc/keys/`.

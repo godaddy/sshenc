@@ -11,7 +11,17 @@ use std::time::{Duration, Instant};
 use sshenc_agent::server;
 
 const READY_FILE_ENV: &str = "SSHENC_AGENT_READY_FILE";
-const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time the daemonized parent waits for the child to write its ready
+/// file before giving up. Generous enough to cover cold-start of the
+/// WSL → Windows TPM bridge: the agent's startup runs through
+/// `AppSigningBackend::init`, which on WSL spawns
+/// `sshenc-tpm-bridge.exe` across the WSL/Windows boundary and
+/// completes an `init_signing` handshake before binding the socket.
+/// On AlmaLinux musl that combined cost reliably exceeds 10 s; the
+/// libenclaveapp-side `ensure_daemon_ready` budget already moved to
+/// ~30 s, so the inner wait must match or the parent gives up
+/// before the outer caller does. Aligned at 30 s.
+const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Parser)]
 #[command(

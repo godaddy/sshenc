@@ -40,15 +40,36 @@ impl AgentLauncher for RealAgentLauncher {
     }
 
     fn spawn_agent(&self, agent_bin: &Path, socket_path: &Path) -> Result<()> {
-        std::process::Command::new(agent_bin)
-            .arg("--socket")
+        let mut cmd = std::process::Command::new(agent_bin);
+        cmd.arg("--socket")
             .arg(socket_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|_| ())
-            .map_err(Into::into)
+            .stderr(std::process::Stdio::null());
+        // Detach the child from the parent's console / process group
+        // on Windows. Without this, `sshenc install` hands its
+        // PowerShell / cmd.exe parent stdio handles to the agent,
+        // and the parent shell waits for the agent to exit before
+        // the prompt returns — install appears to "hang" even though
+        // it has finished its work and the agent is happily
+        // serving in the background.
+        //
+        // `DETACHED_PROCESS = 0x00000008` — child has no console.
+        // `CREATE_NEW_PROCESS_GROUP = 0x00000200` — child is in its
+        // own process group so it survives a Ctrl-C against the
+        // parent.
+        //
+        // On Unix the daemonization is handled by `sshenc-agent`
+        // itself (double-fork + setsid in main.rs), so no extra
+        // flags are needed.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
+        cmd.spawn().map(|_| ()).map_err(Into::into)
     }
 }
 

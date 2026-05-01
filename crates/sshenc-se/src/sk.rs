@@ -47,10 +47,15 @@
 #![cfg(feature = "webauthn-sk")]
 
 use enclaveapp_windows_webauthn::{
-    delete_platform_credential as platform_delete, get_assertion,
-    is_platform_authenticator_available, make_credential, GetAssertionParams, MakeCredentialParams,
-    WebAuthnError,
+    delete_platform_credential as platform_delete, get_assertion, make_credential,
+    GetAssertionParams, MakeCredentialParams, WebAuthnError,
 };
+// `is_platform_authenticator_available` is only called from the
+// Windows branch of `detect_backend`; on other targets the bridge
+// probe takes over, and pulling the symbol in unconditionally
+// triggers an unused-import lint failure.
+#[cfg(target_os = "windows")]
+use enclaveapp_windows_webauthn::is_platform_authenticator_available;
 use sha2::{Digest, Sha256};
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;

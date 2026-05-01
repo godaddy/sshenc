@@ -103,6 +103,15 @@ to make unauthorized signing requests.
   `ssh-agent` with unencrypted keys loaded.
 - With user-presence, prompt fatigue (see below) can lead users to approve
   requests reflexively.
+- On the **Windows legacy Platform-KSP path** (default when Hello is
+  not enrolled, or explicitly via `--legacy`), the consent gate is
+  the user-mode `Verified` Boolean from `UserConsentVerifier`. An
+  attacker with code execution as the user can hook the agent
+  process and overwrite that return value, signing without the user
+  ever seeing the prompt. The Windows SK / WebAuthn path (default
+  when Hello is enrolled) does not have this weakness — the gate is
+  enforced outside user-mode. See "Threat: Windows consent-path
+  selection" below.
 
 ## Threat: Software Key Ambiguity
 
@@ -145,21 +154,96 @@ approve signing requests without verifying the context.
   authenticated to or what specific operation is requested.
 - Users who enable user-presence and then approve every prompt without
   thought get no security benefit from the feature.
-- **Important:** `PromptPolicy` is advisory. The real user-presence
-  enforcement lives in the hardware — the Secure Enclave triggers Touch ID
-  inside `SecKeyCreateSignature` when the key was created with a non-`None`
-  access policy, and Windows CNG triggers Windows Hello via
-  `NCRYPT_UI_POLICY` at key creation time. `sshenc`'s in-process
-  `maybe_verify_user_presence` path is a no-op on macOS and Windows (it
-  relies on the hardware to enforce) and a stderr confirmation prompt on
-  Linux software backend. A key created with `AccessPolicy::None` **will
-  never prompt**, even with `PromptPolicy::Always`, because the hardware
-  was not told to require presence.
-- The Windows NCRYPT UI policy is set only at key-create time (see the
-  libenclaveapp threat model on CNG policy verification); `sshenc` does
-  not re-read the policy before signing, so an attacker-planted TPM key
-  with the expected CNG name would bypass presence. Integration testing
-  against real Windows TPM hardware is a known gap.
+- **Important:** `PromptPolicy` is advisory. The actual user-presence
+  enforcement is platform-specific. **macOS** triggers Touch ID inside
+  `SecKeyCreateSignature` when the key was created with a non-`None`
+  access policy — the gate is enforced inside the Secure Enclave.
+  **Windows on the SK / WebAuthn path** (the default when Hello is
+  enrolled — see "Threat: Windows consent-path selection") triggers
+  Hello via `WebAuthNAuthenticatorGetAssertion`; the TPM/OS will not
+  produce a signature without an OS-mediated Hello gesture, so the
+  gate is enforced outside user-mode. **Windows on the legacy
+  Platform-KSP path** (used when Hello is not enrolled, when
+  `--legacy` is passed, or when the user pinned a legacy-only flag
+  like `--auth-policy`) does NOT have a TPM-enforced gate — the
+  `NCRYPT_UI_PROTECT_KEY_FLAG` was dropped in libenclaveapp PR #99
+  because on Hello-enrolled hosts it surfaced the legacy CryptUI
+  password dialog instead of Hello biometric, which was both a UX
+  regression and a misleading security signal. The legacy Windows
+  path therefore relies on user-mode `UserConsentVerifier` for the
+  Hello prompt — that prompt is not hardware-enforced and an
+  attacker with code execution as the current user can hook the
+  `Verified` Boolean. **Linux software backend** issues a stderr
+  confirmation prompt; **Linux TPM backend** does not currently
+  enforce presence at sign time (see libenclaveapp threat model).
+- A key created with `AccessPolicy::None` **will never prompt** on
+  any backend, even with `PromptPolicy::Always`, because the hardware
+  / OS was not told to require presence.
+
+## Threat: Windows consent-path selection
+
+**Scenario**: A Windows user expects hardware-enforced consent for SSH
+signing operations, comparable to macOS's Secure Enclave. The platform
+provides two distinct paths with very different security properties.
+
+**Background**: On Windows, sshenc creates ECDSA P-256 keys via one of
+two backends. Which backend is used is decided at `keygen` time and
+persisted in the key's `.meta` so subsequent sign operations route
+correctly:
+
+| Path | Backend | Consent gate | Default? |
+|------|---------|--------------|:--------:|
+| **SK / WebAuthn** | `WebAuthNAuthenticatorGetAssertion` (TPM via NGC) | OS-mediated Hello gesture; TPM will not produce a signature without it. Gate enforced outside user-mode. | **Yes**, when Hello is enrolled. |
+| **Legacy Platform KSP** | `NCryptSignHash` on `Microsoft Platform Crypto Provider` | `UserConsentVerifier` (WinRT) prompts before each sign, but the `Verified` Boolean is checked in user-mode by the agent. Hookable by any process with code execution as the user. | Yes, when Hello is **not** enrolled, when `--legacy` is passed, or when the user pinned a legacy-only flag (`--strict`, `--no-user-presence`, `--auth-policy`). |
+
+**Mitigations**:
+- `sshenc keygen` autodetects Hello availability via
+  `WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable` and selects
+  the SK path by default when present. Users who never pass a flag
+  get the strongest available consent gate automatically.
+- `--strong` forces the SK path and exits with a clear error if Hello
+  isn't reachable, so a script that requires hardware-enforced
+  consent can fail closed rather than silently degrade.
+- `--legacy` documents the soft-consent choice explicitly. A user who
+  wants the simpler single-gesture UX (no chooser interstitial) can
+  opt in knowing the trade-off.
+- The SK path uses a unique-per-key Relying Party ID
+  (`sshenc-<keyhash>.local`) so the Win11 26200+ passkey chooser
+  scope is exactly one credential per RP, even when the user has
+  many SK-backed sshenc keys.
+- The SK signature wire format (`sk-ecdsa-sha2-nistp256@openssh.com`)
+  is the standard OpenSSH 8.2+ FIDO2 format. Stock sshd and GitHub
+  verify it natively — there is no sshenc-specific verifier in the
+  trust path.
+
+**Residual risk**:
+- **Legacy path on Hello-enrolled hosts.** A user can deliberately
+  invoke `sshenc keygen --legacy` on a Hello-enrolled host and
+  receive soft consent. The CLI surfaces this as an explicit choice
+  rather than silently downgrading, but the resulting key has the
+  weaker gate.
+- **Pre-flip keys.** Keys created before the v0.6.44 default-flip
+  (or by older sshenc versions) keep their original backend. A
+  Windows user who upgraded sshenc but did not regenerate their key
+  is still on the legacy path. `sshenc inspect` reports the
+  algorithm so users can audit; `sshenc keygen --strong -l <label>`
+  followed by re-deploying the new pubkey upgrades a key.
+- **WebAuthn `clientDataJSON` brittleness.** The SK path passes the
+  raw SSH sign payload as `pbClientDataJSON` to `WebAuthn.dll`,
+  relying on the documented Win32 contract that the bytes are not
+  validated as JSON. If a future Windows update tightens this, every
+  existing SK key breaks (signs would fail at the wire). The
+  `tavrez/openssh-sk-winhello` plugin uses the same trick, so any
+  tightening would break the broader FIDO2-on-Windows ecosystem at
+  the same time. The pre-release smoke test
+  (`Test-EnclaveApps.ps1 -StrongSk`) verifies the wire format
+  end-to-end against a stock OpenSSH server in Docker; running it
+  before each release detects this drift before users do.
+- **No back-migration.** There is no in-place upgrade from a legacy
+  key to an SK key — the credential identifiers are different at the
+  hardware layer. Users who want hardware-enforced consent for an
+  existing key must `sshenc keygen --strong` to a new label and
+  re-deploy the pubkey.
 
 ## Threat: Backup and Migration Limitations
 

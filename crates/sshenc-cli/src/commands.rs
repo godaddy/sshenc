@@ -210,14 +210,32 @@ fn validate_windows_action_result(
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-fn windows_prepare_install_actions() -> Vec<WindowsAction> {
-    vec![
-        WindowsAction::StopService("ssh-agent"),
-        WindowsAction::SetServiceStart {
+fn windows_prepare_install_actions(state: &WindowsInstallState) -> Vec<WindowsAction> {
+    // Only emit the actions that actually need to run. Stopping a
+    // service that's already stopped, or disabling one that's
+    // already disabled, fires a `[SC] OpenService FAILED 5: Access
+    // is denied` on a non-admin terminal — but only because we're
+    // calling `sc.exe` at all. If the service is already in the
+    // target state we don't need to call `sc.exe` and the warning
+    // never fires.
+    //
+    // The captured state is read-only (`sc query` works without
+    // admin), so on a host where someone has previously disabled
+    // the Windows ssh-agent service (whether via a prior
+    // `sshenc install` run as admin, or manually), repeated
+    // `sshenc install` invocations as a regular user will be silent
+    // about the service entirely.
+    let mut actions = Vec::new();
+    if state.ssh_agent_was_running == Some(true) {
+        actions.push(WindowsAction::StopService("ssh-agent"));
+    }
+    if state.ssh_agent_start_mode != Some(WindowsServiceStartMode::Disabled) {
+        actions.push(WindowsAction::SetServiceStart {
             service: "ssh-agent",
             mode: WindowsServiceStartMode::Disabled,
-        },
-    ]
+        });
+    }
+    actions
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -856,20 +874,29 @@ pub fn install() -> Result<()> {
             save_windows_install_state(&state)?;
             Ok(state)
         }) {
-            Ok(state) => match apply_windows_actions(&windows_prepare_install_actions()) {
-                Err(error) => {
-                    eprintln!(
-                        "Warning: could not manage Windows ssh-agent service: {error}\n\
-                         The ssh-agent service may conflict with sshenc. \
-                         Run as administrator to disable it, or stop it manually."
-                    );
-                    None
-                }
-                Ok(()) => {
-                    println!("Configured Windows ssh-agent service for sshenc.");
+            Ok(state) => {
+                let actions = windows_prepare_install_actions(&state);
+                if actions.is_empty() {
+                    // Service already disabled & stopped — nothing
+                    // to do, no admin required, no warning.
                     Some(state)
+                } else {
+                    match apply_windows_actions(&actions) {
+                        Err(error) => {
+                            eprintln!(
+                                "Warning: could not manage Windows ssh-agent service: {error}\n\
+                             The ssh-agent service may conflict with sshenc. \
+                             Run as administrator to disable it, or stop it manually."
+                            );
+                            None
+                        }
+                        Ok(()) => {
+                            println!("Configured Windows ssh-agent service for sshenc.");
+                            Some(state)
+                        }
+                    }
                 }
-            },
+            }
             Err(error) => {
                 eprintln!(
                     "Warning: could not capture Windows service state: {error}\n\
@@ -2639,15 +2666,66 @@ mod tests {
         assert_eq!(*launcher.spawn_count.lock().unwrap(), 0);
     }
 
-    #[test]
-    fn windows_prepare_install_actions_disable_service() {
-        let actions = windows_prepare_install_actions();
+    fn install_state_with(
+        running: Option<bool>,
+        mode: Option<WindowsServiceStartMode>,
+    ) -> WindowsInstallState {
+        WindowsInstallState {
+            previous_ssh_auth_sock: None,
+            previous_git_ssh_command: None,
+            managed_git_ssh_command: false,
+            ssh_agent_start_mode: mode,
+            ssh_agent_was_running: running,
+        }
+    }
 
+    #[test]
+    fn windows_prepare_install_actions_running_and_demand() {
+        // The pre-feature default: service running, start=demand.
+        // Both stop and disable are needed.
+        let state = install_state_with(Some(true), Some(WindowsServiceStartMode::Demand));
+        let actions = windows_prepare_install_actions(&state);
         assert!(actions.contains(&WindowsAction::StopService("ssh-agent")));
         assert!(actions.contains(&WindowsAction::SetServiceStart {
             service: "ssh-agent",
             mode: WindowsServiceStartMode::Disabled,
         }));
+    }
+
+    #[test]
+    fn windows_prepare_install_actions_already_disabled_and_stopped_is_noop() {
+        // The post-install steady state: service stopped, start=disabled.
+        // We must emit zero actions so a non-admin re-run is silent.
+        let state = install_state_with(Some(false), Some(WindowsServiceStartMode::Disabled));
+        let actions = windows_prepare_install_actions(&state);
+        assert!(
+            actions.is_empty(),
+            "expected no-op when service is already in target state, got {actions:?}"
+        );
+    }
+
+    #[test]
+    fn windows_prepare_install_actions_disabled_but_running_only_stops() {
+        // Edge case: someone re-enabled the service start mode but
+        // it's not running yet. We should only set the start mode.
+        let state = install_state_with(Some(false), Some(WindowsServiceStartMode::Demand));
+        let actions = windows_prepare_install_actions(&state);
+        assert_eq!(
+            actions,
+            vec![WindowsAction::SetServiceStart {
+                service: "ssh-agent",
+                mode: WindowsServiceStartMode::Disabled,
+            }]
+        );
+    }
+
+    #[test]
+    fn windows_prepare_install_actions_running_but_already_disabled_only_stops() {
+        // Service is set to disabled but is somehow still running
+        // (rare — e.g. set-disabled-but-not-yet-stopped). Stop it.
+        let state = install_state_with(Some(true), Some(WindowsServiceStartMode::Disabled));
+        let actions = windows_prepare_install_actions(&state);
+        assert_eq!(actions, vec![WindowsAction::StopService("ssh-agent")]);
     }
 
     #[test]

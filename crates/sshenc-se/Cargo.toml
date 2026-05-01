@@ -26,6 +26,7 @@ enclaveapp-core = { workspace = true }
 enclaveapp-app-storage = { workspace = true }
 enclaveapp-test-software = { workspace = true, optional = true }
 enclaveapp-windows-webauthn = { workspace = true, optional = true }
+enclaveapp-bridge = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }

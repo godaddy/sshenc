@@ -27,14 +27,35 @@
 //! (`sshenc-<hex>.local`). The chooser then only ever sees the one
 //! credential we care about and degenerates to a confirmation step
 //! before the auth gesture.
+//!
+//! ## Two-backend dispatch (native vs bridge)
+//!
+//! On Windows, this module calls `enclaveapp_windows_webauthn`
+//! directly -- the wrapper crate links against `webauthn.dll`.
+//!
+//! On Linux (specifically WSL) the local wrapper is a no-op stub,
+//! so we instead probe `enclaveapp_bridge::find_bridge("sshenc")`
+//! for `sshenc-tpm-bridge.exe` on the mounted Windows filesystem
+//! and call `bridge_webauthn_*` helpers that forward to
+//! `webauthn.dll` on the Windows side via JSON-RPC over the
+//! bridge process's stdio. Same hardware-enforced gate, same
+//! `sk-ecdsa-sha2-nistp256@openssh.com` wire format, same Hello
+//! prompt -- it just fires on the Windows desktop where the user
+//! sees it. The SSH key lives in WSL `~/.ssh/<label>.pub`; the
+//! TPM-bound private key never crosses the boundary.
 
 #![cfg(feature = "webauthn-sk")]
 
 use enclaveapp_windows_webauthn::{
-    delete_platform_credential as platform_delete, get_assertion,
-    is_platform_authenticator_available, make_credential, GetAssertionParams, MakeCredentialParams,
-    WebAuthnError,
+    delete_platform_credential as platform_delete, get_assertion, make_credential,
+    GetAssertionParams, MakeCredentialParams, WebAuthnError,
 };
+// `is_platform_authenticator_available` is only called from the
+// Windows branch of `detect_backend`; on other targets the bridge
+// probe takes over, and pulling the symbol in unconditionally
+// triggers an unused-import lint failure.
+#[cfg(target_os = "windows")]
+use enclaveapp_windows_webauthn::is_platform_authenticator_available;
 use sha2::{Digest, Sha256};
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;
@@ -74,35 +95,89 @@ fn user_id_for_label(label: &str) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// True if the platform authenticator is reachable on this host
-/// (Hello enrolled, WebAuthN.dll loadable). On non-Windows this is
-/// always false (the wrapper crate's stub).
+/// Internal: which WebAuthn backend services this process. Native
+/// on Windows; bridge-routed elsewhere when a `sshenc-tpm-bridge`
+/// binary is reachable. `None` means SK keys aren't usable on
+/// this host.
+#[allow(dead_code)] // Bridge is unreachable on Windows; live on other OSes.
+enum SkBackend {
+    Native,
+    Bridge(PathBuf),
+}
+
+/// Detect the active SK backend. Cheap to call repeatedly -- the
+/// bridge probe is a stdin/stdout JSON-RPC roundtrip, not a Hello
+/// prompt; only triggered on non-Windows when a bridge binary is
+/// found. Returns `None` if neither path is available.
+fn detect_backend() -> Option<SkBackend> {
+    #[cfg(target_os = "windows")]
+    {
+        if is_platform_authenticator_available() {
+            return Some(SkBackend::Native);
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let bridge = enclaveapp_bridge::find_bridge("sshenc")?;
+        match enclaveapp_bridge::bridge_webauthn_is_available(&bridge) {
+            Ok(true) => Some(SkBackend::Bridge(bridge)),
+            _ => None,
+        }
+    }
+}
+
+/// True if SK keys are usable on this host. On Windows this is
+/// the local `WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable`
+/// probe. On WSL it's a JSON-RPC roundtrip to the Windows-side
+/// bridge that performs the same probe. Returns `false` on hosts
+/// with neither path (e.g. macOS, Linux without the bridge).
 pub fn is_available() -> bool {
-    is_platform_authenticator_available()
+    detect_backend().is_some()
 }
 
 /// Create a new SK key for `label`. Triggers a Hello-enrollment
-/// prompt; the resulting credential is sealed by the TPM and
-/// recorded as a passkey under our per-key RP id.
+/// prompt (on the Windows desktop, whether the caller is on
+/// Windows or in WSL); the resulting credential is sealed by the
+/// TPM and recorded as a passkey under our per-key RP id.
 pub fn generate(opts: &SkKeyGenOptions) -> Result<KeyInfo> {
     let label_str = opts.label.as_str();
     let rp_id = rp_id_for_label(label_str);
     let user_id = user_id_for_label(label_str);
 
-    let cred = make_credential(MakeCredentialParams {
-        rp_id: &rp_id,
-        rp_name: "sshenc",
-        user_id: &user_id,
-        user_name: label_str,
-        user_display_name: label_str,
-        timeout_ms: 60_000,
-        hwnd: None,
-    })
-    .map_err(map_webauthn_error)?;
+    let backend = detect_backend()
+        .ok_or_else(|| Error::Other("SK backend not available (no Hello, no bridge)".into()))?;
+
+    // Yields (credential_id, public_key_x: [u8;32], public_key_y: [u8;32]).
+    let (credential_id, public_key_x, public_key_y) = match backend {
+        SkBackend::Native => {
+            let cred = make_credential(MakeCredentialParams {
+                rp_id: &rp_id,
+                rp_name: "sshenc",
+                user_id: &user_id,
+                user_name: label_str,
+                user_display_name: label_str,
+                timeout_ms: 60_000,
+                hwnd: None,
+            })
+            .map_err(map_webauthn_error)?;
+            (cred.credential_id, cred.public_key_x, cred.public_key_y)
+        }
+        SkBackend::Bridge(path) => {
+            let result = enclaveapp_bridge::bridge_webauthn_make_credential(
+                &path, &rp_id, "sshenc", &user_id, label_str, label_str, 60_000,
+            )
+            .map_err(|e| Error::Other(format!("bridge make_credential: {e}")))?;
+            let credential_id = base64_decode(&result.credential_id_b64)?;
+            let public_key_x = hex_decode_32(&result.public_key_x_hex)?;
+            let public_key_y = hex_decode_32(&result.public_key_y_hex)?;
+            (credential_id, public_key_x, public_key_y)
+        }
+    };
 
     let ssh_pubkey = SshSkPublicKey::from_xy(
-        &cred.public_key_x,
-        &cred.public_key_y,
+        &public_key_x,
+        &public_key_y,
         rp_id.clone(),
         opts.comment.clone(),
     );
@@ -125,7 +200,7 @@ pub fn generate(opts: &SkKeyGenOptions) -> Result<KeyInfo> {
         enclaveapp_core::types::AccessPolicy::Any,
         Some(enclaveapp_core::types::PresenceMode::Strict),
         opts.comment.clone(),
-        cred.credential_id.clone(),
+        credential_id.clone(),
         rp_id,
     );
 
@@ -135,8 +210,8 @@ pub fn generate(opts: &SkKeyGenOptions) -> Result<KeyInfo> {
     // needing to know which algorithm is in play).
     let mut sec1 = Vec::with_capacity(65);
     sec1.push(0x04);
-    sec1.extend_from_slice(&cred.public_key_x);
-    sec1.extend_from_slice(&cred.public_key_y);
+    sec1.extend_from_slice(&public_key_x);
+    sec1.extend_from_slice(&public_key_y);
 
     Ok(KeyInfo {
         metadata,
@@ -152,24 +227,72 @@ pub fn generate(opts: &SkKeyGenOptions) -> Result<KeyInfo> {
 /// this returns Ok; callers must have already deleted any
 /// reference to the credential id from their own metadata.
 pub fn delete_platform_credential(credential_id: &[u8]) -> Result<()> {
-    platform_delete(credential_id).map_err(map_webauthn_error)
+    let backend = detect_backend()
+        .ok_or_else(|| Error::Other("SK backend not available for delete".into()))?;
+    match backend {
+        SkBackend::Native => platform_delete(credential_id).map_err(map_webauthn_error),
+        SkBackend::Bridge(path) => {
+            enclaveapp_bridge::bridge_webauthn_delete_platform_credential(&path, credential_id)
+                .map_err(|e| Error::Other(format!("bridge delete_platform_credential: {e}")))
+        }
+    }
 }
 
 /// Sign `data` with an SK key. `credential_id` and `rp_id` come
 /// from the persisted metadata for the key. Returns a fully-formed
 /// SK signature blob (the wire bytes that go inside the SSH agent
-/// `SIGN_RESPONSE` envelope).
+/// `SIGN_RESPONSE` envelope). Hello prompt fires on the Windows
+/// desktop whether the caller is on Windows or in WSL.
 pub fn sign(credential_id: &[u8], rp_id: &str, data: &[u8]) -> Result<Vec<u8>> {
-    let asn = get_assertion(GetAssertionParams {
-        rp_id,
-        credential_id,
-        client_data: data,
-        timeout_ms: 60_000,
-        hwnd: None,
-    })
-    .map_err(map_webauthn_error)?;
+    let backend =
+        detect_backend().ok_or_else(|| Error::Other("SK backend not available for sign".into()))?;
+    let (signature_der, flags, counter) = match backend {
+        SkBackend::Native => {
+            let asn = get_assertion(GetAssertionParams {
+                rp_id,
+                credential_id,
+                client_data: data,
+                timeout_ms: 60_000,
+                hwnd: None,
+            })
+            .map_err(map_webauthn_error)?;
+            (asn.signature_der, asn.flags, asn.counter)
+        }
+        SkBackend::Bridge(path) => {
+            let result = enclaveapp_bridge::bridge_webauthn_get_assertion(
+                &path,
+                rp_id,
+                credential_id,
+                data,
+                60_000,
+            )
+            .map_err(|e| Error::Other(format!("bridge get_assertion: {e}")))?;
+            let signature_der = base64_decode(&result.signature_der_b64)?;
+            (signature_der, result.flags, result.counter)
+        }
+    };
+    encode_sk_signature_blob(&signature_der, flags, counter)
+}
 
-    encode_sk_signature_blob(&asn.signature_der, asn.flags, asn.counter)
+fn base64_decode(s: &str) -> Result<Vec<u8>> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD.decode(s).map_err(Error::Base64)
+}
+
+fn hex_decode_32(s: &str) -> Result<[u8; 32]> {
+    if s.len() != 64 {
+        return Err(Error::Other(format!(
+            "hex pubkey coordinate has wrong length: {}",
+            s.len()
+        )));
+    }
+    let mut out = [0_u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|e| Error::Other(format!("hex decode at byte {i}: {e}")))?;
+    }
+    Ok(out)
 }
 
 /// Validate that the metadata stored for a label looks like an SK

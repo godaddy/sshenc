@@ -27,7 +27,20 @@ use enclaveapp_wsl::install::{LinuxReleaseSpec, WslInstallConfig};
 /// at install time so that a `sshenc install` run from a v0.6.36
 /// binary always installs v0.6.36 Linux binaries even when GitHub
 /// has a newer release available.
-const SSHENC_RELEASE_TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+///
+/// For local development builds the version stays at the workspace
+/// placeholder `0.0.0-dev` (the release pipeline patches it to the
+/// real tag at build time). Don't try to download a tarball for the
+/// placeholder — there's no `v0.0.0-dev` release on GitHub and the
+/// install would 404 on every WSL distro. See [`is_release_build`].
+const SSHENC_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn is_release_build() -> bool {
+    // Workspace `version = "0.0.0-dev"` is the dev placeholder; the
+    // release workflow rewrites it to the actual `X.Y.Z` tag before
+    // compiling. Anything that isn't the placeholder is a real build.
+    !SSHENC_PKG_VERSION.contains("dev")
+}
 
 fn make_config() -> WslInstallConfig {
     WslInstallConfig {
@@ -51,18 +64,31 @@ fi"#
         .to_string(),
         linux_binary_path: None,
         linux_binary_target: None,
-        auto_install_linux_release: Some(LinuxReleaseSpec {
-            repo: "godaddy/sshenc".to_string(),
-            tag: SSHENC_RELEASE_TAG.to_string(),
-            asset_gnu: "sshenc-x86_64-unknown-linux-gnu.tar.gz".to_string(),
-            asset_musl: "sshenc-x86_64-unknown-linux-musl.tar.gz".to_string(),
-            binaries: vec![
-                "sshenc".to_string(),
-                "sshenc-agent".to_string(),
-                "sshenc-keygen".to_string(),
-                "gitenc".to_string(),
-            ],
-        }),
+        // Only attempt the GitHub-release download on real release
+        // builds. Dev builds (`cargo build` from a local checkout
+        // without the release workflow's version-patching step)
+        // would otherwise try to fetch `v0.0.0-dev` — a tag that
+        // doesn't exist — and surface a noisy 404 warning on every
+        // WSL distro. The shell-block injection still happens, so
+        // a developer running `sshenc install` from a local build
+        // gets the bashrc updated; binary installation is a no-op
+        // they can do manually with the locally-built artifacts.
+        auto_install_linux_release: if is_release_build() {
+            Some(LinuxReleaseSpec {
+                repo: "godaddy/sshenc".to_string(),
+                tag: format!("v{SSHENC_PKG_VERSION}"),
+                asset_gnu: "sshenc-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+                asset_musl: "sshenc-x86_64-unknown-linux-musl.tar.gz".to_string(),
+                binaries: vec![
+                    "sshenc".to_string(),
+                    "sshenc-agent".to_string(),
+                    "sshenc-keygen".to_string(),
+                    "gitenc".to_string(),
+                ],
+            })
+        } else {
+            None
+        },
     }
 }
 

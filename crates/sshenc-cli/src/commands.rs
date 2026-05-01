@@ -522,6 +522,71 @@ fn restore_windows_state_with(
     Ok(())
 }
 
+/// Generate a FIDO2 / WebAuthn-backed SK key (`sshenc keygen --strong`).
+///
+/// Bypasses `AgentProxyBackend` -- SK keygen needs to run in the CLI
+/// process so the Hello prompt's HWND inherits foreground claim.
+/// On non-Windows (or when the `webauthn-sk` feature is off) we
+/// surface a clear error instead of failing inside `webauthn.dll`.
+#[cfg(feature = "webauthn-sk")]
+#[allow(clippy::print_stdout)]
+pub fn keygen_sk(
+    label: &str,
+    comment: Option<String>,
+    write_pub: Option<PathBuf>,
+    print_pub: bool,
+    json: bool,
+) -> Result<()> {
+    use sshenc_core::key::SkKeyGenOptions;
+    use sshenc_se::SshencBackend;
+
+    let key_label = KeyLabel::new(label)?;
+
+    if !sshenc_se::sk::is_available() {
+        anyhow::bail!(
+            "Windows Hello platform authenticator is not available. \
+             Enroll Hello (Settings -> Sign-in options) and retry, \
+             or omit --strong to use the legacy CNG path."
+        );
+    }
+
+    // The CLI's AgentProxyBackend doesn't help here; we need direct
+    // disk + WebAuthn access. Build a one-shot SshencBackend pinned
+    // to the same pub_dir the proxy would use.
+    let pub_dir = dirs::home_dir()
+        .map(|d| d.join(".ssh"))
+        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
+    let backend = SshencBackend::new(pub_dir, false)
+        .map_err(|e| anyhow::anyhow!("failed to initialize SshencBackend: {e}"))?;
+
+    let opts = SkKeyGenOptions {
+        label: key_label,
+        comment,
+        write_pub_path: write_pub.clone(),
+    };
+    let info = backend.sk_generate(&opts)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    } else {
+        println!("Generated FIDO2 SK key (TPM-bound via Windows Hello): {label}");
+        println!("  Algorithm:    {}", info.metadata.algorithm);
+        println!("  Fingerprint:  {}", info.fingerprint_sha256);
+        if let Some(ref rp) = info.metadata.rp_id {
+            println!("  RP id:        {rp}");
+        }
+        if let Some(ref path) = info.pub_file_path {
+            println!("  Public key written to: {}", path.display());
+        }
+        if print_pub {
+            let pubkey = sshenc_se::sk::ssh_pubkey_from_keyinfo(&info)?;
+            println!();
+            println!("{}", pubkey.to_openssh_line());
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::print_stdout, clippy::too_many_arguments)]
 pub fn keygen(
     backend: &dyn KeyBackend,

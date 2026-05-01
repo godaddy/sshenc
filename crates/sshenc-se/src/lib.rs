@@ -11,6 +11,8 @@
 pub mod backend;
 pub mod compat;
 pub mod proxy;
+#[cfg(feature = "webauthn-sk")]
+pub mod sk;
 mod unified;
 
 pub use backend::KeyBackend;

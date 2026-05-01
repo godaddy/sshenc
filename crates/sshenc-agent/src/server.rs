@@ -730,6 +730,55 @@ fn handle_request(
                     ));
                 }
             }
+
+            // SK / FIDO2 keys aren't in the legacy `list()` -- they
+            // live as standalone `.meta` files. Append them so
+            // ssh.exe sees them alongside the legacy keys it already
+            // knows about. Each SK key serves an
+            // `sk-ecdsa-sha2-nistp256@openssh.com` blob (different
+            // wire format from `ecdsa-sha2-nistp256` and includes
+            // the application string) -- the SSH client picks them
+            // up from the agent transparently.
+            if let Ok(sk_labels) = backend.sk_list_labels() {
+                for label in sk_labels {
+                    if !allowed_labels.is_empty() && !allowed_labels.contains(&label) {
+                        continue;
+                    }
+                    let info = match backend.sk_get(&label) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            tracing::warn!(%label, error = %e, "skipping SK key in identity list");
+                            continue;
+                        }
+                    };
+                    let rp_id = match &info.metadata.rp_id {
+                        Some(r) => r.clone(),
+                        None => continue,
+                    };
+                    let sk_pub = match sshenc_core::pubkey::SshSkPublicKey::from_sec1_bytes(
+                        &info.public_key_bytes,
+                        rp_id,
+                        info.metadata.comment.clone(),
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(%label, error = %e, "skipping malformed SK key");
+                            continue;
+                        }
+                    };
+                    let blob = sk_pub.to_wire_format();
+                    blob_cache.insert(blob.clone(), label.clone());
+                    let is_default = label == "default";
+                    identities.push((
+                        is_default,
+                        Identity {
+                            key_blob: blob,
+                            comment: info.metadata.comment.unwrap_or_else(|| label.clone()),
+                        },
+                    ));
+                }
+            }
+
             // Present "default" key first so SSH tries it before others
             identities.sort_by_key(|(is_default, _)| !*is_default);
             let identities: Vec<Identity> = identities.into_iter().map(|(_, id)| id).collect();
@@ -744,7 +793,8 @@ fn handle_request(
                 "handling sign request"
             );
 
-            // Resolve the label: warm cache first, full list() if cold or stale.
+            // Resolve the label: warm cache first, full list() (legacy
+            // + SK) if cold or stale.
             let label = if let Some(l) = blob_cache.get(&key_blob) {
                 l.clone()
             } else {
@@ -756,6 +806,26 @@ fn handle_request(
                             pubkey.to_wire_format(),
                             k.metadata.label.as_str().to_string(),
                         );
+                    }
+                }
+                // Also rebuild SK entries -- they aren't in legacy
+                // list() output. Skip silently if sk_list_labels
+                // returns Err (backend without SK support).
+                if let Ok(sk_labels) = backend.sk_list_labels() {
+                    for label in sk_labels {
+                        if let Ok(info) = backend.sk_get(&label) {
+                            if let Some(rp) = info.metadata.rp_id.clone() {
+                                if let Ok(sk_pub) =
+                                    sshenc_core::pubkey::SshSkPublicKey::from_sec1_bytes(
+                                        &info.public_key_bytes,
+                                        rp,
+                                        info.metadata.comment.clone(),
+                                    )
+                                {
+                                    blob_cache.insert(sk_pub.to_wire_format(), label);
+                                }
+                            }
+                        }
                     }
                 }
                 match blob_cache.get(&key_blob) {
@@ -771,6 +841,33 @@ fn handle_request(
             if !allowed_labels.is_empty() && !allowed_labels.contains(label.as_str()) {
                 tracing::warn!(label = label.as_str(), "key not in allowed list");
                 return Ok(AgentResponse::Failure);
+            }
+
+            // Branch on key type. SK keys go through WebAuthn
+            // GetAssertion; the resulting blob is already a full SK
+            // signature (algorithm + r/s + flags + counter), unlike
+            // legacy ECDSA where we have to wrap a DER signature.
+            if backend.is_sk_label(label.as_str()) {
+                tracing::debug!(label = label.as_str(), "dispatching SK sign request");
+                let sig_blob = match backend.sk_sign(label.as_str(), &data) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            label = label.as_str(),
+                            error = %e,
+                            "SK sign failed"
+                        );
+                        return Ok(AgentResponse::Failure);
+                    }
+                };
+                tracing::debug!(
+                    label = label.as_str(),
+                    sig_len = sig_blob.len(),
+                    "SK signing complete"
+                );
+                return Ok(AgentResponse::SignResponse {
+                    signature_blob: sig_blob,
+                });
             }
 
             // Fetch key metadata for presence mode. Uses a targeted single-key

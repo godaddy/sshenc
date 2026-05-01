@@ -30,6 +30,9 @@ pub enum Error {
     #[error("invalid SSH public key format: {0}")]
     InvalidPublicKey(String),
 
+    #[error("invalid signature format: {0}")]
+    InvalidSignature(String),
+
     #[error("config error: {0}")]
     Config(String),
 

@@ -12,11 +12,15 @@ name = "sshenc"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["webauthn-sk"]
 # Forwards the `force-software` flag down to sshenc-se + sshenc-agent
 # so the whole binary set exposes `SSHENC_FORCE_SOFTWARE=1` at runtime.
 # Test-only.
 force-software = ["sshenc-se/force-software", "sshenc-agent/force-software"]
+# Compiles in the FIDO2 / Windows Hello SK key path
+# (`sshenc keygen --strong`). Default-on; can be disabled at build
+# time for binaries that don't want the WebAuthn surface area.
+webauthn-sk = ["sshenc-se/webauthn-sk"]
 
 [dependencies]
 sshenc-core = { workspace = true }

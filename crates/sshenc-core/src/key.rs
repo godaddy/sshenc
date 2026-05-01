@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 /// Application tag prefix used to identify sshenc-managed keys in the Keychain.
-pub const APP_TAG_PREFIX: &str = "com.sshenc.key.";
+pub const APP_TAG_PREFIX: &str = "com.godaddy.sshenc.key.";
 
 /// The key algorithm used by sshenc.
 ///
@@ -142,7 +142,7 @@ impl TryFrom<String> for KeyLabel {
 pub struct KeyMetadata {
     /// Human-readable label.
     pub label: KeyLabel,
-    /// Full application tag (com.sshenc.key.<label>).
+    /// Full application tag (com.godaddy.sshenc.key.<label>).
     pub app_tag: String,
     /// Key algorithm.
     pub algorithm: KeyAlgorithm,
@@ -433,12 +433,12 @@ mod tests {
     #[test]
     fn test_app_tag_format() {
         let label = KeyLabel::new("github-personal").unwrap();
-        assert_eq!(label.app_tag(), "com.sshenc.key.github-personal");
+        assert_eq!(label.app_tag(), "com.godaddy.sshenc.key.github-personal");
     }
 
     #[test]
     fn test_app_tag_prefix_constant() {
-        assert_eq!(APP_TAG_PREFIX, "com.sshenc.key.");
+        assert_eq!(APP_TAG_PREFIX, "com.godaddy.sshenc.key.");
     }
 
     // --- KeyMetadata ---
@@ -448,7 +448,7 @@ mod tests {
         let label = KeyLabel::new("test").unwrap();
         let meta = KeyMetadata::new(label.clone(), AccessPolicy::Any, Some("comment".into()));
         assert_eq!(meta.label, label);
-        assert_eq!(meta.app_tag, "com.sshenc.key.test");
+        assert_eq!(meta.app_tag, "com.godaddy.sshenc.key.test");
         assert!(matches!(meta.algorithm, KeyAlgorithm::EcdsaP256));
         assert!(meta.requires_user_presence());
         assert_eq!(meta.access_policy, AccessPolicy::Any);

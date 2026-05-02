@@ -137,6 +137,13 @@ enum Commands {
         /// Skip confirmation prompt.
         #[arg(long, short = 'y')]
         yes: bool,
+
+        /// Treat missing keys as a no-op rather than an error. Useful
+        /// for idempotent cleanup scripts where the key may already
+        /// have been removed by a prior run. Real errors (backend
+        /// unavailable, permission denied, etc.) still surface.
+        #[arg(long)]
+        if_exists: bool,
     },
 
     /// Export the public key in OpenSSH format.
@@ -475,7 +482,8 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
             labels,
             delete_pub,
             yes,
-        } => commands::delete(backend, &labels, delete_pub, yes),
+            if_exists,
+        } => commands::delete(backend, &labels, delete_pub, yes, if_exists),
         Commands::ExportPub {
             label,
             output,

@@ -735,16 +735,29 @@ pub fn delete(
     labels: &[String],
     delete_pub: bool,
     yes: bool,
+    if_exists: bool,
 ) -> Result<()> {
     if labels.is_empty() {
         bail!("no key labels specified");
     }
 
-    // Verify all keys exist first
+    // Verify all keys exist first. Under --if-exists, swallow
+    // KeyNotFound for individual labels (no-op semantics) so cleanup
+    // scripts can run idempotently. Other errors (backend unavailable,
+    // permission denied, ...) still surface.
     let mut keys_to_delete = Vec::new();
     for label in labels {
-        let info = backend.get(label)?;
-        keys_to_delete.push(info);
+        match backend.get(label) {
+            Ok(info) => keys_to_delete.push(info),
+            Err(e) if if_exists && e.is_key_not_found() => {
+                println!("Skipped (no such key): {label}");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    if keys_to_delete.is_empty() {
+        return Ok(());
     }
 
     if !yes {
@@ -2417,7 +2430,7 @@ mod tests {
         let backend = backend_with_key("del-key", None);
         assert_eq!(backend.key_count(), 1);
         let labels = vec!["del-key".to_string()];
-        let result = delete(&backend, &labels, false, true);
+        let result = delete(&backend, &labels, false, true, false);
         assert!(result.is_ok());
         assert_eq!(backend.key_count(), 0);
     }
@@ -2426,15 +2439,37 @@ mod tests {
     fn delete_nonexistent_key() {
         let backend = mock_backend();
         let labels = vec!["ghost".to_string()];
-        let result = delete(&backend, &labels, false, true);
+        let result = delete(&backend, &labels, false, true, false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_nonexistent_key_with_if_exists_is_noop() {
+        let backend = mock_backend();
+        let labels = vec!["ghost".to_string()];
+        // if_exists=true should turn the missing-key error into a no-op.
+        let result = delete(&backend, &labels, false, true, true);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(backend.key_count(), 0);
+    }
+
+    #[test]
+    fn delete_mixed_existing_and_missing_with_if_exists() {
+        // Mix of one existing key and one missing label under
+        // --if-exists: existing is deleted, missing is skipped, no
+        // error. Confirms the per-label loop handles each independently.
+        let backend = backend_with_key("real-key", None);
+        let labels = vec!["real-key".to_string(), "ghost".to_string()];
+        let result = delete(&backend, &labels, false, true, true);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(backend.key_count(), 0);
     }
 
     #[test]
     fn delete_empty_labels() {
         let backend = mock_backend();
         let labels: Vec<String> = vec![];
-        let result = delete(&backend, &labels, false, true);
+        let result = delete(&backend, &labels, false, true, false);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("no key labels"), "error: {err_msg}");
@@ -2479,7 +2514,7 @@ mod tests {
         assert_eq!(backend.key_count(), 3);
 
         let labels = vec!["mk-1".to_string(), "mk-2".to_string()];
-        delete(&backend, &labels, false, true).unwrap();
+        delete(&backend, &labels, false, true, false).unwrap();
         assert_eq!(backend.key_count(), 1);
         // The remaining key should be mk-3
         let remaining = backend.list().unwrap();
@@ -2505,7 +2540,7 @@ mod tests {
 
         assert!(pub_path.exists());
         let labels = vec!["cleanup-key".to_string()];
-        delete(&backend, &labels, true, true).unwrap();
+        delete(&backend, &labels, true, true, false).unwrap();
         assert!(!pub_path.exists(), "pub file should be deleted");
         assert_eq!(backend.key_count(), 0);
 
@@ -2550,7 +2585,7 @@ mod tests {
         .unwrap();
 
         let labels = vec!["remove-b".to_string()];
-        delete(&backend, &labels, false, true).unwrap();
+        delete(&backend, &labels, false, true, false).unwrap();
 
         assert_eq!(backend.key_count(), 2);
         assert!(backend.get("keep-a").is_ok());
@@ -2568,7 +2603,7 @@ mod tests {
         // call will fail.
         let backend = backend_with_key("dupe-del", None);
         let labels = vec!["dupe-del".to_string(), "dupe-del".to_string()];
-        let result = delete(&backend, &labels, false, true);
+        let result = delete(&backend, &labels, false, true, false);
         assert!(result.is_err());
     }
 
@@ -3272,7 +3307,7 @@ HKEY_CURRENT_USER\Environment
         assert_eq!(backend.key_count(), 1);
 
         let labels = vec!["real-key".to_string(), "fake-key".to_string()];
-        let result = delete(&backend, &labels, false, true);
+        let result = delete(&backend, &labels, false, true, false);
         assert!(result.is_err());
         // The real key should still exist because the function checks all first
         // Actually, looking at the code: it iterates labels calling backend.get()

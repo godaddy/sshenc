@@ -64,6 +64,27 @@ pub enum Error {
     Other(String),
 }
 
+impl Error {
+    /// Whether this error represents "the requested key doesn't exist".
+    ///
+    /// Idempotent CLI flags like `--if-exists` need to distinguish a
+    /// missing key (no-op) from a real failure (surface). The typed
+    /// `KeyNotFound` variant is the obvious case; `SecureEnclave` is
+    /// also common because backend errors get wrapped at the proxy
+    /// boundary (see `sshenc_se::proxy::map_meta_err`) into a
+    /// SecureEnclave whose `detail` carries the original error's
+    /// `Display`. We match on a `key not found` prefix in `detail`
+    /// to recognize that wrapping; ordering matches what
+    /// `KeyNotFound::Display` produces.
+    pub fn is_key_not_found(&self) -> bool {
+        match self {
+            Error::KeyNotFound { .. } => true,
+            Error::SecureEnclave { detail, .. } => detail.starts_with("key not found"),
+            _ => false,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
@@ -173,6 +194,37 @@ mod tests {
             other => panic!("expected Error::Io, got: {other}"),
         }
         assert!(e.to_string().contains("file missing"));
+    }
+
+    #[test]
+    fn is_key_not_found_matches_typed_variant() {
+        let e = Error::KeyNotFound { label: "x".into() };
+        assert!(e.is_key_not_found());
+    }
+
+    #[test]
+    fn is_key_not_found_matches_wrapped_secure_enclave() {
+        // proxy::map_meta_err wraps the underlying Error::Display into
+        // a SecureEnclave detail; KeyNotFound's Display is
+        // "key not found: <label>".
+        let e = Error::SecureEnclave {
+            operation: "load_pub_key".into(),
+            detail: "key not found: x".into(),
+        };
+        assert!(e.is_key_not_found());
+    }
+
+    #[test]
+    fn is_key_not_found_rejects_unrelated_errors() {
+        let e = Error::DuplicateLabel { label: "x".into() };
+        assert!(!e.is_key_not_found());
+        let e = Error::SecureEnclave {
+            operation: "sign".into(),
+            detail: "timeout".into(),
+        };
+        assert!(!e.is_key_not_found());
+        let e = Error::Other("anything".into());
+        assert!(!e.is_key_not_found());
     }
 
     #[test]

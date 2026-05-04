@@ -196,11 +196,11 @@ Fixes one of the two unsigned-only problems:
 - **Not fixed by signing alone:** The wrapping-key `.userPresence`
   ACL still doesn't install — `errSecParam -50` still fires on the
   legacy keychain. Originally I expected stable signing to be enough
-  here; empirical testing on a `Developer ID Application: Jeremiah
-  Gowdy (W2YG5ZG9D6)`-signed, hardened-runtime, notarized
-  `sshenc-agent` proved otherwise. The `.userPresence` ACL only
-  installs in the **Data Protection keychain**, which requires the
-  caller to claim a `keychain-access-groups` entitlement.
+  here; empirical testing on a Developer ID Application-signed,
+  hardened-runtime, notarized `sshenc-agent` proved otherwise. The
+  `.userPresence` ACL only installs in the **Data Protection
+  keychain**, which requires the caller to claim a
+  `keychain-access-groups` entitlement.
 
 Why that's a wall, not a follow-up: `keychain-access-groups` is a
 **restricted entitlement** in macOS terms. AMFI (Apple Mobile File

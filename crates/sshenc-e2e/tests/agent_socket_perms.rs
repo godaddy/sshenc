@@ -1,4 +1,4 @@
-// Copyright 2024 Jay Gowdy
+// Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
 //! `sshenc-agent` Unix socket file mode and parent-directory mode.

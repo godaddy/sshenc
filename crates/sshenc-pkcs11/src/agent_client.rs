@@ -1,4 +1,4 @@
-// Copyright 2024 Jay Gowdy
+// Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
 //! Agent launcher for the PKCS#11 dylib.

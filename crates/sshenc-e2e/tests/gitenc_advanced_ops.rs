@@ -1,4 +1,4 @@
-// Copyright 2024 Jay Gowdy
+// Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
 //! `gitenc.rs` covers plain `git push` / `git clone`. `gitenc_extras.rs`

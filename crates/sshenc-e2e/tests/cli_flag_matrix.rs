@@ -1,4 +1,4 @@
-// Copyright 2024 Jay Gowdy
+// Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
 //! End-to-end coverage for CLI subcommand flag combinations and

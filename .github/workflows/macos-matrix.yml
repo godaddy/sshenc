@@ -1,0 +1,95 @@
+name: macos-matrix
+
+# macOS-side test matrix for sshenc + gitenc: shell-wrapper
+# consistency (bash, zsh), key lifecycle, agent Unix-socket binding.
+# Runs against the test-only software backend because GitHub-hosted
+# macos-latest runners have a Secure Enclave on the silicon but no
+# enrolled biometric / passcode, so any keychain-touching op blocks
+# waiting for a UI that never appears. Hardware backend coverage on
+# macOS is the developer's local-laptop responsibility.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos-matrix:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Clone libenclaveapp
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/godaddy/libenclaveapp.git ../libenclaveapp
+          cp -r ../libenclaveapp/crates ../crates
+          cp ../libenclaveapp/Cargo.toml ../Cargo.toml
+
+      - name: Lint scripts/*.sh (ASCII + bash + shellcheck)
+        shell: bash
+        run: |
+          set -e
+          fail=0
+          # ASCII purity. Mirrors scripts/Lint-Powershell.ps1 for the
+          # bash side -- non-ASCII bytes corrupt parser state in some
+          # locales / signal that the file picked up curly quotes.
+          # Use python3 because BSD grep doesn't interpret \xNN
+          # escapes the same way GNU grep does, and macos-latest
+          # ships BSD grep.
+          for f in scripts/*.sh; do
+            if python3 -c 'import sys; data=open(sys.argv[1],"rb").read(); sys.exit(1 if any(b > 127 for b in data) else 0)' "$f"; then
+              echo "  [OK] $f is ASCII-clean"
+            else
+              echo "  [FAIL] $f has non-ASCII bytes"
+              fail=1
+            fi
+          done
+          # bash syntax. Fatal -- a broken matrix script would
+          # silently no-op the actual Test step.
+          for f in scripts/*.sh; do
+            bash -n "$f" || { echo "  [FAIL] $f bash syntax"; fail=1; }
+          done
+          # shellcheck. Catches the same class of issues as
+          # PSScriptAnalyzer on the Windows side.
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            brew install shellcheck
+          fi
+          shellcheck scripts/*.sh || fail=1
+          exit $fail
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-macos-matrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-macos-matrix-
+            ${{ runner.os }}-cargo-
+
+      # Build the binaries the matrix script invokes, with the
+      # `force-software` feature on the per-crate level (gitenc
+      # doesn't link sshenc-se and therefore doesn't take the
+      # feature; build it without). Release profile keeps the build
+      # cache compatible with e2e.yml's cache key.
+      - name: Build sshenc binaries (force-software)
+        shell: bash
+        run: |
+          cargo build --release \
+            -p sshenc-cli -p sshenc-agent -p sshenc-keygen-cli \
+            --features sshenc-cli/force-software,sshenc-agent/force-software,sshenc-keygen-cli/force-software
+          cargo build --release -p sshenc-gitenc
+
+      - name: Run Test-Sshenc-MacOS.sh (--software)
+        shell: bash
+        run: |
+          ./scripts/Test-Sshenc-MacOS.sh --software --sshenc-bin-dir target/release

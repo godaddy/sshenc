@@ -37,7 +37,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed build and test instructions.
 - All public items must have doc comments.
 - All source files must carry the MIT SPDX header:
   ```rust
-  // Copyright 2024 Jay Gowdy
+  // Copyright 2026 Jay Gowdy
   // SPDX-License-Identifier: MIT
   ```
 - Use `thiserror` for error types. All errors go through `sshenc_core::error::Error`.

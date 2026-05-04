@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
 	<key>com.apple.application-identifier</key>
-	<string>W2YG5ZG9D6.com.libenclaveapp.sshenc</string>
+	<string>7UMADG39Z9.com.godaddy.sshenc</string>
 	<key>com.apple.developer.team-identifier</key>
-	<string>W2YG5ZG9D6</string>
+	<string>7UMADG39Z9</string>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>W2YG5ZG9D6.com.libenclaveapp.sshenc</string>
+		<string>7UMADG39Z9.com.godaddy.sshenc</string>
 	</array>
 </dict>
 </plist>

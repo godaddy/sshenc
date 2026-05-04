@@ -174,12 +174,12 @@ impl SshencBackend {
             wrapping_key_user_presence: true,
             wrapping_key_cache_ttl: cache_ttl,
             // Data Protection keychain access group. Released sshenc
-            // ships as a `.app` bundle (`com.libenclaveapp.sshenc`)
-            // signed with a Developer ID Application identity and an
-            // embedded provisioning profile that entitles
-            // `W2YG5ZG9D6.*` keychain access groups, so SecItemAdd
-            // accepts `kSecUseDataProtectionKeychain: true` +
-            // `kSecAttrAccessGroup` and the wrapping-key
+            // ships as a `.app` bundle (`com.godaddy.sshenc`) signed
+            // with the GoDaddy team's Developer ID Application
+            // identity and an embedded provisioning profile that
+            // entitles `7UMADG39Z9.*` keychain access groups, so
+            // SecItemAdd accepts `kSecUseDataProtectionKeychain: true`
+            // + `kSecAttrAccessGroup` and the wrapping-key
             // `.userPresence` ACL actually fires.
             //
             // Ad-hoc / unsigned local builds fall back to the legacy
@@ -189,7 +189,7 @@ impl SshencBackend {
             // for the full pattern and `docs/macos-unsigned-ux.md` for
             // why CLI distribution can't reach the DP keychain
             // without the .app-bundle pattern.
-            keychain_access_group: Some("W2YG5ZG9D6.com.libenclaveapp.sshenc".into()),
+            keychain_access_group: Some("7UMADG39Z9.com.godaddy.sshenc".into()),
         })?;
 
         Ok(Self {

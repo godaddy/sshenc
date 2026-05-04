@@ -24,7 +24,7 @@ jobs:
       extra_packaging: '{"unix_libs":"libsshenc_pkcs11.dylib libsshenc_pkcs11.so","windows_dlls":"sshenc_pkcs11.dll"}'
       homebrew: '{"tap_repo":"godaddy/homebrew-sshenc","formula_class":"Sshenc","description":"Hardware-backed SSH key management"}'
       scoop: '{"bucket_repo":"godaddy/scoop-sshenc","description":"Hardware-backed SSH key management (Windows TPM 2.0)","has_winget":true}'
-      macos_signing_identity: "Developer ID Application: Jeremiah Gowdy (W2YG5ZG9D6)"
+      macos_signing_identity: "Developer ID Application: GoDaddy Mobile LLC (7UMADG39Z9)"
       # Bundle the macOS binaries into a `.app` so AMFI accepts the
       # `keychain-access-groups` entitlement that lets the
       # wrapping-key `.userPresence` ACL install. The Homebrew
@@ -32,7 +32,7 @@ jobs:
       # `Contents/MacOS/` into `bin/` so user-facing invocation is
       # unchanged. See
       # `libenclaveapp/docs/macos-app-bundle-distribution.md`.
-      macos_bundle_id: "com.libenclaveapp.sshenc"
+      macos_bundle_id: "com.godaddy.sshenc"
       macos_entitlements_plist: "installer/sshenc.entitlements"
     secrets:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

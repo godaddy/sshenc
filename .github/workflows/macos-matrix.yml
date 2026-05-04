@@ -37,13 +37,15 @@ jobs:
           # ASCII purity. Mirrors scripts/Lint-Powershell.ps1 for the
           # bash side -- non-ASCII bytes corrupt parser state in some
           # locales / signal that the file picked up curly quotes.
-          # LC_ALL=C makes grep work on raw bytes.
+          # Use python3 because BSD grep doesn't interpret \xNN
+          # escapes the same way GNU grep does, and macos-latest
+          # ships BSD grep.
           for f in scripts/*.sh; do
-            if LC_ALL=C grep -q '[^\x00-\x7F]' "$f"; then
+            if python3 -c 'import sys; data=open(sys.argv[1],"rb").read(); sys.exit(1 if any(b > 127 for b in data) else 0)' "$f"; then
+              echo "  [OK] $f is ASCII-clean"
+            else
               echo "  [FAIL] $f has non-ASCII bytes"
               fail=1
-            else
-              echo "  [OK] $f is ASCII-clean"
             fi
           done
           # bash syntax. Fatal -- a broken matrix script would

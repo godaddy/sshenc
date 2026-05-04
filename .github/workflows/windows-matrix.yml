@@ -1,0 +1,71 @@
+name: windows-matrix
+
+# Windows-side test matrix for sshenc + gitenc: shell-wrapper
+# consistency (PowerShell, Git Bash, CMD), key lifecycle, agent
+# named-pipe binding. Runs against the test-only software backend
+# because GitHub-hosted `windows-latest` runners don't expose a
+# usable TPM 2.0 to user processes; hardware backend coverage on
+# Windows is the developer's local-laptop responsibility.
+#
+# Pre-flight: lints every .ps1 under scripts/ for ASCII purity and
+# parse cleanliness. Catches the em-dash / curly-quote failure mode
+# documented in scripts/Lint-Powershell.ps1.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-matrix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Clone libenclaveapp
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/godaddy/libenclaveapp.git ../libenclaveapp
+          cp -r ../libenclaveapp/crates ../crates
+          cp ../libenclaveapp/Cargo.toml ../Cargo.toml
+
+      - name: Lint scripts/*.ps1 (ASCII + parse)
+        shell: pwsh
+        run: |
+          .\scripts\Lint-Powershell.ps1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-windows-matrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-matrix-
+            ${{ runner.os }}-cargo-
+
+      # Build the binaries the matrix script invokes, with the
+      # `force-software` feature on the per-crate level (gitenc
+      # doesn't link sshenc-se and therefore doesn't take the
+      # feature; build it without). Release profile keeps the build
+      # cache compatible with e2e-windows.yml's cache key.
+      - name: Build sshenc binaries (force-software)
+        shell: pwsh
+        run: |
+          cargo build --release `
+            -p sshenc-cli -p sshenc-agent -p sshenc-keygen-cli `
+            --features sshenc-cli/force-software,sshenc-agent/force-software,sshenc-keygen-cli/force-software
+          cargo build --release -p sshenc-gitenc
+
+      - name: Run Test-Sshenc-Windows.ps1 (-Software)
+        shell: pwsh
+        run: |
+          .\scripts\Test-Sshenc-Windows.ps1 -Software -SshencBinDir target\release

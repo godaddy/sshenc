@@ -150,6 +150,17 @@ pub async fn run_agent(
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
+    // Eager-warm the backend's identity enumeration before signaling
+    // ready. Without this, `signal_ready` fires the moment the socket
+    // is bound, but the very first `RequestIdentities` from a client
+    // is what triggers the (cold-start, ~5-10s on WSL→bridge) initial
+    // `list_keys`. ssh-keygen -Y sign racing the agent's first
+    // enumeration produced the "No private key found" symptom on
+    // Ubuntu's first matrix-test run after `wsl --shutdown`. Warming
+    // up here makes the daemon-ready signal meaningfully encode
+    // "identity cache is hot, safe to serve."
+    warm_backend_identities(backend.as_ref());
+
     signal_ready(ready_file)?;
     tracing::info!(socket = %socket_path.display(), "agent listening");
 
@@ -275,6 +286,11 @@ pub async fn run_agent(
             .create_with_security_attributes_raw(&pipe_name, pipe_sa.as_ptr())?
     };
 
+    // Eager-warm: see comment in the Unix path above. Without this,
+    // the first ssh-keygen -Y sign after `sshenc-agent` startup races
+    // the cold-start identity enumeration and gets an empty list.
+    warm_backend_identities(backend.as_ref());
+
     signal_ready(ready_file)?;
     tracing::info!(pipe = %pipe_name, "agent listening on named pipe");
 
@@ -377,6 +393,44 @@ pub async fn run_agent(
     }
 
     Ok(())
+}
+
+/// Force the backend's identity enumeration to complete before the
+/// caller signals ready. On WSL the unified backend's `list` round-
+/// trips through the JSON-RPC bridge to a Windows-side TPM; the very
+/// first call after the bridge subprocess spawns can take 5-10s.
+/// Letting the agent's first client request pay that cost surfaces
+/// as a race where ssh-keygen -Y sign runs before the agent has
+/// finished enumerating and gets "No private key found" back even
+/// though the key is on disk.
+///
+/// Errors here are intentionally swallowed (logged at WARN). A
+/// transient enumeration failure shouldn't block the agent from
+/// starting -- subsequent client requests will retry naturally and
+/// surface the real failure with full context.
+fn warm_backend_identities(backend: &dyn KeyBackend) {
+    // Local import: the file-level `use std::time::Instant` is
+    // `#[cfg(unix)]`, but this helper is called from both the unix
+    // and windows variants of `run_agent`.
+    use std::time::Instant;
+    let started = Instant::now();
+    match backend.list() {
+        Ok(keys) => {
+            tracing::info!(
+                count = keys.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "agent: backend identity cache warmed"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "agent: backend identity warmup failed; first client request \
+                 will retry and surface any real failure"
+            );
+        }
+    }
 }
 
 fn signal_ready(path: Option<&Path>) -> Result<()> {

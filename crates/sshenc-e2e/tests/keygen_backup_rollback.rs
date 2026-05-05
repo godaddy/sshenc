@@ -16,10 +16,11 @@
 //!   `~/.ssh/id_ecdsa.pub`, the planted private is removed (the new
 //!   key is hardware-backed), and no `.bak` files remain.
 //! - rotation (second keygen with same label): completes successfully
-//!   with the rotation banner; the pub file gets the NEW pubkey; an
-//!   id_ecdsa private the user planted is left untouched (rotation
-//!   doesn't synthesize or mutate paired private material); no `.bak`
-//!   files leak.
+//!   with the rotation banner; the pub file gets the NEW pubkey; the
+//!   backup wrapper still applies its on-success paired-private
+//!   cleanup (same as a first-time keygen -- the new key is
+//!   hardware-backed, so the planted plaintext private becomes
+//!   obsolete); no `.bak` files leak.
 //! - rotation of a non-default label: the user's id_ecdsa pair is
 //!   completely untouched -- a named-label rotation has nothing to
 //!   do with `id_ecdsa`.

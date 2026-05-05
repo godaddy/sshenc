@@ -6,15 +6,35 @@
 use anyhow::{anyhow, bail, Result};
 use sshenc_core::error::Error as SshencError;
 
-/// Whether `e` indicates "a key with this label already exists".
-/// Mirrors `Error::is_key_not_found()` for the duplicate path: the
-/// agent / proxy boundary wraps the typed `DuplicateLabel` into a
-/// `SecureEnclave { detail: "duplicate key label: ..." }`, so we
-/// check both shapes.
-fn is_duplicate_label(e: &SshencError) -> bool {
+/// Whether `e` plausibly indicates "a key with this label already
+/// exists". The agent collapses every backend generate error into a
+/// generic `AgentResponse::Failure` on the wire (see
+/// `crates/sshenc-agent/src/server.rs`'s GenerateKey arm), so the
+/// proxy can't see the typed `DuplicateLabel` directly -- it only
+/// sees a "sshenc-agent refused generate for label '<label>' (check
+/// agent logs)" wrapper. We accept three shapes:
+///
+/// * `Error::DuplicateLabel { .. }` -- direct backend (mock /
+///   non-proxy paths).
+/// * `Error::SecureEnclave { detail: "duplicate key label: ..." }`
+///   -- proxy boundary wraps the typed variant when the inner
+///   backend produces it directly (no agent).
+/// * `Error::SecureEnclave { detail: "sshenc-agent refused generate
+///   ..." }` -- agent path collapses to opaque Failure on the wire.
+///
+/// The third shape can ALSO be a non-duplicate failure (allowlist
+/// filter, transport flake, hardware fault). Treating it as
+/// "likely duplicate" is benign because the rotation path's first
+/// move is `backend.get(label)`: if the label doesn't actually
+/// exist, the get will fail and the original generate error
+/// propagates instead of a misleading rotation error.
+fn is_likely_duplicate_label(e: &SshencError) -> bool {
     match e {
         SshencError::DuplicateLabel { .. } => true,
-        SshencError::SecureEnclave { detail, .. } => detail.starts_with("duplicate key label"),
+        SshencError::SecureEnclave { detail, .. } => {
+            detail.starts_with("duplicate key label")
+                || detail.starts_with("sshenc-agent refused generate")
+        }
         _ => false,
     }
 }
@@ -646,11 +666,19 @@ pub fn keygen(
 
     let (info, prior, rotation_state) = match first_attempt {
         Ok(info) => (info, None, None),
-        Err(e) if is_duplicate_label(&e) => {
-            // Rotation path. Now is_safe to read the on-disk state
-            // for the OLD key, since we know it exists (the agent
-            // just told us so).
-            let old = backend.get(label)?;
+        Err(e) if is_likely_duplicate_label(&e) => {
+            // Try to confirm by looking up the existing key. The
+            // agent's "refused generate" wrapper can also fire for
+            // unrelated reasons (allowlist filter, transport
+            // failures, hardware faults), so we don't blindly
+            // assume duplicate. If `get` succeeds, the label really
+            // does exist and we're in the rotation path. If `get`
+            // fails too, the original generate error wasn't about a
+            // duplicate -- propagate it untouched.
+            let old = match backend.get(label) {
+                Ok(info) => info,
+                Err(_) => return Err(e.into()),
+            };
             let old_pubkey =
                 SshPublicKey::from_sec1_bytes(&old.public_key_bytes, old.metadata.comment.clone())?;
             let old_blob_b64 = crate::rotation::encode_blob(&old_pubkey.wire_blob());

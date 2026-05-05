@@ -1150,13 +1150,15 @@ pub fn install() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(300));
             let _unused = std::fs::remove_file(&config.socket_path);
         }
-        agent_bin
-            .as_deref()
-            .ok_or_else(|| anyhow!("sshenc-agent binary not found"))
-            .and_then(|bin| {
-                crate::launchagent::install(bin, &config.socket_path)
-                    .map(|_| AgentStartStatus::Started)
-            })
+        // We always need the agent binary path on macOS, even when an
+        // agent was already running -- preflight skips discovery in
+        // that case, but we replace the running agent with the
+        // LaunchAgent-managed one regardless.
+        let bin = match agent_bin.clone() {
+            Some(bin) => bin,
+            None => RealAgentLauncher.find_agent_binary()?,
+        };
+        crate::launchagent::install(&bin, &config.socket_path).map(|_| AgentStartStatus::Started)
     };
 
     #[cfg(not(target_os = "macos"))]

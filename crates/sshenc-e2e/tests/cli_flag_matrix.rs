@@ -245,17 +245,29 @@ fn keygen_write_pub_custom_path() {
         .args(["delete", label, "-y"])));
 }
 
-/// Duplicate-label keygen errors out — the existing key must not be
-/// silently replaced.
+/// Keygen against an existing label is treated as an in-place
+/// rotation (sshenc PR #187): the old key is deleted, a fresh one is
+/// generated under the same label, and the CLI advertises both
+/// fingerprints in its output. The earlier duplicate-label error has
+/// been intentionally retired -- it left users with no recovery path
+/// when their on-disk pubkey reference (allowed_signers, GitHub
+/// registrations) needed to be re-linked to a new fingerprint.
 #[test]
 #[ignore = "requires docker"]
-fn keygen_duplicate_label_errors() {
-    if skip_if_no_docker("keygen_duplicate_label_errors") {
+fn keygen_existing_label_rotates() {
+    if skip_if_no_docker("keygen_existing_label_rotates") {
         return;
     }
     let mut env = SshencEnv::new().expect("env");
     env.start_agent().expect("start agent");
-    drop(shared_enclave_pubkey(&env).expect("shared key"));
+    let original_openssh = shared_enclave_pubkey(&env).expect("shared key");
+    // Pull just the base64 blob token (second whitespace-separated
+    // field) so we can scan post-rotation `list --json` for it.
+    let original_blob = original_openssh
+        .split_whitespace()
+        .nth(1)
+        .expect("openssh line has a blob token")
+        .to_string();
 
     let out = run(env.sshenc_cmd().expect("sshenc").args([
         "keygen",
@@ -265,27 +277,29 @@ fn keygen_duplicate_label_errors() {
         "none",
         "--no-pub-file",
     ]))
-    .expect("duplicate keygen");
+    .expect("rotation keygen");
     assert!(
-        !out.succeeded(),
-        "keygen with existing label must fail; stdout:\n{}\nstderr:\n{}",
+        out.succeeded(),
+        "keygen against existing label must succeed (rotation); stdout:\n{}\nstderr:\n{}",
         out.stdout,
         out.stderr
     );
-    // The agent collapses the duplicate-label backend error into a
-    // generic FAILURE on the wire, so the CLI surfaces "agent refused
-    // generate". Either the original duplicate message or the proxy
-    // refusal counts — but the exit must be non-zero and stderr must
-    // mention either generate or the label.
-    let err_lower = out.stderr.to_lowercase();
     assert!(
-        err_lower.contains("exists")
-            || err_lower.contains("duplicate")
-            || err_lower.contains("already")
-            || err_lower.contains("refused")
-            || err_lower.contains("generate"),
-        "expected duplicate or agent-refusal error; got:\n{}",
-        out.stderr
+        out.stdout.contains("Rotated") && out.stdout.contains("Old fingerprint"),
+        "expected rotation banner with old/new fingerprints; got:\n{}",
+        out.stdout
+    );
+
+    // Confirm a fresh key is now in place by reading inspect output.
+    // We can't easily re-build `EnclaveKeyHandle` here, but the new
+    // pubkey blob (via `sshenc list`) should differ from `original`'s.
+    let list = run(env.sshenc_cmd().expect("sshenc").args([
+        "list", "--json",
+    ]))
+    .expect("list after rotation");
+    assert!(
+        !list.stdout.contains(&original_blob),
+        "post-rotation list still contains the old pubkey blob",
     );
 }
 

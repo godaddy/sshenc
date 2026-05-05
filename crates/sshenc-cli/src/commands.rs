@@ -606,14 +606,15 @@ pub fn keygen(
     // key, generate a new one, then rewrite those files in place so
     // the references point at the NEW pubkey.
     //
-    // The pre-existing pubkey lookup uses the backend's `get`,
-    // which surfaces `KeyNotFound` for absent labels. Any other
-    // error (transport / agent / hardware) is surfaced as-is rather
-    // than swallowed; we only treat KeyNotFound as "fresh keygen,
-    // skip rotation flow".
+    // The pre-existing pubkey lookup uses the backend's `get`. The
+    // proxy boundary wraps the typed `KeyNotFound` into
+    // `SecureEnclave { detail: "key not found: ..." }`, so use the
+    // existing `is_key_not_found()` helper that handles both shapes.
+    // Any other error (transport / agent / hardware) is surfaced
+    // as-is rather than swallowed.
     let prior = match backend.get(label) {
         Ok(info) => Some(info),
-        Err(sshenc_core::error::Error::KeyNotFound { .. }) => None,
+        Err(e) if e.is_key_not_found() => None,
         Err(other) => return Err(other.into()),
     };
 

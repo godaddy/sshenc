@@ -5,22 +5,30 @@
 //! `~/.ssh/id_ecdsa` + `~/.ssh/id_ecdsa.pub` pair routes through
 //! `backup::run_with_backup`. The unit tests for `backup.rs` cover
 //! the rename-into-backup, the on-success cleanup, and the on-failure
-//! restore at the API level. What was missing was end-to-end proof
-//! that the CLI actually wires keygen through that backup helper.
+//! restore at the API level. What's pinned here is end-to-end proof
+//! that the CLI wires keygen through the backup helper AND that
+//! rotation (keygen against an existing label) preserves the right
+//! adjacent files.
 //!
-//! Two contracts to pin:
-//! - on success: the original files were moved aside (so the new
-//!   key's pubkey now lives at `~/.ssh/id_ecdsa.pub`), and no `.bak`
-//!   files remain behind.
-//! - on failure: both `~/.ssh/id_ecdsa` and `~/.ssh/id_ecdsa.pub`
-//!   are restored *byte-for-byte*, and again no `.bak` files leak.
+//! Contracts pinned:
+//! - first-keygen success: the planted paired-private + paired-public
+//!   are moved aside, the new key's pubkey lands at
+//!   `~/.ssh/id_ecdsa.pub`, the planted private is removed (the new
+//!   key is hardware-backed), and no `.bak` files remain.
+//! - rotation (second keygen with same label): completes successfully
+//!   with the rotation banner; the pub file gets the NEW pubkey; an
+//!   id_ecdsa private the user planted is left untouched (rotation
+//!   doesn't synthesize or mutate paired private material); no `.bak`
+//!   files leak.
+//! - rotation of a non-default label: the user's id_ecdsa pair is
+//!   completely untouched -- a named-label rotation has nothing to
+//!   do with `id_ecdsa`.
 //!
-//! For the failure case we use the agent's `DuplicateLabel`
-//! rejection: a successful first keygen leaves `default` in
-//! keys_dir, then a second keygen with the same label fails with
-//! the agent rejecting the duplicate. The CLI's backup-rollback
-//! path is what catches that, so this test guards the
-//! "wired-through-the-helper" property.
+//! The earlier "failure restores paired files" contract was pinned
+//! against `DuplicateLabel` as the failure trigger. That trigger was
+//! retired when sshenc PR #187 turned same-label keygen into an
+//! in-place rotation; the backup-restore path is still exercised at
+//! the unit level via `crates/sshenc-core/src/backup.rs` tests.
 
 #![cfg(unix)]
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
@@ -132,27 +140,28 @@ fn keygen_default_success_cleans_up_backed_up_files() {
         .args(["delete", "default", "-y"])));
 }
 
-/// `sshenc keygen --label default` failing AFTER the backup has been
-/// taken must restore both files byte-for-byte, with no `.bak`
-/// stragglers. We trigger the failure by minting `default` once,
-/// then asking the agent to mint it again — `SshencBackend.generate`
-/// rejects with `DuplicateLabel`, which propagates up through the
-/// CLI's `run_with_backup` call site.
+/// `sshenc keygen --label default` invoked a second time rotates
+/// the existing `default` key in place (sshenc PR #187). The
+/// pre-existing pubkey at `~/.ssh/id_ecdsa.pub` becomes the rotation
+/// target -- the rotation flow rewrites it with the NEW pubkey. A
+/// paired private that the user planted at `~/.ssh/id_ecdsa` is left
+/// untouched: rotation has no business synthesizing or mutating an
+/// external private file. No `.bak` files leak.
 #[test]
 #[ignore = "requires docker"]
-fn keygen_default_failure_restores_paired_files() {
-    if skip_if_no_docker("keygen_default_failure_restores_paired_files") {
+fn keygen_default_second_invocation_rotates_in_place() {
+    if skip_if_no_docker("keygen_default_second_invocation_rotates_in_place") {
         return;
     }
-    if skip_unless_key_creation_cheap("keygen_default_failure_restores_paired_files") {
+    if skip_unless_key_creation_cheap("keygen_default_second_invocation_rotates_in_place") {
         return;
     }
     let mut env = SshencEnv::new().expect("env");
     env.use_ephemeral_keys_dir().expect("ephemeral");
     env.start_agent().expect("start agent");
 
-    // Mint `default` once so a second attempt is guaranteed to
-    // fail with DuplicateLabel.
+    // Mint `default` once so the second invocation lands on the
+    // rotation path.
     let pre = run(env.sshenc_cmd().expect("sshenc cmd").args([
         "keygen",
         "--label",
@@ -171,16 +180,17 @@ fn keygen_default_failure_restores_paired_files() {
     let priv_path = env.ssh_dir().join("id_ecdsa");
     let pub_path = env.ssh_dir().join("id_ecdsa.pub");
 
-    // Plant the paired files we want preserved across a failed
-    // second keygen. Use distinguishable content so the assertion
-    // can verify byte-for-byte restoration.
-    let original_priv: &[u8] = b"-- BACKUP PROBE PRIVATE FILE --\n";
-    let original_pub: &[u8] = b"ssh-ecdsa AAAA-backup-probe-pubkey owner@host\n";
-    std::fs::write(&priv_path, original_priv).expect("write priv");
-    std::fs::write(&pub_path, original_pub).expect("write pub");
+    // The first keygen wrote a real pubkey to id_ecdsa.pub; capture
+    // it so we can confirm the rotation rewrote it with new bytes.
+    let pre_rotation_pub = std::fs::read(&pub_path).expect("read pub after first keygen");
 
-    // Second keygen — must fail; backup-then-restore is the
-    // contract under test.
+    // Plant a paired private the user might still have on disk. The
+    // rotation flow has no reason to touch it -- the key material
+    // lives in the SE, not in this file -- but we pin that here.
+    let original_priv: &[u8] = b"-- USER PLANTED PRIVATE FILE --\n";
+    std::fs::write(&priv_path, original_priv).expect("write priv");
+
+    // Second keygen rotates in place.
     let kg2 = run(env.sshenc_cmd().expect("sshenc cmd").args([
         "keygen",
         "--label",
@@ -190,47 +200,49 @@ fn keygen_default_failure_restores_paired_files() {
     ]))
     .expect("second keygen");
     assert!(
-        !kg2.succeeded(),
-        "second keygen should fail (DuplicateLabel); stdout:\n{}\nstderr:\n{}",
+        kg2.succeeded(),
+        "second keygen should succeed via rotation; stdout:\n{}\nstderr:\n{}",
         kg2.stdout,
         kg2.stderr
     );
-
-    // Both planted files must come back, byte-identical.
-    let restored_priv = std::fs::read(&priv_path).expect("read priv after");
-    let restored_pub = std::fs::read(&pub_path).expect("read pub after");
-    assert_eq!(
-        restored_priv,
-        original_priv,
-        "id_ecdsa private was not byte-for-byte restored; got {} bytes",
-        restored_priv.len()
+    assert!(
+        kg2.stdout.contains("Rotated") && kg2.stdout.contains("Old fingerprint"),
+        "expected rotation banner with old/new fingerprints; got:\n{}",
+        kg2.stdout
     );
+
+    // The .pub file holds the rotated pubkey -- different bytes
+    // than the first-keygen output.
+    let post_rotation_pub = std::fs::read(&pub_path).expect("read pub after rotation");
+    assert_ne!(
+        post_rotation_pub, pre_rotation_pub,
+        "id_ecdsa.pub still has the pre-rotation content; rotation did not rewrite the .pub file"
+    );
+
+    // The planted private file is untouched by the rotation flow.
+    let priv_after = std::fs::read(&priv_path).expect("read priv after");
     assert_eq!(
-        restored_pub,
-        original_pub,
-        "id_ecdsa.pub was not byte-for-byte restored; got {} bytes",
-        restored_pub.len()
+        priv_after, original_priv,
+        "id_ecdsa private was disturbed by the rotation; rotation must not synthesize or mutate paired private material",
     );
 
     let leftover = list_bak_files(&env.ssh_dir());
     assert!(
         leftover.is_empty(),
-        "no .bak files should remain after rollback; got: {leftover:?}"
+        "no .bak files should remain after a successful rotation; got: {leftover:?}"
     );
 
-    // Cleanup the pre-minted key so we don't leak agent-side state.
+    // Cleanup the rotated key so we don't leak agent-side state.
     drop(run(env
         .sshenc_cmd()
         .expect("sshenc cmd")
         .args(["delete", "default", "-y"])));
 }
 
-/// A non-`default` label uses an explicit `--write-pub` *or* falls
-/// back to `~/.ssh/<label>.pub` with no paired-private semantics —
-/// pre-existing `id_ecdsa` is *not* in scope, so a failure on a
-/// named-label keygen must not back up or touch the user's
-/// `id_ecdsa` files at all. Pins the "paired-private only for
-/// default label" boundary.
+/// A non-`default` label uses `~/.ssh/<label>.pub` and has no
+/// paired-private semantics — the user's `id_ecdsa` pair is out of
+/// scope for a named-label keygen. Pins that contract for both the
+/// first-mint AND the rotation (second invocation) paths.
 #[test]
 #[ignore = "requires docker"]
 fn keygen_named_label_does_not_touch_id_ecdsa() {
@@ -249,9 +261,9 @@ fn keygen_named_label_does_not_touch_id_ecdsa() {
     std::fs::write(&priv_path, b"DO NOT TOUCH\n").expect("write priv");
     std::fs::write(&pub_path, b"DO NOT TOUCH PUB\n").expect("write pub");
 
-    // Mint and re-mint a named label to drive the failure path,
-    // exactly as the default-label test does — but for label "other"
-    // the CLI's backup target is `~/.ssh/other.pub`, not `id_ecdsa`.
+    // Mint, then re-mint the same named label. First call generates;
+    // second call rotates in place. Either way, `id_ecdsa{,.pub}` is
+    // not in scope and must remain byte-for-byte untouched.
     let label = "other-backup-probe";
     let pre = run(env.sshenc_cmd().expect("sshenc cmd").args([
         "keygen",
@@ -272,14 +284,20 @@ fn keygen_named_label_does_not_touch_id_ecdsa() {
         "none",
         "--no-pub-file",
     ]))
-    .expect("second keygen");
+    .expect("second keygen (rotation)");
     assert!(
-        !kg2.succeeded(),
-        "second keygen for {label} should fail; stderr:\n{}",
+        kg2.succeeded(),
+        "second keygen for {label} should rotate in place; stderr:\n{}",
         kg2.stderr
     );
+    assert!(
+        kg2.stdout.contains("Rotated"),
+        "expected rotation banner; stdout:\n{}",
+        kg2.stdout
+    );
 
-    // id_ecdsa pair must be untouched.
+    // id_ecdsa pair must be untouched -- a named-label rotation has
+    // nothing to do with the `default`-label paired-private path.
     assert_eq!(
         std::fs::read(&priv_path).expect("read priv"),
         b"DO NOT TOUCH\n"

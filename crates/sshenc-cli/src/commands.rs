@@ -4,6 +4,40 @@
 //! CLI command implementations.
 
 use anyhow::{anyhow, bail, Result};
+use sshenc_core::error::Error as SshencError;
+
+/// Whether `e` plausibly indicates "a key with this label already
+/// exists". The agent collapses every backend generate error into a
+/// generic `AgentResponse::Failure` on the wire (see
+/// `crates/sshenc-agent/src/server.rs`'s GenerateKey arm), so the
+/// proxy can't see the typed `DuplicateLabel` directly -- it only
+/// sees a "sshenc-agent refused generate for label '<label>' (check
+/// agent logs)" wrapper. We accept three shapes:
+///
+/// * `Error::DuplicateLabel { .. }` -- direct backend (mock /
+///   non-proxy paths).
+/// * `Error::SecureEnclave { detail: "duplicate key label: ..." }`
+///   -- proxy boundary wraps the typed variant when the inner
+///   backend produces it directly (no agent).
+/// * `Error::SecureEnclave { detail: "sshenc-agent refused generate
+///   ..." }` -- agent path collapses to opaque Failure on the wire.
+///
+/// The third shape can ALSO be a non-duplicate failure (allowlist
+/// filter, transport flake, hardware fault). Treating it as
+/// "likely duplicate" is benign because the rotation path's first
+/// move is `backend.get(label)`: if the label doesn't actually
+/// exist, the get will fail and the original generate error
+/// propagates instead of a misleading rotation error.
+fn is_likely_duplicate_label(e: &SshencError) -> bool {
+    match e {
+        SshencError::DuplicateLabel { .. } => true,
+        SshencError::SecureEnclave { detail, .. } => {
+            detail.starts_with("duplicate key label")
+                || detail.starts_with("sshenc-agent refused generate")
+        }
+        _ => false,
+    }
+}
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)] // KeyGenOptions used on Windows prod path and by Unix tests.
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
@@ -600,6 +634,21 @@ pub fn keygen(
 ) -> Result<()> {
     let key_label = KeyLabel::new(label)?;
 
+    // Try-then-rotate: call `generate` first. On a fresh label this
+    // succeeds and we're done. If the backend reports a duplicate
+    // label, switch to the rotation flow -- look up the OLD key,
+    // discover any local files that reference its blob, delete the
+    // old key, regenerate, and rewrite those files in place.
+    //
+    // This avoids a pre-flight `backend.get(label)` that races with
+    // the agent's own write path on a busy filesystem (sshenc PR
+    // #187 follow-up: the original implementation pre-checked via
+    // `get` and broke under macos-matrix CI when a partial state
+    // appeared between the get and the generate -- particularly
+    // .meta-without-.pub on the keys_dir). With the try-first
+    // ordering we never look at on-disk state for a label we're
+    // about to create.
+    //
     // Keep the backend call here; the production caller binds
     // `backend` to an `AgentProxyBackend` that forwards
     // `generate`/`sign`/`delete`/`rename` over the agent socket, so
@@ -607,22 +656,113 @@ pub fn keygen(
     // directly. Tests pass a mock and exercise the command logic
     // without needing a live agent.
     let opts = KeyGenOptions {
-        label: key_label,
-        comment,
+        label: key_label.clone(),
+        comment: comment.clone(),
         access_policy,
         presence_mode,
         write_pub_path: write_pub.clone(),
     };
-    let info = backend.generate(&opts)?;
+    let first_attempt = backend.generate(&opts);
+
+    let (info, prior, rotation_state) = match first_attempt {
+        Ok(info) => (info, None, None),
+        Err(e) if is_likely_duplicate_label(&e) => {
+            // Try to confirm by looking up the existing key. The
+            // agent's "refused generate" wrapper can also fire for
+            // unrelated reasons (allowlist filter, transport
+            // failures, hardware faults), so we don't blindly
+            // assume duplicate. If `get` succeeds, the label really
+            // does exist and we're in the rotation path. If `get`
+            // fails too, the original generate error wasn't about a
+            // duplicate -- propagate it untouched.
+            let old = match backend.get(label) {
+                Ok(info) => info,
+                Err(_) => return Err(e.into()),
+            };
+            let old_pubkey =
+                SshPublicKey::from_sec1_bytes(&old.public_key_bytes, old.metadata.comment.clone())?;
+            let old_blob_b64 = crate::rotation::encode_blob(&old_pubkey.wire_blob());
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+            let candidates = crate::rotation::discover_candidate_paths(&home);
+            let hits = crate::rotation::discover(&candidates, &old_blob_b64);
+
+            // Carry over the prior comment when the user didn't
+            // pass one. Keeps the .pub line "looking the same"
+            // across rotations so matching `authorized_keys` /
+            // `allowed_signers` lines on remote hosts that key off
+            // the comment continue to align.
+            let resolved_comment = comment.clone().or_else(|| old.metadata.comment.clone());
+
+            // Free the label so `generate` can produce a fresh key.
+            backend.delete(label)?;
+
+            let opts = KeyGenOptions {
+                label: key_label,
+                comment: resolved_comment,
+                access_policy,
+                presence_mode,
+                write_pub_path: write_pub.clone(),
+            };
+            let new_info = backend.generate(&opts)?;
+            (new_info, Some(old), Some((old_blob_b64, hits)))
+        }
+        Err(other) => return Err(other.into()),
+    };
+
+    // Re-link: rewrite each discovered file's old blob with the new
+    // one. The rewrite helper writes a `.bak` sidecar before
+    // touching the original.
+    let mut relink_summary: Vec<(PathBuf, usize)> = Vec::new();
+    if let Some((old_blob_b64, hits)) = rotation_state.as_ref() {
+        let new_pubkey =
+            SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
+        let new_blob_b64 = crate::rotation::encode_blob(&new_pubkey.wire_blob());
+        for hit in hits {
+            match crate::rotation::rewrite(&hit.path, old_blob_b64, &new_blob_b64) {
+                Ok(n) => relink_summary.push((hit.path.clone(), n)),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %hit.path.display(),
+                        error = %e,
+                        "rotation: failed to update allowed_signers file"
+                    );
+                }
+            }
+        }
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&info)?);
     } else {
-        println!("Generated Secure Enclave key: {label}");
-        println!("  Algorithm: {}", info.metadata.algorithm);
-        println!("  Fingerprint: {}", info.fingerprint_sha256);
+        if let Some(ref old) = prior {
+            println!("Rotated Secure Enclave key: {label}");
+            println!("  Old fingerprint: {}", old.fingerprint_sha256);
+            println!("  New fingerprint: {}", info.fingerprint_sha256);
+        } else {
+            println!("Generated Secure Enclave key: {label}");
+            println!("  Algorithm: {}", info.metadata.algorithm);
+            println!("  Fingerprint: {}", info.fingerprint_sha256);
+        }
         if let Some(ref path) = info.pub_file_path {
             println!("  Public key written to: {}", path.display());
+        }
+        if !relink_summary.is_empty() {
+            println!();
+            println!("Re-linked local references to the new key:");
+            for (path, n) in &relink_summary {
+                let plural = if *n == 1 { "" } else { "s" };
+                println!("  {} ({} line{plural})", path.display(), n);
+            }
+            println!("  (originals saved as <file>.bak sidecars)");
+        }
+        if let Some(ref old) = prior {
+            println!();
+            println!("Manual updates still required:");
+            println!("  - GitHub: SSH auth + signing keys for this label.");
+            println!("    Old fingerprint: {}", old.fingerprint_sha256);
+            println!("    New fingerprint: {}", info.fingerprint_sha256);
+            println!("  - Any remote host's authorized_keys that referenced the old blob.");
+            println!("  - Any per-repo gpg.ssh.allowedSignersFile not in the global default.");
         }
         if print_pub {
             let pubkey = SshPublicKey::from_sec1_bytes(
@@ -2199,12 +2339,16 @@ mod tests {
     }
 
     #[test]
-    fn keygen_duplicate_label_returns_error() {
+    fn keygen_existing_label_rotates_in_place() {
+        // The pre-rotation behaviour was DuplicateLabel; this test
+        // pins the new contract: a second keygen against the same
+        // label is treated as a rotation, succeeds, and replaces the
+        // SE-side key with a fresh one.
         let backend = mock_backend();
         keygen(
             &backend,
-            "dup-key",
-            None,
+            "rot-key",
+            Some("first".into()),
             None,
             false,
             AccessPolicy::None,
@@ -2212,21 +2356,26 @@ mod tests {
             false,
         )
         .unwrap();
-        let result = keygen(
+        let first = backend.get("rot-key").unwrap();
+
+        // Second keygen rotates rather than erroring.
+        keygen(
             &backend,
-            "dup-key",
-            None,
+            "rot-key",
+            Some("second".into()),
             None,
             false,
             AccessPolicy::None,
             sshenc_core::PresenceMode::None,
             false,
-        );
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("duplicate") || err_msg.contains("dup-key"),
-            "error: {err_msg}"
+        )
+        .unwrap();
+
+        let second = backend.get("rot-key").unwrap();
+        assert_eq!(second.metadata.label.as_str(), "rot-key");
+        assert_ne!(
+            second.public_key_bytes, first.public_key_bytes,
+            "rotation must yield a fresh key, not reuse the old material",
         );
     }
 

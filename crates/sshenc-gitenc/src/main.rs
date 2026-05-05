@@ -32,10 +32,10 @@
 
 use clap::Parser;
 use enclaveapp_core::types::validate_label;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -104,32 +104,164 @@ fn resolve_config_label(
 fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
     let ssh_command = build_ssh_command(label).unwrap_or_else(|err| exit_invalid_label(&err));
 
-    #[cfg(unix)]
-    {
-        let err = Command::new("git")
-            .args(git_args)
-            .env("GIT_SSH_COMMAND", &ssh_command)
-            .exec();
+    // Spawn-and-wait (rather than exec on Unix) so we can run the
+    // post-success nudge that points users at `gitenc --config` when
+    // they're in a repo that hasn't opted into persistent sshenc
+    // config. The cost vs. exec is one extra alive process during
+    // the git operation; signals propagate naturally (the shell
+    // sends SIGINT to the whole process group), and the exit code
+    // is forwarded faithfully.
+    let status = Command::new("git")
+        .args(git_args)
+        .env("GIT_SSH_COMMAND", &ssh_command)
+        .status();
 
-        eprintln!("gitenc: failed to exec git: {err}");
-        std::process::exit(1);
-    }
-
-    #[cfg(windows)]
-    {
-        let status = Command::new("git")
-            .args(git_args)
-            .env("GIT_SSH_COMMAND", &ssh_command)
-            .status();
-
-        match status {
-            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
-            Err(e) => {
-                eprintln!("gitenc: failed to run git: {e}");
-                std::process::exit(1);
+    match status {
+        Ok(s) => {
+            if s.success() {
+                maybe_print_config_hint();
             }
+            std::process::exit(s.code().unwrap_or(1));
+        }
+        Err(e) => {
+            eprintln!("gitenc: failed to run git: {e}");
+            std::process::exit(1);
         }
     }
+}
+
+/// One-shot duration after which the "configure this repo" nudge can
+/// re-appear. Long enough that a user who saw the tip last week and
+/// got distracted gets a second reminder; short enough not to feel
+/// stale when the user comes back to a fresh repo.
+const HINT_REPRINT_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Fire-and-forget UX nudge for users who haven't run `gitenc --config`
+/// in this repo. Prints a single line on stdout pointing at the
+/// command, then drops a sentinel file so the same shell session (and
+/// subsequent invocations within `HINT_REPRINT_AFTER`) stay quiet.
+///
+/// All conditions must hold:
+///   - stdout AND stdin are TTYs (don't pollute pipelines, CI, or
+///     git-over-stdio scripts).
+///   - cwd resolves to a git repo via `git rev-parse --show-toplevel`
+///     (no nudge for `gitenc --version` outside any repo).
+///   - the repo's `core.sshCommand` does NOT already contain "sshenc"
+///     (i.e. the user hasn't already configured this repo, manually
+///     or via `gitenc --config`).
+///   - the sentinel file is missing or older than `HINT_REPRINT_AFTER`.
+///
+/// Failures along the way are silent — we never want a missing HOME,
+/// a denied write to the sentinel directory, or git not on PATH to
+/// surface as an error from a normal `gitenc fetch`.
+#[allow(clippy::print_stdout)]
+fn maybe_print_config_hint() {
+    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+        return;
+    }
+    let Some(repo_root) = git_repo_root() else {
+        return;
+    };
+    if repo_already_configured(&repo_root) {
+        return;
+    }
+    let Some(sentinel) = sentinel_path() else {
+        return;
+    };
+    if recently_shown(&sentinel, SystemTime::now(), HINT_REPRINT_AFTER) {
+        return;
+    }
+
+    println!(
+        "\ngitenc: tip — run `gitenc --config` in this repo so plain `git` \
+         commands also use sshenc for SSH and commit signing. \
+         Pass `--label NAME` to bind a specific identity."
+    );
+    drop(touch_sentinel(&sentinel));
+}
+
+/// Find the toplevel of the current git working tree, or `None` if
+/// we're not in a repo. Shells out to `git` rather than walking the
+/// filesystem because git's own answer accounts for `GIT_DIR`,
+/// `GIT_WORK_TREE`, and submodule conventions that a naive walk
+/// wouldn't.
+fn git_repo_root() -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+/// True if the repo's `core.sshCommand` already routes through
+/// sshenc. Ignores the literal substring case: any value containing
+/// "sshenc" (e.g. `sshenc ssh`, `/opt/homebrew/bin/sshenc ssh ...`,
+/// or a future `sshenc-something`) is taken as configured. False on
+/// any git error or missing config — the conservative read for a
+/// nudge that errs toward silence.
+fn repo_already_configured(repo_root: &Path) -> bool {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["config", "--local", "--get", "core.sshCommand"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let value = String::from_utf8_lossy(&o.stdout);
+            value.contains("sshenc")
+        }
+        _ => false,
+    }
+}
+
+/// Path to the sentinel file. Lives next to the agent socket so it
+/// shares the `~/.sshenc/` directory's permissions and lifecycle.
+fn sentinel_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".sshenc")
+            .join(".gitenc-config-hint-shown"),
+    )
+}
+
+/// True if the sentinel file's mtime is within `window` of `now`.
+/// A missing file or any IO error returns false (we'll show the
+/// nudge and try to write the sentinel).
+fn recently_shown(sentinel: &Path, now: SystemTime, window: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(sentinel) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    match now.duration_since(mtime) {
+        Ok(elapsed) => elapsed < window,
+        // mtime is in the future (clock skew / restored backup).
+        // Treat as recent so we don't spam on a misbehaving clock.
+        Err(_) => true,
+    }
+}
+
+/// Create or `mtime`-bump the sentinel file. Best effort -- the
+/// directory might not exist, or the FS might be read-only. Failure
+/// is silent.
+fn touch_sentinel(sentinel: &Path) -> std::io::Result<()> {
+    if let Some(parent) = sentinel.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Re-create on every touch so mtime always advances, even on
+    // filesystems where setting mtime on an existing file is fiddly.
+    std::fs::write(sentinel, b"")
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr, clippy::exit)]
@@ -389,6 +521,7 @@ fn exit_arg_error(err: &str) -> ! {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use std::time::UNIX_EPOCH;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_string()).collect()
@@ -559,8 +692,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "sshenc-test-configure-repo-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -689,8 +822,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "sshenc-test-gitenc-pub-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -780,8 +913,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "gitenc-allowed-signers-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -818,6 +951,181 @@ mod tests {
         // New entry is appended.
         assert!(result.contains("AAAA-new-key"));
 
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    // --- config-hint nudge --------------------------------------------------
+
+    /// True if `git` is on PATH and looks runnable. The hint helpers
+    /// shell out to git, so the tests that exercise them have to gate
+    /// on this. CI runners always have git; developer laptops always
+    /// have git for this repo. Skip cleanly on the rare bare image.
+    fn git_available() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some()
+    }
+
+    fn init_temp_git_repo() -> Option<PathBuf> {
+        if !git_available() {
+            return None;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-hint-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        Some(dir)
+    }
+
+    #[test]
+    fn repo_already_configured_returns_true_for_sshenc_value() {
+        let Some(repo) = init_temp_git_repo() else {
+            return;
+        };
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "--local", "core.sshCommand", "sshenc ssh --"])
+            .status()
+            .unwrap();
+        assert!(repo_already_configured(&repo));
+        drop(std::fs::remove_dir_all(&repo));
+    }
+
+    #[test]
+    fn repo_already_configured_returns_false_for_unrelated_command() {
+        let Some(repo) = init_temp_git_repo() else {
+            return;
+        };
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "--local", "core.sshCommand", "/usr/bin/ssh"])
+            .status()
+            .unwrap();
+        assert!(!repo_already_configured(&repo));
+        drop(std::fs::remove_dir_all(&repo));
+    }
+
+    #[test]
+    fn repo_already_configured_returns_false_when_unset() {
+        let Some(repo) = init_temp_git_repo() else {
+            return;
+        };
+        // No core.sshCommand set.
+        assert!(!repo_already_configured(&repo));
+        drop(std::fs::remove_dir_all(&repo));
+    }
+
+    #[test]
+    fn recently_shown_false_when_sentinel_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-hint-sentinel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sentinel = dir.join("missing");
+        assert!(!recently_shown(
+            &sentinel,
+            SystemTime::now(),
+            HINT_REPRINT_AFTER
+        ));
+    }
+
+    #[test]
+    fn recently_shown_true_when_sentinel_just_written() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-hint-sentinel-fresh-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sentinel = dir.join("shown");
+        touch_sentinel(&sentinel).unwrap();
+        assert!(recently_shown(
+            &sentinel,
+            SystemTime::now(),
+            HINT_REPRINT_AFTER
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn recently_shown_false_when_sentinel_older_than_window() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-hint-sentinel-old-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sentinel = dir.join("shown");
+        touch_sentinel(&sentinel).unwrap();
+
+        // Test a `now` that's far in the future relative to the just-
+        // written mtime. Doesn't depend on filesystem mtime granularity.
+        let far_future = SystemTime::now() + Duration::from_secs(30 * 24 * 60 * 60);
+        assert!(!recently_shown(&sentinel, far_future, HINT_REPRINT_AFTER));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn recently_shown_true_when_mtime_in_future() {
+        // Backup-restore / clock-skew case: don't spam if mtime is
+        // ahead of `now`. `duration_since` returns Err in that case.
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-hint-sentinel-skew-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sentinel = dir.join("shown");
+        touch_sentinel(&sentinel).unwrap();
+
+        let past = SystemTime::now() - Duration::from_secs(60 * 60);
+        assert!(recently_shown(&sentinel, past, HINT_REPRINT_AFTER));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn touch_sentinel_creates_parent_dirs() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-hint-touch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = dir.join("a").join("b").join("c").join("shown");
+        touch_sentinel(&nested).unwrap();
+        assert!(nested.exists());
         drop(std::fs::remove_dir_all(&dir));
     }
 }

@@ -45,6 +45,9 @@ enclaveapp-bridge = { path = "../libenclaveapp/crates/enclaveapp-bridge" }
 # Cargo feature; never compiled into production builds.
 enclaveapp-test-software = { path = "../libenclaveapp/crates/enclaveapp-test-software", features = ["signing"] }
 
+# Test-only temp directories (rotation tests, e2e fixtures).
+tempfile = "3"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

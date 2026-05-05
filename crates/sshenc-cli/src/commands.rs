@@ -600,6 +600,57 @@ pub fn keygen(
 ) -> Result<()> {
     let key_label = KeyLabel::new(label)?;
 
+    // Detect existing key with the same label. If one is present we
+    // treat the call as a rotation: capture the OLD pubkey blob,
+    // discover any local files that reference it, delete the old
+    // key, generate a new one, then rewrite those files in place so
+    // the references point at the NEW pubkey.
+    //
+    // The pre-existing pubkey lookup uses the backend's `get`,
+    // which surfaces `KeyNotFound` for absent labels. Any other
+    // error (transport / agent / hardware) is surfaced as-is rather
+    // than swallowed; we only treat KeyNotFound as "fresh keygen,
+    // skip rotation flow".
+    let prior = match backend.get(label) {
+        Ok(info) => Some(info),
+        Err(sshenc_core::error::Error::KeyNotFound { .. }) => None,
+        Err(other) => return Err(other.into()),
+    };
+
+    // Snapshot OLD pubkey + discovered file references BEFORE we
+    // delete anything. We need the old base64 blob to find lines
+    // to rewrite later.
+    let rotation_state = if let Some(ref old) = prior {
+        let old_pubkey =
+            SshPublicKey::from_sec1_bytes(&old.public_key_bytes, old.metadata.comment.clone())?;
+        let old_blob_b64 = crate::rotation::encode_blob(&old_pubkey.wire_blob());
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let candidates = crate::rotation::discover_candidate_paths(&home);
+        let hits = crate::rotation::discover(&candidates, &old_blob_b64);
+        Some((old_blob_b64, hits))
+    } else {
+        None
+    };
+
+    // Carry over the prior comment when the user didn't pass one.
+    // Keeps the .pub line "looking the same" across rotations so
+    // matching `authorized_keys` / `allowed_signers` lines on a
+    // remote host that key off the comment continue to align.
+    let resolved_comment = match (&comment, &prior) {
+        (Some(c), _) => Some(c.clone()),
+        (None, Some(old)) => old.metadata.comment.clone(),
+        (None, None) => None,
+    };
+
+    if prior.is_some() {
+        // Free the label so `generate` can produce a fresh key.
+        // Backend implementations that conflate label + SE handle
+        // (the macOS path) require the old SecItem to be gone before
+        // `SecKeyCreateRandomKey` can store a new one with the same
+        // tag.
+        backend.delete(label)?;
+    }
+
     // Keep the backend call here; the production caller binds
     // `backend` to an `AgentProxyBackend` that forwards
     // `generate`/`sign`/`delete`/`rename` over the agent socket, so
@@ -608,21 +659,67 @@ pub fn keygen(
     // without needing a live agent.
     let opts = KeyGenOptions {
         label: key_label,
-        comment,
+        comment: resolved_comment,
         access_policy,
         presence_mode,
         write_pub_path: write_pub.clone(),
     };
     let info = backend.generate(&opts)?;
 
+    // Re-link: rewrite each discovered file's old blob with the new
+    // one. The rewrite helper writes a `.bak` sidecar before
+    // touching the original.
+    let mut relink_summary: Vec<(PathBuf, usize)> = Vec::new();
+    if let Some((old_blob_b64, hits)) = rotation_state.as_ref() {
+        let new_pubkey =
+            SshPublicKey::from_sec1_bytes(&info.public_key_bytes, info.metadata.comment.clone())?;
+        let new_blob_b64 = crate::rotation::encode_blob(&new_pubkey.wire_blob());
+        for hit in hits {
+            match crate::rotation::rewrite(&hit.path, old_blob_b64, &new_blob_b64) {
+                Ok(n) => relink_summary.push((hit.path.clone(), n)),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %hit.path.display(),
+                        error = %e,
+                        "rotation: failed to update allowed_signers file"
+                    );
+                }
+            }
+        }
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(&info)?);
     } else {
-        println!("Generated Secure Enclave key: {label}");
-        println!("  Algorithm: {}", info.metadata.algorithm);
-        println!("  Fingerprint: {}", info.fingerprint_sha256);
+        if let Some(ref old) = prior {
+            println!("Rotated Secure Enclave key: {label}");
+            println!("  Old fingerprint: {}", old.fingerprint_sha256);
+            println!("  New fingerprint: {}", info.fingerprint_sha256);
+        } else {
+            println!("Generated Secure Enclave key: {label}");
+            println!("  Algorithm: {}", info.metadata.algorithm);
+            println!("  Fingerprint: {}", info.fingerprint_sha256);
+        }
         if let Some(ref path) = info.pub_file_path {
             println!("  Public key written to: {}", path.display());
+        }
+        if !relink_summary.is_empty() {
+            println!();
+            println!("Re-linked local references to the new key:");
+            for (path, n) in &relink_summary {
+                let plural = if *n == 1 { "" } else { "s" };
+                println!("  {} ({} line{plural})", path.display(), n);
+            }
+            println!("  (originals saved as <file>.bak sidecars)");
+        }
+        if let Some(ref old) = prior {
+            println!();
+            println!("Manual updates still required:");
+            println!("  - GitHub: SSH auth + signing keys for this label.");
+            println!("    Old fingerprint: {}", old.fingerprint_sha256);
+            println!("    New fingerprint: {}", info.fingerprint_sha256);
+            println!("  - Any remote host's authorized_keys that referenced the old blob.");
+            println!("  - Any per-repo gpg.ssh.allowedSignersFile not in the global default.");
         }
         if print_pub {
             let pubkey = SshPublicKey::from_sec1_bytes(
@@ -2199,12 +2296,16 @@ mod tests {
     }
 
     #[test]
-    fn keygen_duplicate_label_returns_error() {
+    fn keygen_existing_label_rotates_in_place() {
+        // The pre-rotation behaviour was DuplicateLabel; this test
+        // pins the new contract: a second keygen against the same
+        // label is treated as a rotation, succeeds, and replaces the
+        // SE-side key with a fresh one.
         let backend = mock_backend();
         keygen(
             &backend,
-            "dup-key",
-            None,
+            "rot-key",
+            Some("first".into()),
             None,
             false,
             AccessPolicy::None,
@@ -2212,21 +2313,26 @@ mod tests {
             false,
         )
         .unwrap();
-        let result = keygen(
+        let first = backend.get("rot-key").unwrap();
+
+        // Second keygen rotates rather than erroring.
+        keygen(
             &backend,
-            "dup-key",
-            None,
+            "rot-key",
+            Some("second".into()),
             None,
             false,
             AccessPolicy::None,
             sshenc_core::PresenceMode::None,
             false,
-        );
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("duplicate") || err_msg.contains("dup-key"),
-            "error: {err_msg}"
+        )
+        .unwrap();
+
+        let second = backend.get("rot-key").unwrap();
+        assert_eq!(second.metadata.label.as_str(), "rot-key");
+        assert_ne!(
+            second.public_key_bytes, first.public_key_bytes,
+            "rotation must yield a fresh key, not reuse the old material",
         );
     }
 

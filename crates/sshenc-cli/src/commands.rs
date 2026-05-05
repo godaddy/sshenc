@@ -49,6 +49,34 @@ use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
+/// Resolve the socket path the CLI's *client* paths should use to
+/// reach an agent. `SSHENC_AGENT_SOCKET` takes precedence over the
+/// configured socket so test harnesses can isolate the CLI to a
+/// tempdir agent without rewriting the user's config or polluting
+/// the production keychain. The env override only affects client
+/// paths (keygen / sign / list go via this); install / config-show
+/// keep using the configured socket because they're talking *about*
+/// the production agent, not *to* a runtime one.
+pub fn client_socket_path(configured: &Path) -> PathBuf {
+    resolve_client_socket_path(
+        std::env::var_os("SSHENC_AGENT_SOCKET").as_deref(),
+        configured,
+    )
+}
+
+/// Pure resolver split out of [`client_socket_path`] so tests can
+/// exercise the precedence logic without mutating process-wide env
+/// (which would race with parallel tests).
+fn resolve_client_socket_path(
+    env_override: Option<&std::ffi::OsStr>,
+    configured: &Path,
+) -> PathBuf {
+    match env_override {
+        Some(s) if !s.is_empty() => PathBuf::from(s),
+        _ => configured.to_path_buf(),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum AgentStartStatus {
     Started,
@@ -1628,15 +1656,16 @@ pub fn ssh_wrapper(label: Option<&str>, ssh_args: &[String]) -> Result<()> {
     }
 
     let ssh_dir = config.pub_dir.clone();
+    let socket_path = client_socket_path(&config.socket_path);
     // Identity-file lookup via `AgentProxyBackend` on every
     // platform — label-to-pubkey resolution is a `.pub`-file disk
     // read, never a keychain fallback.
     let backend: Box<dyn KeyBackend> = Box::new(
-        sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), config.socket_path.clone())
+        sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), socket_path.clone())
             .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?,
     );
     let invocation =
-        build_ssh_wrapper_invocation(&*backend, &config.socket_path, label, ssh_args, &ssh_dir)?;
+        build_ssh_wrapper_invocation(&*backend, &socket_path, label, ssh_args, &ssh_dir)?;
 
     let status = std::process::Command::new(&invocation.ssh_bin)
         .args(&invocation.args)
@@ -1851,10 +1880,10 @@ pub fn promote_to_default(label: &str) -> Result<()> {
         // and we shouldn't pay the "spawn the agent" cost — or
         // block callers on a fresh install where the agent binary
         // isn't on disk yet — for those early error paths.
+        let socket_path = client_socket_path(&config.socket_path);
         let rename_via_backend = |old: &str, new: &str| -> Result<()> {
-            let backend =
-                sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), config.socket_path.clone())
-                    .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?;
+            let backend = sshenc_se::AgentProxyBackend::new(ssh_dir.clone(), socket_path.clone())
+                .map_err(|e| anyhow!("failed to initialize agent-proxy backend: {e}"))?;
             backend
                 .rename(old, new)
                 .map_err(|e| anyhow!("backend rename failed: {e}"))
@@ -2232,6 +2261,35 @@ mod tests {
 
     fn mock_backend() -> MockKeyBackend {
         MockKeyBackend::new()
+    }
+
+    #[test]
+    fn resolve_client_socket_path_falls_back_to_configured_when_env_unset() {
+        let configured = Path::new("/var/run/sshenc/agent.sock");
+        assert_eq!(
+            resolve_client_socket_path(None, configured),
+            PathBuf::from(configured)
+        );
+    }
+
+    #[test]
+    fn resolve_client_socket_path_honors_env_override() {
+        let configured = Path::new("/var/run/sshenc/agent.sock");
+        let env_value = std::ffi::OsString::from("/tmp/test-agent.sock");
+        assert_eq!(
+            resolve_client_socket_path(Some(env_value.as_os_str()), configured),
+            PathBuf::from("/tmp/test-agent.sock")
+        );
+    }
+
+    #[test]
+    fn resolve_client_socket_path_treats_empty_env_as_unset() {
+        let configured = Path::new("/var/run/sshenc/agent.sock");
+        let empty = std::ffi::OsString::new();
+        assert_eq!(
+            resolve_client_socket_path(Some(empty.as_os_str()), configured),
+            PathBuf::from(configured)
+        );
     }
 
     /// Create a unique temporary directory for a test.

@@ -238,6 +238,39 @@ impl SshencBackend {
         }
     }
 
+    /// Disk-only counterpart to `KeyBackend::get`. Reads `.meta` and
+    /// `.pub` straight from `keys_dir` without touching the key
+    /// manager (which on macOS would slow-path through `load_handle`
+    /// → biometric on a missing `.pub` cache). Used by `list` so
+    /// bulk enumeration never prompts; single-key `get` keeps its
+    /// self-healing decrypt path because the prompt is in-context
+    /// for that call.
+    fn get_disk_only(&self, label: &str) -> Result<KeyInfo> {
+        let owned_label = KeyLabel::new(label)?;
+        let meta =
+            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        let comment = meta.get_app_field("comment").map(|s| s.to_string());
+        let public_bytes = metadata::load_pub_key(&self.keys_dir, label)
+            .map_err(|e| map_err("load_pub_key", e))?;
+        let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, comment.clone())?;
+        let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
+        let pub_file_path = self.persisted_pub_file_path(&meta, label);
+        let presence_mode = crate::proxy::presence_mode_from_app_specific(&meta.app_specific);
+
+        Ok(KeyInfo {
+            metadata: KeyMetadata::with_presence_mode(
+                owned_label,
+                meta.access_policy,
+                presence_mode,
+                comment,
+            ),
+            public_key_bytes: public_bytes,
+            fingerprint_sha256: fp_sha256,
+            fingerprint_md5: fp_md5,
+            pub_file_path,
+        })
+    }
+
     #[allow(clippy::match_same_arms)] // arms kept separate for intent documentation
     fn persisted_pub_file_path(&self, meta: &metadata::KeyMeta, label: &str) -> Option<PathBuf> {
         match meta.app_specific.get("pub_file_path") {
@@ -574,6 +607,20 @@ impl KeyBackend for SshencBackend {
         })
     }
 
+    /// Enumerate keys by walking `.meta` and `.pub` files on disk.
+    /// Never calls `key_manager().public_key()` -- that path on macOS
+    /// falls back to `load_handle` (decrypts the handle blob via the
+    /// user-presence-protected wrapping key) if the `.pub` cache is
+    /// missing or malformed, which surfaces a Touch ID prompt during
+    /// what should be a silent enumeration.
+    ///
+    /// Public keys are public; reading them must never gate on
+    /// biometric. If a key's `.pub` cache is missing we log+skip
+    /// rather than self-heal via decrypt -- self-heal is appropriate
+    /// for an explicit single-key `get`/`sign` (the user is asking
+    /// for that specific key, so prompting is in-context), but never
+    /// during a bulk `list` triggered by `RequestIdentities` from a
+    /// passing SSH client or by the agent's startup warmup.
     fn list(&self) -> Result<Vec<KeyInfo>> {
         let labels = self
             .key_manager()
@@ -582,7 +629,7 @@ impl KeyBackend for SshencBackend {
 
         let mut keys = Vec::new();
         for label_str in labels {
-            match self.get(&label_str) {
+            match self.get_disk_only(&label_str) {
                 Ok(info) => keys.push(info),
                 Err(e) => {
                     tracing::warn!("skipping key {label_str}: {e}");
@@ -870,5 +917,93 @@ mod tests {
         assert!(result.is_none());
 
         std::fs::remove_dir_all(&pub_dir).unwrap();
+    }
+
+    /// `get_disk_only` must NOT touch the key manager. We construct
+    /// a backend with a tempdir keys_dir, write a hand-rolled `.pub`
+    /// and `.meta` into it, and verify `get_disk_only` returns the
+    /// key without going through any of the keychain-backed paths.
+    /// The corollary -- that `list` only ever calls this and never
+    /// `get` -- is what protects bulk enumeration from prompting on
+    /// macOS when a key's `.pub` cache is missing.
+    #[test]
+    fn get_disk_only_reads_pub_and_meta_without_key_manager() {
+        let pub_dir = test_pub_dir();
+        let keys_dir = std::env::temp_dir().join(format!(
+            "sshenc-se-disk-only-{}-{}",
+            std::process::id(),
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&keys_dir).unwrap();
+
+        // 65-byte SEC1-shaped buffer. `validate_p256_point` and
+        // `SshPublicKey::from_sec1_bytes` only check length + 0x04
+        // prefix; no curve math. Good enough for the disk-only path
+        // test which doesn't sign or verify.
+        let mut public = vec![0x04];
+        public.extend_from_slice(&[0xAA; 64]);
+
+        let label = "disk-only-test";
+        metadata::save_pub_key(&keys_dir, label, &public).unwrap();
+        let mut meta = metadata::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
+        meta.set_app_field("comment", "disk-only-test-comment");
+        metadata::save_meta(&keys_dir, label, &meta).unwrap();
+
+        // Build a SshencBackend WITHOUT going through `with_cache_ttl`
+        // (which would require either real keychain or the
+        // force-software feature). We bypass platform init by using
+        // try_test_backend on hosts where it succeeds; on hosts
+        // where it doesn't, the test exits early -- the disk-only
+        // path is identical either way.
+        let Some(mut backend) = try_test_backend(pub_dir.clone()) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            std::fs::remove_dir_all(&keys_dir).unwrap();
+            return;
+        };
+        backend.keys_dir = keys_dir.clone();
+
+        let info = backend.get_disk_only(label).unwrap();
+        assert_eq!(info.metadata.label.as_str(), label);
+        assert_eq!(
+            info.metadata.comment.as_deref(),
+            Some("disk-only-test-comment")
+        );
+        assert_eq!(info.public_key_bytes, public);
+
+        std::fs::remove_dir_all(&pub_dir).unwrap();
+        std::fs::remove_dir_all(&keys_dir).unwrap();
+    }
+
+    /// If the `.pub` cache is missing for a label that has a `.meta`,
+    /// `get_disk_only` must error rather than fall through to a
+    /// keychain decrypt. `list` swallows the error and skips the
+    /// key, which is the prompt-free behaviour we want.
+    #[test]
+    fn get_disk_only_errors_when_pub_cache_missing() {
+        let pub_dir = test_pub_dir();
+        let keys_dir = std::env::temp_dir().join(format!(
+            "sshenc-se-disk-only-miss-{}-{}",
+            std::process::id(),
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&keys_dir).unwrap();
+
+        // .meta only, no .pub
+        let label = "missing-pub";
+        let meta = metadata::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
+        metadata::save_meta(&keys_dir, label, &meta).unwrap();
+
+        let Some(mut backend) = try_test_backend(pub_dir.clone()) else {
+            std::fs::remove_dir_all(&pub_dir).unwrap();
+            std::fs::remove_dir_all(&keys_dir).unwrap();
+            return;
+        };
+        backend.keys_dir = keys_dir.clone();
+
+        let result = backend.get_disk_only(label);
+        assert!(result.is_err(), "expected error when .pub cache is missing");
+
+        std::fs::remove_dir_all(&pub_dir).unwrap();
+        std::fs::remove_dir_all(&keys_dir).unwrap();
     }
 }

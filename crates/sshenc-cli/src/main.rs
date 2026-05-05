@@ -326,8 +326,19 @@ fn main() -> Result<()> {
     // appears on a `SecItem*` / `SecKey*` / CNG / keyring call —
     // the agent is the sole toucher of every platform's secret
     // store.
+    //
+    // `SSHENC_AGENT_SOCKET` overrides the configured socket path.
+    // Test harnesses (matrix script, e2e) point the CLI at an
+    // isolated agent on a tempdir socket via this env var; without
+    // it every CLI write op (keygen, delete) would hit the user's
+    // production agent and create real Secure Enclave keys in the
+    // real keychain. We deliberately don't piggy-back on
+    // `SSH_AUTH_SOCK` because users routinely have it pointed at
+    // ssh-agent for non-sshenc identities — overloading it would
+    // produce protocol-mismatch errors on benign setups.
+    let socket_path = commands::client_socket_path(&config.socket_path);
     let backend: Box<dyn sshenc_se::KeyBackend> = Box::new(
-        sshenc_se::AgentProxyBackend::new(config.pub_dir.clone(), config.socket_path.clone())
+        sshenc_se::AgentProxyBackend::new(config.pub_dir.clone(), socket_path)
             .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
     );
 

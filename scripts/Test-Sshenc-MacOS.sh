@@ -216,6 +216,14 @@ TEST_AGENT_LOG="$TEST_TMP/agent.log"
 mkdir -p "$TEST_KEYS_DIR" "$TEST_SSH_DIR"
 
 export SSHENC_KEYS_DIR="$TEST_KEYS_DIR"
+# Critical for test isolation: `AgentProxyBackend` uses
+# `config.socket_path` by default, NOT `$SSH_AUTH_SOCK`. Without this
+# override every CLI write op (keygen, delete, rename) would forward
+# to the user's *production* sshenc-agent on `~/.sshenc/agent.sock`,
+# creating real Secure Enclave keys in the real keychain and
+# triggering Touch ID prompts -- precisely what the test claims to
+# isolate.
+export SSHENC_AGENT_SOCKET="$TEST_AGENT_SOCK"
 # `sshenc keygen --write-pub` writes the .pub at the path we
 # specify, so we don't need to override HOME or touch ~/.ssh.
 

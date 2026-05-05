@@ -64,15 +64,20 @@ pub struct SshencBackend {
 
 /// Resolve the effective wrapping-key cache TTL, honoring the
 /// `SSHENC_WRAPPING_KEY_CACHE_TTL_SECS` env override when set.
-/// Returns 5 minutes if neither the env var nor a caller supplies a
+/// Returns 4 hours if neither the env var nor a caller supplies a
 /// value.
+///
+/// Kept in sync with `sshenc_core::config::default_wrapping_key_cache_ttl_secs`
+/// -- both must agree so a CLI sign that goes through `SshencBackend::new`
+/// (no config file) honors the same wrapping-key reuse window the
+/// agent advertises when it loads the same config.
 pub fn default_wrapping_key_cache_ttl() -> std::time::Duration {
     if let Some(value) = std::env::var_os("SSHENC_WRAPPING_KEY_CACHE_TTL_SECS") {
         if let Ok(secs) = value.to_string_lossy().parse::<u64>() {
             return std::time::Duration::from_secs(secs);
         }
     }
-    std::time::Duration::from_secs(300)
+    std::time::Duration::from_secs(14400)
 }
 
 /// Return the sshenc keys directory (~/.sshenc/keys/).

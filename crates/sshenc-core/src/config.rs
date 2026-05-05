@@ -90,14 +90,29 @@ pub struct Config {
     /// env var `SSHENC_WRAPPING_KEY_CACHE_TTL_SECS` overrides this at
     /// runtime for testing.
     ///
-    /// Default: 300 (5 minutes), matching Apple's
-    /// `LATouchIDAuthenticationMaximumAllowableReuseDuration`.
+    /// Default: 14400 (4 hours). This used to match Apple's
+    /// `LATouchIDAuthenticationMaximumAllowableReuseDuration` cap of
+    /// 300s, but that cap only applies to the LAContext that gates the
+    /// per-sign Secure Enclave prompt -- the wrapping-key cache is
+    /// ours, gates only the keychain decrypt of the on-disk handle
+    /// blob, and has no Apple-imposed ceiling. Capping it at 5 minutes
+    /// produced "2 prompts per op" UX whenever a user spaced their
+    /// SSH/git activity past the LAContext reuse window: both caches
+    /// expired together and the user paid the wrapping-key prompt on
+    /// top of the unavoidable SE prompt. With 4h, the wrapping-key
+    /// prompt collapses to roughly "once per workday" and the user
+    /// only sees the SE prompt that the hardware enforces.
+    ///
+    /// The wrapping-key cache lives in `mlock`ed memory inside the
+    /// agent process, so a longer TTL doesn't expand the
+    /// memory-disclosure attack surface beyond what the agent already
+    /// holds for handle-blob decryption.
     #[serde(default = "default_wrapping_key_cache_ttl_secs")]
     pub wrapping_key_cache_ttl_secs: u64,
 }
 
 fn default_wrapping_key_cache_ttl_secs() -> u64 {
-    300
+    14400
 }
 
 /// Return the user's home directory, or an error if it cannot be determined.

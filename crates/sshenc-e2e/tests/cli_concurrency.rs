@@ -72,9 +72,13 @@ fn spawn_and_collect(mut cmd: Command) -> (bool, String) {
     (output.status.success(), combined)
 }
 
-/// Two `sshenc keygen --label <same>` racing — exactly one
-/// succeeds; the other surfaces a duplicate-label / agent-refused
-/// error rather than corrupting state.
+/// Two `sshenc keygen --label <same>` racing -- both succeed in
+/// the post-rotation world (sshenc PR #187): the first creates the
+/// key, the second sees a duplicate-label signal and rotates in
+/// place. Pre-rotation this test asserted "exactly one wins"; the
+/// new contract is "both terminate cleanly, the surviving label
+/// has exactly one key, and exactly one of the two outputs carries
+/// the rotation banner".
 #[test]
 #[ignore = "requires docker"]
 fn concurrent_keygen_same_label_one_winner() {
@@ -126,17 +130,38 @@ fn concurrent_keygen_same_label_one_winner() {
     let r1 = h1.join().expect("thread 1");
     let r2 = h2.join().expect("thread 2");
 
+    // Both terminate cleanly: one mints the key fresh, the other
+    // sees the duplicate signal and rotates.
     let winners = [&r1, &r2].iter().filter(|(ok, _)| *ok).count();
     assert_eq!(
-        winners, 1,
-        "exactly one keygen should win for same label; r1={r1:?}\nr2={r2:?}"
+        winners, 2,
+        "both keygens should terminate cleanly under rotation contract; r1={r1:?}\nr2={r2:?}"
     );
 
-    // The label should appear in `sshenc list`.
+    // Exactly one of the two outputs should carry the rotation
+    // banner -- the loser-by-timing rotated the winner's key.
+    let rotated_count = [&r1, &r2]
+        .iter()
+        .filter(|(_, out)| out.contains("Rotated Secure Enclave key:"))
+        .count();
+    let generated_count = [&r1, &r2]
+        .iter()
+        .filter(|(_, out)| out.contains("Generated Secure Enclave key:"))
+        .count();
+    assert_eq!(
+        (rotated_count, generated_count),
+        (1, 1),
+        "exactly one Generated and one Rotated banner expected; r1={r1:?}\nr2={r2:?}"
+    );
+
+    // The label should appear exactly once in `sshenc list` (the
+    // rotation contract is "one key per label after the dust
+    // settles", not "two keys racing").
     let listed = run(env_arc.sshenc_cmd().expect("sshenc").arg("list")).expect("sshenc list");
-    assert!(
-        listed.stdout.contains(&label),
-        "winner-created label {label} should be listable; got:\n{}",
+    let occurrences = listed.stdout.matches(&label).count();
+    assert_eq!(
+        occurrences, 1,
+        "label {label} should appear exactly once in list output; got {occurrences} in:\n{}",
         listed.stdout
     );
 

@@ -1124,11 +1124,49 @@ pub fn install() -> Result<()> {
             }
         };
 
-    let agent_status = match start_agent_with_binary(
+    // macOS-specific: register a LaunchAgent rather than bare-
+    // daemonize-and-spawn. The bare daemonize path leaves the agent
+    // detached from the user's GUI session, which prevents
+    // `LAContext` from showing Touch ID prompts. Without those the
+    // wrapping-key keychain entry can't be loaded on a cold cache,
+    // and every sign that needs it returns FAILURE -- the user-
+    // visible "communication with agent failed" symptom. The
+    // LaunchAgent runs in `gui/<uid>` so prompts work; launchd's
+    // `KeepAlive` handles supervision; launchd's Label-uniqueness
+    // means we can never accumulate stale duplicate agent processes.
+    #[cfg(target_os = "macos")]
+    let agent_status = {
+        // If something else already bound the socket (e.g. user's
+        // shell-spawned agent from a prior version), tear it down
+        // before installing the LaunchAgent so we don't fight over
+        // the socket path.
+        if RealAgentLauncher.is_running(&config.socket_path) {
+            // Best effort -- if removal fails, launchd-managed
+            // bind will still error and surface a clear message.
+            let _unused = std::process::Command::new("pkill")
+                .arg("-f")
+                .arg("sshenc-agent")
+                .status();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let _unused = std::fs::remove_file(&config.socket_path);
+        }
+        agent_bin
+            .as_deref()
+            .ok_or_else(|| anyhow!("sshenc-agent binary not found"))
+            .and_then(|bin| {
+                crate::launchagent::install(bin, &config.socket_path)
+                    .map(|_| AgentStartStatus::Started)
+            })
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let agent_status = start_agent_with_binary(
         &RealAgentLauncher,
         &config.socket_path,
         agent_bin.as_deref(),
-    ) {
+    );
+
+    let agent_status = match agent_status {
         Ok(status) => status,
         Err(error) => {
             if matches!(
@@ -1343,6 +1381,22 @@ pub fn uninstall() -> Result<()> {
                 "No sshenc configuration found in {}",
                 ssh_config_path.display()
             );
+        }
+    }
+
+    // macOS: tear down the LaunchAgent installed by
+    // `sshenc install`. Idempotent -- a missing plist or already-
+    // unloaded service is treated as success.
+    #[cfg(target_os = "macos")]
+    {
+        match crate::launchagent::uninstall() {
+            Ok(()) => println!("Removed sshenc LaunchAgent."),
+            Err(error) => {
+                eprintln!(
+                    "Warning: could not remove sshenc LaunchAgent: {error}\n\
+                     The plist may need to be removed manually from ~/Library/LaunchAgents."
+                );
+            }
         }
     }
 

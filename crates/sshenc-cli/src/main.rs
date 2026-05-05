@@ -10,6 +10,8 @@ use sshenc_core::{AccessPolicy, Config};
 use std::path::PathBuf;
 
 mod commands;
+#[cfg(target_os = "macos")]
+mod launchagent;
 mod rotation;
 #[cfg(windows)]
 #[allow(clippy::print_stdout, clippy::print_stderr)]

@@ -142,11 +142,13 @@ fn keygen_default_success_cleans_up_backed_up_files() {
 
 /// `sshenc keygen --label default` invoked a second time rotates
 /// the existing `default` key in place (sshenc PR #187). The
-/// pre-existing pubkey at `~/.ssh/id_ecdsa.pub` becomes the rotation
-/// target -- the rotation flow rewrites it with the NEW pubkey. A
-/// paired private that the user planted at `~/.ssh/id_ecdsa` is left
-/// untouched: rotation has no business synthesizing or mutating an
-/// external private file. No `.bak` files leak.
+/// pre-existing pubkey at `~/.ssh/id_ecdsa.pub` is the rotation
+/// target -- the rotation flow rewrites it with the NEW pubkey, and
+/// the backup wrapper around keygen still applies the same paired-
+/// private cleanup it does on a first-time keygen (the new key is
+/// hardware-backed, so any planted `id_ecdsa` private file is
+/// obsolete and gets removed via the backup helper's success path).
+/// No `.bak` files leak.
 #[test]
 #[ignore = "requires docker"]
 fn keygen_default_second_invocation_rotates_in_place() {
@@ -186,11 +188,13 @@ fn keygen_default_second_invocation_rotates_in_place() {
     // rotation rewrote it with new bytes.
     let pre_rotation_pub = std::fs::read(&pub_path).expect("read pub after first keygen");
 
-    // Plant a paired private the user might still have on disk. The
-    // rotation flow has no reason to touch it -- the key material
-    // lives in the SE, not in this file -- but we pin that here.
-    let original_priv: &[u8] = b"-- USER PLANTED PRIVATE FILE --\n";
-    std::fs::write(&priv_path, original_priv).expect("write priv");
+    // Plant a stale paired-private file -- a residue the user might
+    // still have on disk from before they switched to sshenc. The
+    // backup helper around `default`-label keygen treats this as
+    // obsolete and removes it on success (same as a first-time
+    // keygen). The rotation contract here is "behaves like a first-
+    // time keygen w.r.t. the paired-private path".
+    std::fs::write(&priv_path, b"-- STALE PRE-ROTATION PRIVATE FILE --\n").expect("write priv");
 
     // Second keygen rotates in place.
     let kg2 = run(env.sshenc_cmd().expect("sshenc cmd").args([
@@ -221,11 +225,17 @@ fn keygen_default_second_invocation_rotates_in_place() {
         "id_ecdsa.pub still has the pre-rotation content; rotation did not rewrite the .pub file"
     );
 
-    // The planted private file is untouched by the rotation flow.
-    let priv_after = std::fs::read(&priv_path).expect("read priv after");
-    assert_eq!(
-        priv_after, original_priv,
-        "id_ecdsa private was disturbed by the rotation; rotation must not synthesize or mutate paired private material",
+    // The planted private was paired with the (now-replaced)
+    // id_ecdsa.pub. The backup wrapper's success path cleans it up
+    // -- same as the first-time-keygen success contract pinned by
+    // `keygen_default_success_cleans_up_backed_up_files`. A stale
+    // paired-private file that no longer matches the new SE-backed
+    // pubkey would be confusing to leave around; the rotation
+    // inherits that cleanup.
+    assert!(
+        !priv_path.exists(),
+        "stale paired-private id_ecdsa should be removed after rotation; still at {}",
+        priv_path.display()
     );
 
     let leftover = list_bak_files(&env.ssh_dir());

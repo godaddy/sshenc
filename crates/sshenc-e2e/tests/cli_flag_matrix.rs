@@ -293,10 +293,8 @@ fn keygen_existing_label_rotates() {
     // Confirm a fresh key is now in place by reading inspect output.
     // We can't easily re-build `EnclaveKeyHandle` here, but the new
     // pubkey blob (via `sshenc list`) should differ from `original`'s.
-    let list = run(env.sshenc_cmd().expect("sshenc").args([
-        "list", "--json",
-    ]))
-    .expect("list after rotation");
+    let list = run(env.sshenc_cmd().expect("sshenc").args(["list", "--json"]))
+        .expect("list after rotation");
     assert!(
         !list.stdout.contains(&original_blob),
         "post-rotation list still contains the old pubkey blob",

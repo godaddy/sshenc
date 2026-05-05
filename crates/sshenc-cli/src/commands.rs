@@ -4,6 +4,20 @@
 //! CLI command implementations.
 
 use anyhow::{anyhow, bail, Result};
+use sshenc_core::error::Error as SshencError;
+
+/// Whether `e` indicates "a key with this label already exists".
+/// Mirrors `Error::is_key_not_found()` for the duplicate path: the
+/// agent / proxy boundary wraps the typed `DuplicateLabel` into a
+/// `SecureEnclave { detail: "duplicate key label: ..." }`, so we
+/// check both shapes.
+fn is_duplicate_label(e: &SshencError) -> bool {
+    match e {
+        SshencError::DuplicateLabel { .. } => true,
+        SshencError::SecureEnclave { detail, .. } => detail.starts_with("duplicate key label"),
+        _ => false,
+    }
+}
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)] // KeyGenOptions used on Windows prod path and by Unix tests.
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
@@ -600,58 +614,21 @@ pub fn keygen(
 ) -> Result<()> {
     let key_label = KeyLabel::new(label)?;
 
-    // Detect existing key with the same label. If one is present we
-    // treat the call as a rotation: capture the OLD pubkey blob,
-    // discover any local files that reference it, delete the old
-    // key, generate a new one, then rewrite those files in place so
-    // the references point at the NEW pubkey.
+    // Try-then-rotate: call `generate` first. On a fresh label this
+    // succeeds and we're done. If the backend reports a duplicate
+    // label, switch to the rotation flow -- look up the OLD key,
+    // discover any local files that reference its blob, delete the
+    // old key, regenerate, and rewrite those files in place.
     //
-    // The pre-existing pubkey lookup uses the backend's `get`. The
-    // proxy boundary wraps the typed `KeyNotFound` into
-    // `SecureEnclave { detail: "key not found: ..." }`, so use the
-    // existing `is_key_not_found()` helper that handles both shapes.
-    // Any other error (transport / agent / hardware) is surfaced
-    // as-is rather than swallowed.
-    let prior = match backend.get(label) {
-        Ok(info) => Some(info),
-        Err(e) if e.is_key_not_found() => None,
-        Err(other) => return Err(other.into()),
-    };
-
-    // Snapshot OLD pubkey + discovered file references BEFORE we
-    // delete anything. We need the old base64 blob to find lines
-    // to rewrite later.
-    let rotation_state = if let Some(ref old) = prior {
-        let old_pubkey =
-            SshPublicKey::from_sec1_bytes(&old.public_key_bytes, old.metadata.comment.clone())?;
-        let old_blob_b64 = crate::rotation::encode_blob(&old_pubkey.wire_blob());
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        let candidates = crate::rotation::discover_candidate_paths(&home);
-        let hits = crate::rotation::discover(&candidates, &old_blob_b64);
-        Some((old_blob_b64, hits))
-    } else {
-        None
-    };
-
-    // Carry over the prior comment when the user didn't pass one.
-    // Keeps the .pub line "looking the same" across rotations so
-    // matching `authorized_keys` / `allowed_signers` lines on a
-    // remote host that key off the comment continue to align.
-    let resolved_comment = match (&comment, &prior) {
-        (Some(c), _) => Some(c.clone()),
-        (None, Some(old)) => old.metadata.comment.clone(),
-        (None, None) => None,
-    };
-
-    if prior.is_some() {
-        // Free the label so `generate` can produce a fresh key.
-        // Backend implementations that conflate label + SE handle
-        // (the macOS path) require the old SecItem to be gone before
-        // `SecKeyCreateRandomKey` can store a new one with the same
-        // tag.
-        backend.delete(label)?;
-    }
-
+    // This avoids a pre-flight `backend.get(label)` that races with
+    // the agent's own write path on a busy filesystem (sshenc PR
+    // #187 follow-up: the original implementation pre-checked via
+    // `get` and broke under macos-matrix CI when a partial state
+    // appeared between the get and the generate -- particularly
+    // .meta-without-.pub on the keys_dir). With the try-first
+    // ordering we never look at on-disk state for a label we're
+    // about to create.
+    //
     // Keep the backend call here; the production caller binds
     // `backend` to an `AgentProxyBackend` that forwards
     // `generate`/`sign`/`delete`/`rename` over the agent socket, so
@@ -659,13 +636,50 @@ pub fn keygen(
     // directly. Tests pass a mock and exercise the command logic
     // without needing a live agent.
     let opts = KeyGenOptions {
-        label: key_label,
-        comment: resolved_comment,
+        label: key_label.clone(),
+        comment: comment.clone(),
         access_policy,
         presence_mode,
         write_pub_path: write_pub.clone(),
     };
-    let info = backend.generate(&opts)?;
+    let first_attempt = backend.generate(&opts);
+
+    let (info, prior, rotation_state) = match first_attempt {
+        Ok(info) => (info, None, None),
+        Err(e) if is_duplicate_label(&e) => {
+            // Rotation path. Now is_safe to read the on-disk state
+            // for the OLD key, since we know it exists (the agent
+            // just told us so).
+            let old = backend.get(label)?;
+            let old_pubkey =
+                SshPublicKey::from_sec1_bytes(&old.public_key_bytes, old.metadata.comment.clone())?;
+            let old_blob_b64 = crate::rotation::encode_blob(&old_pubkey.wire_blob());
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+            let candidates = crate::rotation::discover_candidate_paths(&home);
+            let hits = crate::rotation::discover(&candidates, &old_blob_b64);
+
+            // Carry over the prior comment when the user didn't
+            // pass one. Keeps the .pub line "looking the same"
+            // across rotations so matching `authorized_keys` /
+            // `allowed_signers` lines on remote hosts that key off
+            // the comment continue to align.
+            let resolved_comment = comment.clone().or_else(|| old.metadata.comment.clone());
+
+            // Free the label so `generate` can produce a fresh key.
+            backend.delete(label)?;
+
+            let opts = KeyGenOptions {
+                label: key_label,
+                comment: resolved_comment,
+                access_policy,
+                presence_mode,
+                write_pub_path: write_pub.clone(),
+            };
+            let new_info = backend.generate(&opts)?;
+            (new_info, Some(old), Some((old_blob_b64, hits)))
+        }
+        Err(other) => return Err(other.into()),
+    };
 
     // Re-link: rewrite each discovered file's old blob with the new
     // one. The rewrite helper writes a `.bak` sidecar before

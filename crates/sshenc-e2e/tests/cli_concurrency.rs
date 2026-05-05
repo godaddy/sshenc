@@ -154,14 +154,34 @@ fn concurrent_keygen_same_label_one_winner() {
         "exactly one Generated and one Rotated banner expected; r1={r1:?}\nr2={r2:?}"
     );
 
-    // The label should appear exactly once in `sshenc list` (the
-    // rotation contract is "one key per label after the dust
-    // settles", not "two keys racing").
-    let listed = run(env_arc.sshenc_cmd().expect("sshenc").arg("list")).expect("sshenc list");
-    let occurrences = listed.stdout.matches(&label).count();
+    // The label should appear exactly once in `sshenc list --json`
+    // (the rotation contract is "one key per label after the dust
+    // settles", not "two keys racing"). Counting via JSON instead
+    // of plain-text substring match because the human-readable
+    // listing repeats the label in multiple fields per entry
+    // (label heading, App tag, etc.) and a substring count would
+    // double-count even a single key.
+    let listed = run(env_arc
+        .sshenc_cmd()
+        .expect("sshenc")
+        .args(["list", "--json"]))
+    .expect("sshenc list --json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&listed.stdout).expect("list --json must emit valid JSON");
+    let entries = parsed.as_array().expect("list --json must be an array");
+    let occurrences = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("metadata")
+                .and_then(|m| m.get("label"))
+                .and_then(|l| l.as_str())
+                == Some(label.as_str())
+        })
+        .count();
     assert_eq!(
         occurrences, 1,
-        "label {label} should appear exactly once in list output; got {occurrences} in:\n{}",
+        "label {label} should map to exactly one key after rotation; got {occurrences} in:\n{}",
         listed.stdout
     );
 

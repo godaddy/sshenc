@@ -160,15 +160,20 @@ fn keygen_default_second_invocation_rotates_in_place() {
     env.use_ephemeral_keys_dir().expect("ephemeral");
     env.start_agent().expect("start agent");
 
-    // Mint `default` once so the second invocation lands on the
-    // rotation path.
+    let priv_path = env.ssh_dir().join("id_ecdsa");
+    let pub_path = env.ssh_dir().join("id_ecdsa.pub");
+
+    // Mint `default` once with the default pub-file path; that
+    // populates id_ecdsa.pub so we have something for the rotation
+    // to rewrite. Drop `--no-pub-file` here vs the smoke variants
+    // because we need the file to exist for the bytes-changed
+    // assertion below.
     let pre = run(env.sshenc_cmd().expect("sshenc cmd").args([
         "keygen",
         "--label",
         "default",
         "--auth-policy",
         "none",
-        "--no-pub-file",
     ]))
     .expect("first keygen");
     assert!(
@@ -177,11 +182,8 @@ fn keygen_default_second_invocation_rotates_in_place() {
         pre.stderr
     );
 
-    let priv_path = env.ssh_dir().join("id_ecdsa");
-    let pub_path = env.ssh_dir().join("id_ecdsa.pub");
-
-    // The first keygen wrote a real pubkey to id_ecdsa.pub; capture
-    // it so we can confirm the rotation rewrote it with new bytes.
+    // Capture the freshly-written pubkey so we can confirm the
+    // rotation rewrote it with new bytes.
     let pre_rotation_pub = std::fs::read(&pub_path).expect("read pub after first keygen");
 
     // Plant a paired private the user might still have on disk. The

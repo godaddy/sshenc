@@ -177,7 +177,23 @@ fn maybe_print_config_hint() {
          commands also use sshenc for SSH and commit signing. \
          Pass `--label NAME` to bind a specific identity."
     );
-    drop(touch_sentinel(&sentinel));
+    // The sentinel write debounces this nudge for HINT_REPRINT_AFTER.
+    // If it fails (read-only XDG dir, ENOSPC, etc.) the user will see
+    // the tip on every successful `gitenc` run instead of once a week,
+    // which is annoying but not broken. Surface the failure under
+    // `GITENC_DEBUG=1` so a power user diagnosing the noise can see
+    // why; stay silent in the default case.
+    if let Err(e) = touch_sentinel(&sentinel) {
+        if std::env::var_os("GITENC_DEBUG").is_some() {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "gitenc: debug: failed to write hint sentinel at {}: {e}",
+                    sentinel.display()
+                );
+            }
+        }
+    }
 }
 
 /// Find the toplevel of the current git working tree, or `None` if

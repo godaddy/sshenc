@@ -3342,7 +3342,7 @@ HKEY_CURRENT_USER\Environment
 
         let keys_dir_for_rename = keys_dir.clone();
         let rename_on_disk = move |old: &str, new: &str| -> Result<()> {
-            enclaveapp_core::metadata::rename_key_files(&keys_dir_for_rename, old, new)
+            enclaveapp_core::metadata::rename_key_files(&keys_dir_for_rename, old, new, None)
                 .map_err(|e| anyhow!("metadata rename: {e}"))
         };
         let error = promote_to_default_with_dirs(
@@ -3385,7 +3385,7 @@ HKEY_CURRENT_USER\Environment
 
         let keys_dir_for_rename = keys_dir.clone();
         let rename_on_disk = move |old: &str, new: &str| -> Result<()> {
-            enclaveapp_core::metadata::rename_key_files(&keys_dir_for_rename, old, new)
+            enclaveapp_core::metadata::rename_key_files(&keys_dir_for_rename, old, new, None)
                 .map_err(|e| anyhow!("metadata rename: {e}"))
         };
         let error = promote_to_default_with_dirs(

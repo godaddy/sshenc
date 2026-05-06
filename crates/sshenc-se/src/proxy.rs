@@ -593,17 +593,30 @@ fn ssh_sig_to_der(ssh_sig: &[u8]) -> Result<Vec<u8>> {
     let (s, _) = sshenc_core::pubkey::read_ssh_string(rest)?;
 
     let mut der_inner = Vec::new();
-    write_der_integer(&mut der_inner, r);
-    write_der_integer(&mut der_inner, s);
+    write_der_integer(&mut der_inner, r)?;
+    write_der_integer(&mut der_inner, s)?;
 
+    // P-256 (and any curve we'd ever pair with this code path) produces
+    // r/s ≤ 33 bytes each, so der_inner ≤ 70 bytes and DER short-form
+    // length encoding (single byte, 0..=127) suffices. If a future
+    // change ever feeds this routine a larger curve, fail loudly
+    // instead of silently truncating via `as u8`.
+    if der_inner.len() >= 0x80 {
+        return Err(Error::Other(format!(
+            "ssh_sig_to_der: DER inner length {} requires long-form encoding (>= 128); \
+             this routine only emits short-form lengths suitable for ECDSA over P-256",
+            der_inner.len()
+        )));
+    }
     let mut der = Vec::with_capacity(2 + der_inner.len());
     der.push(0x30); // SEQUENCE
+    #[allow(clippy::cast_possible_truncation)] // bounded < 0x80 above
     der.push(der_inner.len() as u8);
     der.extend_from_slice(&der_inner);
     Ok(der)
 }
 
-fn write_der_integer(buf: &mut Vec<u8>, bytes: &[u8]) {
+fn write_der_integer(buf: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
     // Strip redundant leading zeros unless needed to disambiguate
     // sign (high bit of first remaining byte set).
     let mut i = 0;
@@ -613,12 +626,20 @@ fn write_der_integer(buf: &mut Vec<u8>, bytes: &[u8]) {
     let trimmed = &bytes[i..];
     let needs_leading_zero = trimmed.first().is_some_and(|b| b & 0x80 != 0);
     let content_len = trimmed.len() + usize::from(needs_leading_zero);
+    if content_len >= 0x80 {
+        return Err(Error::Other(format!(
+            "write_der_integer: INTEGER content length {content_len} requires DER long-form \
+             encoding (>= 128); this routine only emits short-form lengths"
+        )));
+    }
     buf.push(0x02); // INTEGER
+    #[allow(clippy::cast_possible_truncation)] // bounded < 0x80 above
     buf.push(content_len as u8);
     if needs_leading_zero {
         buf.push(0x00);
     }
     buf.extend_from_slice(trimmed);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -649,6 +670,21 @@ mod tests {
         let ssh_sig = der_to_ssh_signature(&der_original).unwrap();
         let der_round = ssh_sig_to_der(&ssh_sig).unwrap();
         assert_eq!(der_round, der_original);
+    }
+
+    #[test]
+    fn write_der_integer_rejects_oversized_content() {
+        // Synthetic input far larger than any real P-256 r/s. The
+        // routine must surface an explicit error rather than silently
+        // truncating via `as u8` and producing malformed DER.
+        let mut buf = Vec::new();
+        let big = vec![0x42_u8; 200];
+        let err = write_der_integer(&mut buf, &big).unwrap_err();
+        assert!(
+            err.to_string().contains("long-form"),
+            "expected long-form rejection, got: {err}"
+        );
+        assert!(buf.is_empty());
     }
 
     #[test]

@@ -71,22 +71,103 @@ during export, substituting their own public key.
 
 ## Threat: Agent Socket Abuse
 
-**Scenario**: Another local user or process connects to the agent's Unix socket
-to make unauthorized signing requests.
+**Scenario**: Another local user or process connects to the agent's
+local IPC endpoint (Unix socket or Windows named pipe) to make
+unauthorized signing requests.
 
-**Mitigations**:
+The defenses differ by platform — they are listed separately below
+because the threat model previously misrepresented them as uniform.
+On Unix the agent runs three checks per connection (peer UID, rate
+limit, peer-binary heuristic); on Windows the named pipe relies on
+its DACL and the AF_UNIX compatibility socket relies on NTFS
+directory ownership. The Windows code paths do **not** currently
+run a peer-SID check, the rate limiter, or the binary heuristic.
+
+**Mitigations (Unix — macOS, Linux, WSLv2)**:
 - The socket is created with mode 0600 (owner-only read/write).
-- The socket's parent directory is enforced to mode 0700 (`sshenc-agent/src/server.rs` `prepare_socket_path`).
-- Each accepted connection is verified against the peer UID via `SO_PEERCRED` / `getpeereid`; connections from other UIDs are rejected.
-- A per-connection rate limiter (`server.rs`) throttles signing-request floods.
-- The peer process binary is checked against an allowlist of trusted `sshenc` install paths (`server.rs`), limiting which local binaries can drive the agent.
-- The agent supports an allowlist (`allowed_labels`) to limit which keys are exposed through the socket.
-- `Config::default()` and the agent fall back to `$TMPDIR/sshenc` when `$HOME` is unset. This is a narrower fallback than the historical `/tmp` — the subdirectory is created at 0700 — but `$TMPDIR` / `/tmp` on shared systems is still a less isolated location than the home directory.
+- The socket's parent directory is enforced to mode 0700
+  (`sshenc-agent/src/server.rs` `prepare_socket_path`).
+- Each accepted connection is verified against the peer UID via
+  `SO_PEERCRED` / `getpeereid`; connections from other UIDs are
+  rejected (`verify_peer_uid` in `server.rs`).
+- A per-connection rate limiter (`RateLimiter::check` in `server.rs`)
+  throttles signing-request floods on the Unix path.
+- A best-effort peer-binary check (`verify_peer_binary`) attempts to
+  log the peer's exe path and basename. **This is not a trust
+  boundary**; see "Peer-binary heuristic" below.
+- The agent supports an allowlist (`allowed_labels`) to limit which
+  keys are exposed through the socket.
+- `Config::default()` and the agent fall back to `$TMPDIR/sshenc`
+  when `$HOME` is unset. This is a narrower fallback than the
+  historical `/tmp` — the subdirectory is created at 0700 — but
+  `$TMPDIR` / `/tmp` on shared systems is still a less isolated
+  location than the home directory.
+
+**Mitigations (Windows native — named pipe + AF_UNIX bridge)**:
+- The primary endpoint is the named pipe
+  (`\\.\pipe\openssh-ssh-agent`). Its DACL is built explicitly via
+  `ConvertStringSecurityDescriptorToSecurityDescriptorW`
+  (`PipeSecurityAttributes::restricted` in `server.rs`) to grant
+  full control only to the **creator-owner** (the current user) and
+  `SYSTEM`, cutting off `Administrators` and `Everyone` who would
+  otherwise have default read/write access.
+- `ServerOptions::first_pipe_instance(true)` is set on initial
+  pipe creation so an attacker process that races for the well-known
+  pipe name causes a clear error rather than a silent hijack.
+- A secondary AF_UNIX socket (`~/.sshenc/agent.sock`) is exposed
+  for Git Bash / MINGW SSH compatibility. It relies on the parent
+  directory's NTFS ACL (the user's profile directory is
+  user-owned), so same-UID is the trust boundary by file-system
+  ownership.
+- The agent supports the `allowed_labels` allowlist on Windows too.
+- The Windows accept loop does **not** run a peer-SID check, the
+  per-connection rate limiter, or the peer-binary heuristic.
+  Tightening this would use `GetNamedPipeClientProcessId` →
+  `OpenProcessToken` to compare SIDs; tracked in DEEP_REVIEW B3.
+
+**Peer-binary heuristic (Unix only)**:
+
+`verify_peer_binary` resolves the peer's exe via
+`SO_PEERCRED → /proc/<pid>/exe` (Linux) or `LIBPROC_PIDPATHINFO_MAXSIZE`
+(macOS), then matches the basename against this allowlist:
+
+```
+ssh, ssh-add, ssh-agent, ssh-keygen, ssh-keyscan, scp, sftp,
+rsync, git, git-remote-ssh, sshenc, sshenc-agent, gitenc,
+code (VS Code remote SSH), cursor (Cursor editor)
+```
+
+This is a best-effort heuristic, not a trust boundary:
+1. Resolution failures (kernel thread, EPERM on `/proc`,
+   PID-recycled race) are treated as **allow**.
+2. The match is by basename, not canonicalized install path. A
+   same-UID attacker who renames their binary to any allowlisted
+   name (`ssh`, `git`, etc.) passes.
+3. The list deliberately includes generic tools (`git`, `code`,
+   `cursor`) so legitimate workflows are not broken; that
+   permissiveness is the point.
+
+Treat `verify_peer_binary` as a tripwire (it logs the unexpected
+basename) and as friction against casual misuse — not as a defense
+against motivated same-UID malware. The hardware user-presence
+gate (Touch ID / Windows Hello) is the actual defense for that
+case.
 
 **Residual risk**:
-- Root can bypass socket permissions.
-- A same-UID attacker process can pass all UID / allowlist / rate-limit checks and drive the agent normally. Hardware user-presence (Touch ID / Windows Hello) is the only defense against this case.
-- If `$HOME` is unset and `$TMPDIR` is shared with other users, the parent-dir-0700 hardening holds only while nothing else in `$TMPDIR` is adversarial.
+- Root can bypass socket permissions on Unix; admin can recreate
+  the named pipe on Windows.
+- A same-UID attacker process passes UID/allowlist/rate-limit
+  checks (Unix) or DACL/NTFS ownership (Windows) and drives the
+  agent normally. Hardware user-presence (Touch ID / Windows
+  Hello) is the only defense against this case.
+- If `$HOME` is unset and `$TMPDIR` is shared with other users on
+  Unix, the parent-dir-0700 hardening holds only while nothing
+  else in `$TMPDIR` is adversarial.
+- Windows: with no peer-SID enforcement in the accept loop, the
+  named pipe's DACL is the only thing keeping cross-user
+  connections out. That DACL is correctly restrictive, but the
+  defense in depth that the Unix path has (UID + DACL + rate
+  limiter + binary heuristic) is reduced to one layer on Windows.
 
 ## Threat: Malicious Local Processes
 
@@ -353,13 +434,23 @@ fields.
   the hardware's enforcement — Touch ID / Windows Hello still fires on
   sign regardless of what the metadata file claims.
 - Metadata files are written 0600 via `atomic_write`.
-- On the Linux keyring / software backend, `.meta` now has an HMAC
+- On the Linux keyring / software backend, `.meta` has an HMAC
   sidecar `<label>.meta.hmac` generated at key-creation time. The
   HMAC key is a random per-app 32-byte value stored in the system
-  keyring (`enclaveapp-keyring::meta_hmac_key`). `enclaveapp-app-storage`
-  verifies the sidecar on load and rejects HMAC-mismatched reads with
-  a hard error (`meta_hmac_verify`). An attacker who rewrites `.meta`
-  without also having keyring access is caught.
+  keyring (`enclaveapp-keyring::meta_hmac_key`). At load time
+  `enclaveapp-app-storage` invokes `metadata::load_meta_with_hmac`
+  in `MetaIntegrityMode::RequireSidecar`:
+  - **HMAC mismatch** → hard error `meta_hmac_verify`.
+  - **Sidecar missing** → hard error `meta_hmac_missing`.
+  An attacker without keyring access cannot defeat the check by
+  deleting the sidecar, because a missing sidecar is now a hard
+  error rather than a silent legacy-fallback.
+- One-shot upgrade path: when `ensure_key` sees a `meta_hmac_missing`
+  on first load after upgrading from a pre-strict-mode build, it
+  logs a `warn`, calls `migrate_meta_to_hmac` to write a fresh
+  sidecar from the current meta, and continues. This blesses
+  whatever meta is on disk at the migration moment — see residual
+  risk below.
 
 **Residual risk**:
 - UI and library-level policy checks (`sshenc list`, `sshenc inspect`,
@@ -372,6 +463,16 @@ fields.
   keyring access can still rewrite both `.meta` and the sidecar. This
   is the same threshold as decrypting the key material itself, so no
   net loss of protection.
+- **Migration window.** On the first load after upgrading to a
+  build that enforces strict mode, `ensure_key` automatically
+  migrates a missing sidecar by computing a fresh HMAC over the
+  current `.meta`. If a same-UID attacker tampered with `.meta`
+  between the upgrade and the first sshenc operation, the
+  migration step blesses the tampered content. There is no way to
+  distinguish a legitimate legacy meta from a tampered legacy meta
+  at migration time — the warning log is the only signal. Users
+  who suspect tampering should regenerate the affected keys after
+  upgrading.
 - The migration from the legacy `biometric: bool` field to `AccessPolicy`
   is handled by compatibility code; a missing `access_policy` field is
   treated per the legacy bool. A same-UID attacker who strips the new
@@ -507,6 +608,50 @@ requests.
   malware can replace it. This is a subset of the generic "malware-as-
   user" threat but worth naming because SSH loads the PKCS#11 provider
   implicitly on every session.
+
+## Threat: WSL Bridge Response Inflation
+
+**Scenario**: The WSL → Windows bridge protocol passes JSON-RPC
+requests/responses over a child process's stdin/stdout. If the
+Windows-side bridge (`sshenc-tpm-bridge.exe`) is replaced or
+compromised it can return arbitrarily large response lines,
+forcing the WSL client to allocate memory until the process is
+OOM-killed. There is no authentication on the bridge wire — the
+client trusts whatever it spawned.
+
+**Mitigations**:
+- The bridge binary is discovered via fixed admin-path locations
+  (`/mnt/c/Program Files/<app>/...`,
+  `/mnt/c/ProgramData/<app>/...`) or an explicit
+  `ENCLAVEAPP_BRIDGE_PATH` env override. PATH-based lookup was
+  removed: a user-writable `$PATH` entry on the WSL side could
+  substitute a malicious bridge.
+- Per-line read uses
+  `LineReaderWithTimeout::with_max_line_bytes(stdout, MAX_BRIDGE_RESPONSE_BYTES)`
+  (`enclaveapp-bridge::client`). Lines exceeding the
+  64 KB cap are aborted with `io::ErrorKind::InvalidData` *during*
+  the read, so the worst-case allocation is bounded at 64 KB
+  rather than at the bridge's discretion. The bridge child is
+  killed and the session ends; subsequent ops will respawn.
+- Per-request timeout
+  (`ENCLAVEAPP_BRIDGE_TIMEOUT_SECS`, default 120 s) catches the
+  trickle case where a malicious peer holds the connection open
+  without sending the newline.
+- `BUILD_REQUIRES_SIGNED` (compile-time flag) refuses to spawn an
+  unsigned bridge binary when set; default is **off** because the
+  current release pipeline does not sign bridges.
+
+**Residual risk**:
+- An attacker who replaces the bridge binary at one of the fixed
+  install paths can return arbitrary signed content within the
+  64 KB cap — DoS is bounded but signing semantics are not. This
+  is the same trust relationship as any platform-FFI consumer
+  with a binary planted in the install path; signed bridges
+  (`BUILD_REQUIRES_SIGNED`) close it.
+- The bridge spawn is a child process inheriting WSL's
+  environment; an attacker controlling environment variables in
+  the WSL shell can influence which bridge is found via
+  `ENCLAVEAPP_BRIDGE_PATH`.
 
 ## Threat: Ready-File Symlink in `$TMPDIR`
 

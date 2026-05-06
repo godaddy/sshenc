@@ -35,7 +35,7 @@ use enclaveapp_core::types::validate_label;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -464,7 +464,8 @@ fn configure_repo_entries(
     if let Some(email) = metadata.and_then(|m| m.git_email.as_deref()) {
         if let Ok(pubkey) = std::fs::read_to_string(&signing_key) {
             let entry = format!("{email} {}", pubkey.trim());
-            update_allowed_signers(&allowed_signers_path, email, &entry);
+            update_allowed_signers(&allowed_signers_path, email, &entry)
+                .map_err(|e| format!("failed to update {}: {e}", allowed_signers_path.display()))?;
         }
     }
     configs.push((
@@ -476,22 +477,80 @@ fn configure_repo_entries(
 }
 
 /// Add or update an entry in the allowed signers file.
+///
 /// Replaces any existing entry whose principals list names this email
 /// exactly. Lines whose first field `starts_with(email)` but is not an
 /// exact principal match (e.g. `alice@x.com.attacker ssh-ed25519 …`)
 /// are preserved, which is the safe behavior for an authentication
 /// trust file.
-fn update_allowed_signers(path: &Path, email: &str, entry: &str) {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+///
+/// The write itself is atomic: the new content goes to a sibling
+/// `.tmp.<pid>.<nanos>` file with `O_CREAT|O_EXCL`, and a `rename(2)`
+/// replaces the original. A crash mid-write leaves the original
+/// allowed_signers intact rather than a half-truncated file (which
+/// is what `std::fs::write` would produce). Concurrent
+/// `gitenc --config` invocations still race the read-modify-write
+/// pattern — the loser's update is lost — but neither ever observes
+/// a torn file.
+///
+/// I/O errors are propagated. The previous version dropped them
+/// silently, which made permission/space failures invisible to the
+/// user even though `git -Y verify` later fails confusingly.
+fn update_allowed_signers(path: &Path, email: &str, entry: &str) -> std::io::Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
     let mut lines: Vec<&str> = existing
         .lines()
         .filter(|line| !line_principals_contain(line, email))
         .collect();
     lines.push(entry);
     if let Some(parent) = path.parent() {
-        drop(std::fs::create_dir_all(parent));
+        std::fs::create_dir_all(parent)?;
     }
-    drop(std::fs::write(path, lines.join("\n") + "\n"));
+    write_atomic(path, (lines.join("\n") + "\n").as_bytes())
+}
+
+/// Best-effort atomic write: write to `<path>.<pid>.<nanos>.tmp`
+/// with `create_new`, fsync, then rename into place. The temp name
+/// includes pid + nanos so a parallel writer in the same directory
+/// cannot collide on the temp filename. This intentionally
+/// duplicates `enclaveapp_core::metadata::atomic_write` rather than
+/// taking a dependency on it, since gitenc otherwise has no need
+/// for that crate.
+fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "write_atomic: path has no parent",
+        )
+    })?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = parent.join(format!(
+        ".{}.{}.{nanos}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("allowed_signers"),
+        std::process::id(),
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        drop(std::fs::remove_file(&tmp));
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Return true if the first whitespace-separated field on the line (the
@@ -521,7 +580,6 @@ fn exit_arg_error(err: &str) -> ! {
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use std::time::UNIX_EPOCH;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_string()).collect()
@@ -934,7 +992,8 @@ mod tests {
             &path,
             "alice@example.com",
             "alice@example.com ssh-ed25519 AAAA-new-key",
-        );
+        )
+        .unwrap();
 
         let result = std::fs::read_to_string(&path).unwrap();
         // Old alice exact-match line is gone.
@@ -951,6 +1010,68 @@ mod tests {
         // New entry is appended.
         assert!(result.contains("AAAA-new-key"));
 
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn update_allowed_signers_creates_missing_parent_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-allowed-signers-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Note: parent is intentionally NOT created.
+        let path = dir.join("allowed_signers");
+        assert!(!dir.exists());
+
+        update_allowed_signers(
+            &path,
+            "alice@example.com",
+            "alice@example.com ssh-ed25519 AAAA-new-key",
+        )
+        .unwrap();
+
+        assert!(dir.exists());
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("AAAA-new-key"));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn update_allowed_signers_propagates_write_failure() {
+        // Point the path inside a non-existent parent that is also
+        // unwritable as a parent (the leaf parent path component is
+        // a regular file, so create_dir_all will fail). This exercises
+        // the error-propagation contract — the previous version would
+        // have dropped this silently.
+        let dir = std::env::temp_dir().join(format!(
+            "gitenc-allowed-signers-fail-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocking_file = dir.join("blocker");
+        std::fs::write(&blocking_file, b"not a directory").unwrap();
+        let path = blocking_file.join("allowed_signers");
+
+        let err = update_allowed_signers(
+            &path,
+            "alice@example.com",
+            "alice@example.com ssh-ed25519 AAAA-new-key",
+        )
+        .unwrap_err();
+        // The exact error kind is OS-dependent (NotADirectory on some
+        // systems, NotFound on others); we just want any non-Ok
+        // outcome — silent success would mean the bug we're guarding
+        // against is back.
+        drop(err);
         drop(std::fs::remove_dir_all(&dir));
     }
 

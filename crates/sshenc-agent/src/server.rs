@@ -1315,7 +1315,7 @@ fn perform_migrate_meta(dir: &Path, label: &str) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn perform_migrate_meta(_dir: &std::path::Path, _label: &str) -> Result<(), String> {
+fn perform_migrate_meta(_dir: &Path, _label: &str) -> Result<(), String> {
     // Platform doesn't yet have the keychain-tag trust anchor;
     // migrate-meta is a no-op there until that work lands.
     Ok(())

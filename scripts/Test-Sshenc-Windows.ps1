@@ -67,7 +67,22 @@ param(
 
     # Override the directory containing the sshenc binaries. Defaults
     # to PATH lookup. CI sets this to the cargo build target dir.
-    [string]$SshencBinDir = ""
+    [string]$SshencBinDir = "",
+
+    # Skip the WSL distro lifecycle tests. Useful in CI (no WSL
+    # available) and locally when iterating on Windows-side fixes.
+    [switch]$SkipWSL,
+
+    # Distros to exercise via the WSL bridge -> Windows TPM path. Each
+    # gets its own clean WSL VM start (`wsl --shutdown` + WSLInterop
+    # probe). Reset to a smaller list for faster iteration, or to a
+    # different set for CI parity.
+    [string[]]$Distros = @("Ubuntu", "Debian", "FedoraLinux-43", "AlmaLinux-9"),
+
+    # Per-distro timeout (seconds) for the WSL bash matrix script.
+    # Hot machines complete in ~30s; cold WSL VM + cold Windows TPM
+    # bridge can take 90+. 180s is a comfortable upper bound.
+    [int]$WslTimeout = 180
 )
 
 $ErrorActionPreference = "Continue"
@@ -161,6 +176,14 @@ function Get-BackendMode {
         }
     }
 
+    # Hello enrollment detection. Several signals exist; we OR them
+    # because each is partial. The %LOCALAPPDATA%\Microsoft\Ngc
+    # directory is system-protected on locked-down hosts (returns
+    # "exists=False" even when Hello is enrolled), so we also check
+    # `dsregcmd /status` (NgcSet line, present when the user has
+    # gestured Hello into existence) and the per-user PassportForWork
+    # registry entries that Windows writes during enrollment. Any
+    # positive signal -> "tpm-hello".
     $helloEnrolled = $false
     try {
         $ngcPath = Join-Path $env:LOCALAPPDATA "Microsoft\Ngc"
@@ -169,6 +192,22 @@ function Get-BackendMode {
             if ($entries -and $entries.Count -gt 0) { $helloEnrolled = $true }
         }
     } catch { $helloEnrolled = $false }
+    if (-not $helloEnrolled) {
+        try {
+            $dsr = & dsregcmd /status 2>&1 | Out-String
+            if ($dsr -match 'NgcSet\s*:\s*YES') { $helloEnrolled = $true }
+        } catch { }
+    }
+    if (-not $helloEnrolled) {
+        # PassportForWork tenant subkeys appear once a user has
+        # enrolled Hello against AAD; if any tenant subkey exists the
+        # signal is good even when other heuristics fail.
+        $pfw = 'HKCU:\SOFTWARE\Microsoft\PassportForWork'
+        if (Test-Path $pfw) {
+            $tenants = Get-ChildItem $pfw -ErrorAction SilentlyContinue
+            if ($tenants -and $tenants.Count -gt 0) { $helloEnrolled = $true }
+        }
+    }
 
     if ($tpmPresent -and $helloEnrolled) { return "tpm-hello" }
     if ($tpmPresent) { return "tpm" }
@@ -304,6 +343,183 @@ function Ensure-SharedKeys {
 }
 
 # ---------------------------------------------------------------------
+# WSL helpers: convert paths, mirror Windows-side keys to each distro,
+# probe WSLInterop, and reset WSL state with a 3-tier auto-heal that
+# only escalates to terminating Docker Desktop's helper distro when
+# the gentler retries fail. See the long comment blocks on
+# Initialize-WslDistroForTest for the rationale.
+# ---------------------------------------------------------------------
+function ConvertTo-WslPath {
+    param([string]$WinPath)
+    $resolved = (Resolve-Path $WinPath).Path
+    $drive    = $resolved.Substring(0,1).ToLower()
+    return "/mnt/$drive" + ($resolved.Substring(2) -replace '\\', '/')
+}
+
+# Mirror the Windows-side shared keys into each WSL distro. The TPM /
+# webauthn credential lives on Windows; the metadata + .pub files
+# live per-user on each platform, so WSL has no record of a key
+# created on the Windows side. This function copies:
+#   `%APPDATA%\sshenc\keys\<label>.meta` -> `/root/.sshenc/keys/<label>.meta`
+#   `%USERPROFILE%\.ssh\<label>.pub`     -> `/root/.ssh/<label>.pub`
+# and rewrites the `pub_file_path` in the .meta to the WSL path so
+# `sshenc inspect` / `export-pub` / sign all resolve cleanly.
+# Also mirrors the SEC1 raw-bytes cache (`<label>.pub` in keys_dir)
+# for non-SK keys -- SK keys carry their pubkey embedded in the .meta
+# and never write a SEC1 cache, so that copy is conditional.
+function Sync-SharedKeysToWsl {
+    param([string[]]$Labels, [string[]]$Distros)
+    $appdata = "$env:APPDATA\sshenc\keys"
+    $sshDir  = "$env:USERPROFILE\.ssh"
+    foreach ($lbl in $Labels) {
+        $metaPath = Join-Path $appdata "$lbl.meta"
+        $pubPath  = Join-Path $sshDir  "$lbl.pub"
+        if (-not (Test-Path $metaPath)) {
+            Write-Host "  [WARN] no Windows metadata for shared key $($lbl): $metaPath" -ForegroundColor Yellow
+            continue
+        }
+        if (-not (Test-Path $pubPath)) {
+            Write-Host "  [WARN] no Windows .pub for shared key $($lbl): $pubPath" -ForegroundColor Yellow
+            continue
+        }
+        $metaJson  = Get-Content $metaPath -Raw
+        $wslPub    = "/root/.ssh/$lbl.pub"
+        $rewritten = $metaJson -replace '("pub_file_path"\s*:\s*")[^"]*(")', "`$1$wslPub`$2"
+        $stagedMeta = "$env:TEMP\sshenc-sync-$lbl-$PID.meta"
+        [System.IO.File]::WriteAllBytes(
+            $stagedMeta,
+            [System.Text.UTF8Encoding]::new($false).GetBytes($rewritten)
+        )
+        $metaWslSrc = ConvertTo-WslPath $stagedMeta
+        $pubWslSrc  = ConvertTo-WslPath $pubPath
+        $sec1Path = Join-Path $appdata "$lbl.pub"
+        $sec1Cmds = @()
+        if (Test-Path $sec1Path) {
+            $sec1WslSrc = ConvertTo-WslPath $sec1Path
+            $sec1Cmds = @(
+                "cp '$sec1WslSrc' /root/.sshenc/keys/$lbl.pub",
+                "chmod 0644 /root/.sshenc/keys/$lbl.pub"
+            )
+        }
+        $cmdLines = @(
+            "set -e",
+            "mkdir -p /root/.sshenc/keys /root/.ssh",
+            "cp '$metaWslSrc' /root/.sshenc/keys/$lbl.meta",
+            "cp '$pubWslSrc' /root/.ssh/$lbl.pub",
+            "chmod 0600 /root/.sshenc/keys/$lbl.meta",
+            "chmod 0644 /root/.ssh/$lbl.pub"
+        ) + $sec1Cmds
+        $cmdText  = ($cmdLines -join "`n") + "`n"
+        $stagedSh = "$env:TEMP\sshenc-sync-$lbl-$PID.sh"
+        [System.IO.File]::WriteAllBytes(
+            $stagedSh,
+            [System.Text.UTF8Encoding]::new($false).GetBytes($cmdText)
+        )
+        $shWslPath = ConvertTo-WslPath $stagedSh
+        foreach ($d in $Distros) {
+            $syncOut = & wsl -d $d -- bash $shWslPath 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0 -or $syncOut.Trim()) {
+                Write-Host "  [DEBUG] sync $lbl -> $($d): exit=$LASTEXITCODE out=$($syncOut.Trim())" -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
+# Probe WSLInterop in the named distro by trying to exec `whoami.exe`
+# with a 5-second timeout. Returns $true if the probe succeeds and
+# whoami exits 0; $false on ENOEXEC, binfmt corruption, hang, or
+# timeout (any of which indicate the binfmt_misc handler that lets
+# Linux exec a Windows .exe is not correctly registered for this
+# distro). Docker Desktop's `docker-desktop` helper distro hooks into
+# the WSL2 VM boot path and can race the WSLInterop registration of
+# a freshly-cold-booted test distro (AlmaLinux is observed to be the
+# most fragile). When that happens, sshenc-agent's bridge_spawn
+# returns ENOEXEC and the agent never starts.
+function Test-WslInteropWorking {
+    param([string]$Distro)
+    $probe = @'
+timeout 5 /mnt/c/Windows/System32/whoami.exe >/dev/null 2>&1
+echo "exit=$?"
+'@
+    $probePath = "$env:TEMP\sshenc-wslinterop-probe-$PID.sh"
+    [System.IO.File]::WriteAllBytes(
+        $probePath,
+        [System.Text.UTF8Encoding]::new($false).GetBytes($probe)
+    )
+    $wslProbe = ConvertTo-WslPath $probePath
+    $out = (& wsl.exe -d $Distro -- bash $wslProbe 2>&1 | Out-String)
+    Remove-Item $probePath -ErrorAction SilentlyContinue
+    return ($out -match 'exit=0\b')
+}
+
+# Reset WSL state in front of the next test distro. Three escalating
+# tiers, each gated on the previous one having failed -- so the
+# common case is silent (tier 1 always works on a healthy host), and
+# the destructive option only fires when we're actually stuck:
+#   Tier 1: `wsl --shutdown` + 2.5s settle + probe.
+#   Tier 2: another `wsl --shutdown` + 5s settle + probe.
+#   Tier 3: `wsl --terminate docker-desktop` + `wsl --shutdown` + 4s.
+# Returns $true if the distro is ready, $false if WSLInterop is still
+# broken after tier 3. Caller logs and proceeds; the actual test will
+# fail loudly if the probe was right.
+function Initialize-WslDistroForTest {
+    param([string]$Distro)
+    & wsl.exe --shutdown 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 2500
+    if (Test-WslInteropWorking -Distro $Distro) { return $true }
+
+    Write-Host "  [WARN] $Distro WSLInterop probe failed; retrying with longer settle" -ForegroundColor Yellow
+    & wsl.exe --shutdown 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 5000
+    if (Test-WslInteropWorking -Distro $Distro) { return $true }
+
+    Write-Host "  [WARN] $Distro WSLInterop still broken after retry; escalating to" -ForegroundColor Red
+    Write-Host "         'wsl --terminate docker-desktop'. This will stop any running" -ForegroundColor Red
+    Write-Host "         Docker containers; restart Docker Desktop after the matrix" -ForegroundColor Red
+    Write-Host "         finishes if you need them back." -ForegroundColor Red
+    & wsl.exe --terminate docker-desktop 2>&1 | Out-Null
+    & wsl.exe --shutdown 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 4000
+    if (Test-WslInteropWorking -Distro $Distro) { return $true }
+
+    Write-Host "  [WARN] $Distro WSLInterop still broken after terminate+shutdown." -ForegroundColor Red
+    return $false
+}
+
+# Locate Docker Desktop CLI even when it isn't on PATH. Returns the
+# string "docker" if the binary is reachable or $null on any failure
+# (no install, no docker-engine running, wedged 500-error engine).
+function Resolve-DockerOrSkip {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        $dockerExe = "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe"
+        if (Test-Path $dockerExe) {
+            $env:Path = "$env:Path;$([System.IO.Path]::GetDirectoryName($dockerExe))"
+        } else {
+            return $null
+        }
+    }
+    $null = docker ps 2>&1
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return "docker"
+}
+
+# Build the e2e Docker image if it isn't already present. The
+# Dockerfile context is sshenc/crates/sshenc-e2e/docker, resolved
+# relative to this script (not cwd) so the matrix can be launched
+# from anywhere. Returns $null on success or a skip-reason string.
+function Ensure-E2eDockerImage {
+    param([string]$Image)
+    $imageExists = (docker images -q $Image 2>$null | Measure-Object -Line).Lines -gt 0
+    if ($imageExists) { return $null }
+    $dockerCtx = Join-Path $PSScriptRoot "..\crates\sshenc-e2e\docker"
+    $dockerCtx = [System.IO.Path]::GetFullPath($dockerCtx)
+    if (-not (Test-Path $dockerCtx)) { return "e2e Dockerfile not found at $dockerCtx" }
+    docker build -t $Image $dockerCtx 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { return "image build failed" }
+    return $null
+}
+
+# ---------------------------------------------------------------------
 # Banner: backend selection + pre-flight key cleanup
 # ---------------------------------------------------------------------
 Banner "sshenc Windows test matrix ($BackendMode mode)"
@@ -328,6 +544,16 @@ foreach ($k in $SharedKeys) {
     if (-not (Test-SshencKeyExists -Label $k)) {
         Record "F" "shared key available: $k" "could not be created or read"
     }
+}
+
+# Mirror Windows-side keys into each WSL distro so the WSL-bridge
+# section can `sshenc inspect` / sign against them. The TPM credential
+# itself stays on Windows; we just copy the metadata + .pub so each
+# distro's sshenc CLI can talk about the same key. No-op if -SkipWSL
+# or no `wsl.exe` on PATH.
+if (-not $SkipWSL -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+    Sync-SharedKeysToWsl -Labels $SharedKeys -Distros $Distros
+    Write-Host "  [INFO] Mirrored shared keys to $($Distros.Count) WSL distros" -ForegroundColor DarkGray
 }
 
 # ---------------------------------------------------------------------
@@ -556,24 +782,431 @@ foreach ($line in $cmdResults) {
 }
 
 # ---------------------------------------------------------------------
-# SK / WebAuthn coverage. Hard requirement on TPM + Hello + Docker.
-# Skipped silently elsewhere (this is the cleanest / smallest surface
-# area we can verify without a Hello gesture, so leave the rest of
-# the matrix to the developer's local run).
+# Agent + SSH + gitenc signing against a throwaway OpenSSH+git Docker
+# container. Exercises the full named-pipe -> ssh -> remote-host path
+# end-to-end without depending on a GitHub-registered key being
+# present in the agent. Uses the SILENT shared key for git signing
+# regardless of the matrix's policy mode -- `sshenc -Y sign` (the
+# program gitenc wires up as gpg.ssh.program) doesn't yet support
+# sk-ecdsa keys, and the silent key is regular ECDSA-P256 either way.
+# Skipped if Docker isn't available; reports the exact reason.
+# ---------------------------------------------------------------------
+Banner "Agent + git over SSH (container)"
+$dockerCmd = Resolve-DockerOrSkip
+$extSkipReason = $null
+if (-not $dockerCmd) { $extSkipReason = "docker not reachable" }
+
+# Sign with whichever key the current matrix mode uses -- regular
+# ECDSA under no -Strict, sk-ecdsa under -Strict. `sshenc -Y sign`
+# is agent-routed and the agent dispatches to webauthn.dll for SK
+# (so SK signing fires one Hello gesture per signed commit, same as
+# any other SK use). No band-aid silent-key fallback any more.
+$signKey = $SharedKeyA
+$extPubPath = Join-Path $env:USERPROFILE ".ssh\$signKey.pub"
+if (-not $extSkipReason -and -not (Test-Path $extPubPath)) {
+    $extSkipReason = "shared key pub file missing: $extPubPath"
+}
+
+$extImage = "sshenc-e2e-sshd:latest"
+$extContainer = "sshenc-ext-matrix-$PID"
+$extPort = 13000 + ($PID % 1000)
+$extAuthPath = "$env:TEMP\ext-matrix-authorized_keys-$PID"
+
+if (-not $extSkipReason) {
+    $reason = Ensure-E2eDockerImage -Image $extImage
+    if ($reason) { $extSkipReason = $reason }
+}
+
+if (-not $extSkipReason) {
+    Set-Content -Path $extAuthPath -Value (Get-Content $extPubPath -Raw).TrimEnd() -Encoding ASCII -NoNewline
+    docker rm -f $extContainer 2>&1 | Out-Null
+    docker run -d --name $extContainer -p ${extPort}:22 -v "${extAuthPath}:/authorized_keys:ro" $extImage 2>&1 | Out-Null
+    Start-Sleep 2
+    $running = (docker ps --filter "name=$extContainer" --format "{{.Names}}" 2>$null) -eq $extContainer
+    if (-not $running) { $extSkipReason = "container did not stay running" }
+}
+
+if (-not $extSkipReason) {
+    docker exec --user sshtest $extContainer sh -c "cd /home/sshtest && git init --bare test-repo.git >/dev/null && git -C test-repo.git symbolic-ref HEAD refs/heads/main" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { $extSkipReason = "container repo init failed" }
+}
+
+# Make sure sshenc-agent is up so the SSH round-trip below has
+# identities. Reset-SshencKeys started it for pre-flight; in case it
+# died between then and now, restart.
+$agentName = [System.IO.Path]::GetFileNameWithoutExtension($AgentBin)
+if (-not (Get-Process -Name $agentName -ErrorAction SilentlyContinue)) {
+    Start-Process -FilePath $AgentBin -WindowStyle Hidden | Out-Null
+    Start-Sleep 2
+}
+$env:SSH_AUTH_SOCK = "\\.\pipe\openssh-ssh-agent"
+
+if ($extSkipReason) {
+    Record "S" "SSH via agent to local container" $extSkipReason
+} else {
+    $sshOut = & "$env:SystemRoot\System32\OpenSSH\ssh.exe" -p $extPort `
+        -o StrictHostKeyChecking=no `
+        -o UserKnownHostsFile=NUL `
+        -o PreferredAuthentications=publickey `
+        -o ConnectTimeout=30 `
+        sshtest@127.0.0.1 'echo AGENT_E2E_OK && hostname' 2>&1 | Out-String
+    if ($sshOut -match 'AGENT_E2E_OK') {
+        Record "P" "SSH via agent to local container"
+    } else {
+        Record "F" "SSH via agent to local container" ($sshOut.Trim() -split "`n" | Select-Object -Last 3 | Out-String).Trim()
+    }
+}
+
+if ($extSkipReason) {
+    Record "S" "git clone via SSH from local container" $extSkipReason
+} else {
+    $testDir = "$env:TEMP\gitenc-ps-test-$PID"
+    Remove-Item $testDir -Recurse -Force -ErrorAction SilentlyContinue
+    # MSYS2 sh (which git invokes for GIT_SSH_COMMAND) eats backslashes
+    # in unquoted strings (C:\W -> C:W). Forward slashes survive.
+    $sshExe = ("$env:SystemRoot\System32\OpenSSH\ssh.exe") -replace '\\','/'
+    $env:GIT_SSH_COMMAND = "$sshExe -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=publickey"
+    $cloneUrl = "ssh://sshtest@127.0.0.1:$extPort/home/sshtest/test-repo.git"
+    $cloneOut = git clone $cloneUrl $testDir 2>&1 | Out-String
+    if (Test-Path "$testDir\.git") { Record "P" "git clone via SSH from local container" } else { Record "F" "git clone via SSH from local container" $cloneOut.Trim() }
+}
+
+if (-not $extSkipReason -and (Test-Path "$testDir\.git")) {
+    Push-Location $testDir
+    git config user.email "matrix@sshenc-e2e.local" | Out-Null
+    git config user.name "sshenc matrix" | Out-Null
+    & $GitencBin --config -l $signKey 2>&1 | Out-Null
+
+    $branch = "test/ps-matrix-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    git checkout -b $branch 2>&1 | Out-Null
+    "# matrix sign probe $(Get-Date -Format o)" | Out-File -Append TESTING.md
+    git add TESTING.md 2>&1 | Out-Null
+    # commit.gpgsign is set by `gitenc --config`. The commit-output
+    # regex match is unreliable (the message itself contains "signed");
+    # check HEAD directly.
+    $commitOut = git commit -m "Test: matrix signed commit probe" 2>&1 | Out-String
+    $headSha = (git rev-parse --verify HEAD 2>&1 | Out-String).Trim()
+    $commitOk = ($headSha -match '^[0-9a-f]{40}$')
+    if ($commitOk) {
+        Record "P" "signed commit"
+    } else {
+        Record "F" "signed commit" ($commitOut.Trim() -split "`n" | Select-Object -Last 5 | Out-String).Trim()
+    }
+
+    if ($commitOk) {
+        $sigOut = git log --show-signature -1 2>&1 | Out-String
+        if ($sigOut -match "Good.*signature") { Record "P" "local signature verification" } else { Record "F" "local signature verification" $sigOut.Trim() }
+
+        $pushOut = git push origin $branch 2>&1 | Out-String
+        $remoteSha = (docker exec --user sshtest $extContainer git -C /home/sshtest/test-repo.git rev-parse "refs/heads/$branch" 2>&1 | Out-String).Trim()
+        $localSha = (git rev-parse $branch 2>&1 | Out-String).Trim()
+        if ($remoteSha -and $remoteSha -eq $localSha) {
+            Record "P" "git push to local container"
+        } else {
+            Record "F" "git push to local container" "remote=$remoteSha local=$localSha push=$($pushOut.Trim())"
+        }
+    } else {
+        Record "S" "local signature verification" "signed commit failed"
+        Record "S" "git push to local container" "signed commit failed"
+    }
+
+    Pop-Location
+    Remove-Item $testDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Tear down container + authorized_keys mount.
+if (-not $extSkipReason) {
+    docker rm -f $extContainer 2>&1 | Out-Null
+}
+Remove-Item $extAuthPath -Force -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------------
+# FIDO2 SK / WebAuthn coverage. Spins up the same e2e Docker image,
+# generates a fresh `--strong` SK key (Hello make-credential gesture),
+# authorizes its pub in the container, and ssh-es in (Hello sign
+# gesture; sshd verifies the SK signature). Two Hello prompts per
+# run. Cleans up the SK key (which removes the platform passkey
+# entry from Windows' passkey list -- avoids accumulating one
+# orphan passkey per matrix run).
 # ---------------------------------------------------------------------
 if ($StrongSk) {
     Banner "FIDO2 SK keys (Windows Hello, hardware-enforced)"
+    $skSkipReason = $null
     if ($BackendMode -ne "tpm-hello") {
-        Record "S" "SK keys -- requires TPM 2.0 + Windows Hello enrolled"
-    } elseif (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-        Record "S" "SK keys -- docker not on PATH (full SK verification needs the e2e Docker container)"
+        $skSkipReason = "requires TPM 2.0 + Windows Hello enrolled"
+    } elseif (-not (Resolve-DockerOrSkip)) {
+        $skSkipReason = "docker not reachable"
     } else {
-        # Defer to the parent enclaveapps Test-EnclaveApps.ps1 -StrongSk
-        # path -- duplicating its Docker-image build + container plumbing
-        # here is more code than the per-sshenc-repo script wants to own.
-        # If a future contributor wants to inline it, keep this comment
-        # block as a pointer.
-        Record "S" "SK keys -- run the parent enclaveapps Test-EnclaveApps.ps1 -StrongSk for full coverage"
+        $helpOut = & $SshencBin keygen --help 2>&1 | Out-String
+        if ($helpOut -notmatch '--strong') {
+            $skSkipReason = "sshenc was built without the webauthn-sk feature"
+        }
+    }
+
+    if ($skSkipReason) {
+        Record "S" "SK keys -- $skSkipReason"
+    } else {
+        $reason = Ensure-E2eDockerImage -Image $extImage
+        if ($reason) {
+            Record "S" "SK keys -- $reason"
+        } else {
+            $skLabel = "ps-sk-test-$PID"
+            $skPubPath = "$env:USERPROFILE\.ssh\$skLabel.pub"
+            $skContainer = "sshenc-sk-matrix-$PID"
+            $skPort = 12000 + ($PID % 1000)
+
+            $kgOut = & $SshencBin keygen --strong -l $skLabel 2>&1 | Out-String
+            if ($kgOut -match 'sk-ecdsa-p256') {
+                Record "P" "SK keygen --strong (Hello make prompt fired)"
+            } else {
+                Record "F" "SK keygen --strong" $kgOut.Trim()
+                $skSkipReason = "keygen-failed"
+            }
+
+            if (-not $skSkipReason -and (Test-Path $skPubPath)) {
+                $skKg = & "$env:SystemRoot\System32\OpenSSH\ssh-keygen.exe" -l -f $skPubPath 2>&1 | Out-String
+                if ($skKg -match 'ECDSA-SK') {
+                    Record "P" "ssh-keygen accepts SK pub format"
+                } else {
+                    Record "F" "ssh-keygen accepts SK pub" $skKg.Trim()
+                }
+
+                $skAuthPath = "$env:TEMP\sk-matrix-authorized_keys-$PID"
+                Set-Content -Path $skAuthPath -Value (Get-Content $skPubPath -Raw).TrimEnd() -Encoding ASCII -NoNewline
+                docker rm -f $skContainer 2>&1 | Out-Null
+                docker run -d --name $skContainer -p ${skPort}:22 -v "${skAuthPath}:/authorized_keys:ro" $extImage 2>&1 | Out-Null
+                Start-Sleep 2
+                $running = (docker ps --filter "name=$skContainer" --format "{{.Names}}" 2>$null) -eq $skContainer
+                if ($running) {
+                    Record "P" "SK e2e container running"
+                } else {
+                    Record "F" "SK e2e container start" "container did not stay running"
+                    $skSkipReason = "container-failed"
+                }
+
+                if (-not $skSkipReason) {
+                    $sshOut = & "$env:SystemRoot\System32\OpenSSH\ssh.exe" -p $skPort `
+                        -o StrictHostKeyChecking=no `
+                        -o UserKnownHostsFile=NUL `
+                        -o IdentitiesOnly=yes `
+                        -i $skPubPath `
+                        -o PreferredAuthentications=publickey `
+                        -o ConnectTimeout=120 `
+                        sshtest@127.0.0.1 'echo SK_E2E_OK && hostname' 2>&1 | Out-String
+                    if ($sshOut -match 'SK_E2E_OK') {
+                        Record "P" "SK ssh-via-container (Hello sign prompt fired, sig verified by sshd)"
+                    } else {
+                        Record "F" "SK ssh-via-container" ($sshOut.Trim() -split "`n" | Select-Object -Last 3 | Out-String).Trim()
+                    }
+                }
+
+                docker rm -f $skContainer 2>&1 | Out-Null
+                Remove-Item $skAuthPath -ErrorAction SilentlyContinue
+                $delOut = & $SshencBin delete -y --delete-pub $skLabel 2>&1 | Out-String
+                if ($delOut -match 'Deleted key') {
+                    Record "P" "SK key cleanup via sshenc delete"
+                } else {
+                    Record "F" "SK key cleanup" $delOut.Trim()
+                }
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------
+# install / uninstall: round-trip the IdentityAgent stanza in
+# ~/.ssh/config. Backs up the file first; restores on the way out.
+# ---------------------------------------------------------------------
+Banner "install / uninstall"
+$sshConfigPath = "$env:USERPROFILE\.ssh\config"
+$configBackup = Get-Content $sshConfigPath -Raw -ErrorAction SilentlyContinue
+
+& $SshencBin uninstall 2>&1 | Out-Null
+$afterUninstall = Get-Content $sshConfigPath -Raw -ErrorAction SilentlyContinue
+if (-not $afterUninstall -or $afterUninstall -notmatch "sshenc") {
+    Record "P" "sshenc uninstall removes config"
+} else {
+    Record "F" "sshenc uninstall removes config"
+}
+
+& $SshencBin install 2>&1 | Out-Null
+Start-Sleep 3
+$afterInstall = Get-Content $sshConfigPath -Raw -ErrorAction SilentlyContinue
+if ($afterInstall -match "IdentityAgent") {
+    Record "P" "sshenc install writes config"
+} else {
+    Record "F" "sshenc install writes config"
+}
+
+if ($configBackup) { Set-Content $sshConfigPath -Value $configBackup -NoNewline }
+
+# ---------------------------------------------------------------------
+# WSL distros. Mirrors the Windows-side shared keys (already done in
+# pre-flight), then runs the same lifecycle on each distro. Each
+# distro signs through the JSON-RPC bridge to the Windows TPM.
+# Under -Strict the SK key fires a Hello prompt per distro -- watch
+# for it. Skipped under -SkipWSL or when wsl.exe isn't on PATH.
+# ---------------------------------------------------------------------
+if (-not $SkipWSL -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+    $bashTests = @'
+#!/usr/bin/env bash
+# Reproduce what an interactive shell does: prefer the native
+# sshenc-agent over a stale socat+npiperelay shim; pre-warm the
+# Windows-side bridge BEFORE starting the agent so its one-shot
+# bridge_list_keys doesn't race a cold TPM and cache empty for the
+# rest of its life.
+export SSH_AUTH_SOCK="$HOME/.sshenc/agent.sock"
+mkdir -p "$HOME/.sshenc"
+__BRIDGE="/mnt/c/Users/JeremiahGowdy/scoop/apps/sshenc/current/sshenc-tpm-bridge.exe"
+if [ -x "$__BRIDGE" ]; then
+    export SSHENC_BRIDGE_PATH="$__BRIDGE"
+fi
+if command -v sshenc-agent >/dev/null 2>&1; then
+    if pgrep -f 'socat.*npiperelay' >/dev/null 2>&1; then
+        pkill -f 'socat.*npiperelay' 2>/dev/null
+        rm -f "$SSH_AUTH_SOCK"
+        sleep 1
+    fi
+    sshenc list >/dev/null 2>&1 || true
+    pkill -f "sshenc-agent .*$SSH_AUTH_SOCK" 2>/dev/null || true
+    rm -f "$SSH_AUTH_SOCK"
+    sleep 1
+    sshenc-agent --socket "$SSH_AUTH_SOCK" >/dev/null 2>&1
+    sleep 1
+elif command -v socat >/dev/null 2>&1 && command -v npiperelay.exe >/dev/null 2>&1; then
+    if [ ! -S "$SSH_AUTH_SOCK" ] || ! pgrep -f "socat.*npiperelay" >/dev/null 2>&1; then
+        rm -f "$SSH_AUTH_SOCK"
+        socat UNIX-LISTEN:"$SSH_AUTH_SOCK",fork \
+            EXEC:"npiperelay.exe -ei -s //./pipe/openssh-ssh-agent" >/dev/null 2>&1 &
+        disown 2>/dev/null
+        sleep 1
+    fi
+fi
+set -uo pipefail
+PASS=0; FAIL=0; SKIP=0
+record() { local s=$1 t=$2; case $s in P) ((PASS++)); l=PASS;; F) ((FAIL++)); l=FAIL;; S) ((SKIP++)); l=SKIP;; esac; printf "  [%s] %s\n" "$l" "$t"; }
+
+if pgrep -af 'socat.*npiperelay' >/dev/null 2>&1; then
+    echo "  [INFO] agent transport: socat+npiperelay (legacy; racy on keygen)"
+elif pgrep -af 'sshenc-agent' >/dev/null 2>&1; then
+    echo "  [INFO] agent transport: native sshenc-agent (preferred)"
+else
+    echo "  [INFO] agent transport: not running yet (first sshenc command will start it)"
+fi
+
+sshenc --version 2>&1 | grep -q "sshenc" && record P "sshenc --version" || record F "sshenc --version"
+gitenc --version 2>&1 | grep -q "gitenc" && record P "gitenc --version" || record F "gitenc --version"
+sshenc config show 2>&1 | grep -q "socket_path\|prompt_policy" && record P "sshenc config show" || record F "sshenc config show"
+gitenc -h 2>&1 | grep -q "Git wrapper" && record P "gitenc -h" || record F "gitenc -h"
+sshenc completions bash 2>&1 | grep -q "_sshenc" && record P "sshenc completions bash" || record F "sshenc completions bash"
+
+SHARED_A="__SHARED_A__"
+SHARED_B="__SHARED_B__"
+FP_A=$(sshenc export-pub "$SHARED_A" --fingerprint 2>&1)
+FP_B=$(sshenc export-pub "$SHARED_B" --fingerprint 2>&1)
+if [[ "$FP_A" == SHA256:* ]] && [[ "$FP_B" == SHA256:* ]] && [[ "$FP_A" != "$FP_B" ]]; then
+    record P "shared keys have distinct fingerprints"
+else
+    record F "shared keys have distinct fingerprints (A=$FP_A B=$FP_B)"
+fi
+sshenc inspect "$SHARED_A" 2>&1 | grep -q "ecdsa" && record P "sshenc inspect" || record F "sshenc inspect"
+sshenc export-pub "$SHARED_A" 2>&1 | grep -q "ecdsa-sha2-nistp256" && record P "sshenc export-pub" || record F "sshenc export-pub"
+
+PUB_PATH="$HOME/.ssh/$SHARED_A.pub"
+EXPECTED_PUB=""
+if [ -r "$PUB_PATH" ]; then
+    read -r _pub_algo EXPECTED_PUB _pub_comment < "$PUB_PATH" || true
+fi
+poll_for_key() {
+    local timeout_secs=$1
+    local start=$(date +%s)
+    while [ $(( $(date +%s) - start )) -lt "$timeout_secs" ]; do
+        local agent_keys
+        agent_keys=$(ssh-add -L 2>/dev/null || true)
+        if [ -n "$EXPECTED_PUB" ] && echo "$agent_keys" | grep -qF "$EXPECTED_PUB"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+WARM_OK=0
+WARM_START=$(date +%s)
+if poll_for_key 60; then
+    WARM_OK=1
+else
+    echo "  [INFO] agent cache empty after 60s; restarting agent (likely cold-bridge race)"
+    pkill -f "sshenc-agent .*$SSH_AUTH_SOCK" 2>/dev/null || true
+    rm -f "$SSH_AUTH_SOCK"
+    sleep 1
+    sshenc-agent --socket "$SSH_AUTH_SOCK" >/dev/null 2>&1
+    sleep 1
+    if poll_for_key 60; then
+        WARM_OK=1
+    fi
+fi
+WARM_ELAPSED=$(( $(date +%s) - WARM_START ))
+if [ "$WARM_OK" != "1" ]; then
+    echo "  [WARN] agent identity cache did not populate the shared key within ${WARM_ELAPSED}s (incl. one restart)"
+elif [ "$WARM_ELAPSED" -gt 5 ]; then
+    echo "  [INFO] agent cache populated after ${WARM_ELAPSED}s"
+fi
+
+SIG_OUT=$(echo "matrix sign test (WSL)" | timeout 120 ssh-keygen -Y sign -f "$HOME/.ssh/$SHARED_A.pub" -n "matrix-test" 2>&1)
+if echo "$SIG_OUT" | grep -q "BEGIN SSH SIGNATURE"; then
+    record P "sign via WSL bridge -> Windows TPM"
+else
+    record F "sign via WSL bridge -> Windows TPM ($(echo "$SIG_OUT" | head -3 | tr -d '\n'))"
+fi
+
+echo "  TOTAL: $PASS pass, $FAIL fail, $SKIP skip"
+exit $FAIL
+'@
+
+    foreach ($distro in $Distros) {
+        Banner "WSL2 $distro (bridge, no keyring)"
+        $null = Initialize-WslDistroForTest -Distro $distro
+        if ($Strict) {
+            Write-Host "  [INFO] $distro sign -- watch for Windows Hello prompt..." -ForegroundColor Cyan
+        }
+        $scriptText = $bashTests.Replace('__SHARED_A__', $SharedKeyA).Replace('__SHARED_B__', $SharedKeyB) -replace "`r`n", "`n" -replace "`r", "`n"
+        $stagedPath = "$env:TEMP\sshenc-wsl-matrix-$distro-$PID.sh"
+        [System.IO.File]::WriteAllBytes($stagedPath, [System.Text.UTF8Encoding]::new($false).GetBytes($scriptText))
+        $resolvedPath = (Resolve-Path $stagedPath).Path
+        $drive = $resolvedPath.Substring(0,1).ToLower()
+        $wslPath = "/mnt/$drive" + ($resolvedPath.Substring(2) -replace '\\', '/')
+
+        $wslJob = Start-Job -ScriptBlock {
+            param($d, $p)
+            $result = & wsl -d $d -- bash $p 2>&1
+            $result -join "`n"
+        } -ArgumentList $distro, $wslPath
+
+        $completed = Wait-Job $wslJob -Timeout $WslTimeout
+        if ($completed) {
+            $output = Receive-Job $wslJob
+            $lines = ($output -split "`n")
+            foreach ($line in $lines) {
+                Write-Host $line
+                if ($line -match '^\s*\[PASS\]\s+(.+?)\s*$') {
+                    $script:Pass++
+                    $script:Results += [PSCustomObject]@{ Status = "PASS"; Test = "WSL/$distro $($Matches[1])"; Detail = "" }
+                } elseif ($line -match '^\s*\[FAIL\]\s+(.+?)\s*$') {
+                    $script:Fail++
+                    $script:Results += [PSCustomObject]@{ Status = "FAIL"; Test = "WSL/$distro $($Matches[1])"; Detail = "" }
+                } elseif ($line -match '^\s*\[SKIP\]\s+(.+?)\s*$') {
+                    $script:Skip++
+                    $script:Results += [PSCustomObject]@{ Status = "SKIP"; Test = "WSL/$distro $($Matches[1])"; Detail = "" }
+                }
+            }
+        } else {
+            Write-Host "  [TIMEOUT] WSL test timed out after ${WslTimeout}s" -ForegroundColor Yellow
+            $script:Fail++
+            $script:Results += [PSCustomObject]@{ Status = "FAIL"; Test = "WSL/$distro timeout"; Detail = "${WslTimeout}s" }
+            Stop-Job $wslJob
+        }
+        Remove-Job $wslJob -Force
+        Remove-Item $stagedPath -Force -ErrorAction SilentlyContinue
     }
 }
 

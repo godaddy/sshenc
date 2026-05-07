@@ -302,6 +302,67 @@ impl AgentProxyBackend {
             pub_file_path: Some(pub_path),
         })
     }
+
+    /// Remove `<label>.pub`, `<label>.meta`, and `<label>.meta.hmac`
+    /// from the local CLI cache. NotFound is treated as success
+    /// (shared-keys-dir case where the agent already did the cleanup).
+    /// Failures are logged at debug — the authoritative state is in
+    /// the hardware key store, not the cache.
+    fn drop_cached_artifacts(&self, label: &str) {
+        let pub_path = self.keys_dir.join(format!("{label}.pub"));
+        let meta_path = self.keys_dir.join(format!("{label}.meta"));
+        let meta_hmac = self.keys_dir.join(format!("{label}.meta.hmac"));
+        for p in [pub_path, meta_path, meta_hmac] {
+            if let Err(e) = std::fs::remove_file(&p) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!(path = %p.display(), error = %e, "post-op cache cleanup");
+                }
+            }
+        }
+    }
+
+    /// Move `<old>.pub`, `<old>.meta`, and `<old>.meta.hmac` to the
+    /// new label, then rewrite the renamed `.meta`'s internal `label`
+    /// field so subsequent reads see the new label. NotFound on the
+    /// source side is success. Failures are logged at debug — see
+    /// `drop_cached_artifacts` for rationale.
+    ///
+    /// The `.meta.hmac` sidecar is best-effort moved alongside, but
+    /// the CLI does not (and cannot) verify it: the proxy does not
+    /// hold the per-app keyring HMAC key. After the move it is in
+    /// fact stale relative to the rewritten `.meta` content. That is
+    /// only a problem if the cache later becomes the agent's
+    /// authoritative keys_dir, which the proxy contract does not
+    /// promise. The agent-side rename in
+    /// `enclaveapp_core::metadata::rename_key_files` recomputes the
+    /// real sidecar against the agent's own keys_dir.
+    fn rename_cached_artifacts(&self, old_label: &str, new_label: &str) {
+        for ext in ["pub", "meta", "meta.hmac"] {
+            let src = self.keys_dir.join(format!("{old_label}.{ext}"));
+            if !src.exists() {
+                continue;
+            }
+            let dst = self.keys_dir.join(format!("{new_label}.{ext}"));
+            if let Err(e) = std::fs::rename(&src, &dst) {
+                tracing::debug!(
+                    from = %src.display(),
+                    to = %dst.display(),
+                    error = %e,
+                    "post-rename cache rename"
+                );
+            }
+        }
+        let new_meta_path = self.keys_dir.join(format!("{new_label}.meta"));
+        if new_meta_path.exists() {
+            if let Err(e) = rewrite_meta_label(&new_meta_path, new_label) {
+                tracing::debug!(
+                    path = %new_meta_path.display(),
+                    error = %e,
+                    "post-rename meta label rewrite"
+                );
+            }
+        }
+    }
 }
 
 fn map_meta_err(operation: &str, e: enclaveapp_core::Error) -> Error {
@@ -309,6 +370,16 @@ fn map_meta_err(operation: &str, e: enclaveapp_core::Error) -> Error {
         operation: operation.into(),
         detail: e.to_string(),
     }
+}
+
+fn rewrite_meta_label(path: &std::path::Path, new_label: &str) -> std::io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    let mut meta: enclaveapp_core::KeyMeta = serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    meta.label = new_label.to_string();
+    let json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, json)
 }
 
 impl KeyBackend for AgentProxyBackend {
@@ -457,36 +528,31 @@ impl KeyBackend for AgentProxyBackend {
                 ),
             )
         })?;
-        // Symmetrical to `cache_key_artifacts_locally`: when CLI and
-        // agent share keys_dir the agent already removed these; when
-        // they don't (WSL → Windows agent) the local cache would
-        // otherwise stay around as ghost entries surfaced by `list`.
-        // Failures here are not fatal — the authoritative state is in
-        // the hardware key store, not the cache.
-        let pub_path = self.keys_dir.join(format!("{label}.pub"));
-        let meta_path = self.keys_dir.join(format!("{label}.meta"));
-        let meta_hmac = self.keys_dir.join(format!("{label}.meta.hmac"));
-        for p in [pub_path, meta_path, meta_hmac] {
-            if let Err(e) = std::fs::remove_file(&p) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::debug!(path = %p.display(), error = %e, "post-delete cache cleanup");
-                }
-            }
-        }
+        self.drop_cached_artifacts(label);
         Ok(())
     }
 
     fn rename(&self, old_label: &str, new_label: &str) -> Result<()> {
         self.ensure_agent()?;
-        client::try_rename_via_socket(&self.socket_path, old_label, new_label).ok_or_else(|| {
-            Self::agent_refused(
-                "rename",
-                format!(
-                    "sshenc-agent refused rename '{old_label}' -> '{new_label}' \
+        client::try_rename_via_socket(&self.socket_path, old_label, new_label).ok_or_else(
+            || {
+                Self::agent_refused(
+                    "rename",
+                    format!(
+                        "sshenc-agent refused rename '{old_label}' -> '{new_label}' \
                      (check agent logs and allowed_labels)"
-                ),
-            )
-        })
+                    ),
+                )
+            },
+        )?;
+        // Symmetrical to `delete`/`cache_key_artifacts_locally`: when
+        // CLI and agent share keys_dir the agent already moved these;
+        // when they don't (WSL → Windows agent) the local cache would
+        // otherwise show <old_label>.* as a ghost identity in
+        // `list`/`inspect` and the new label would have no on-disk
+        // pub/meta cache at all.
+        self.rename_cached_artifacts(old_label, new_label);
+        Ok(())
     }
 
     /// Signs via the agent and converts the returned SSH-format
@@ -527,17 +593,30 @@ fn ssh_sig_to_der(ssh_sig: &[u8]) -> Result<Vec<u8>> {
     let (s, _) = sshenc_core::pubkey::read_ssh_string(rest)?;
 
     let mut der_inner = Vec::new();
-    write_der_integer(&mut der_inner, r);
-    write_der_integer(&mut der_inner, s);
+    write_der_integer(&mut der_inner, r)?;
+    write_der_integer(&mut der_inner, s)?;
 
+    // P-256 (and any curve we'd ever pair with this code path) produces
+    // r/s ≤ 33 bytes each, so der_inner ≤ 70 bytes and DER short-form
+    // length encoding (single byte, 0..=127) suffices. If a future
+    // change ever feeds this routine a larger curve, fail loudly
+    // instead of silently truncating via `as u8`.
+    if der_inner.len() >= 0x80 {
+        return Err(Error::Other(format!(
+            "ssh_sig_to_der: DER inner length {} requires long-form encoding (>= 128); \
+             this routine only emits short-form lengths suitable for ECDSA over P-256",
+            der_inner.len()
+        )));
+    }
     let mut der = Vec::with_capacity(2 + der_inner.len());
     der.push(0x30); // SEQUENCE
+    #[allow(clippy::cast_possible_truncation)] // bounded < 0x80 above
     der.push(der_inner.len() as u8);
     der.extend_from_slice(&der_inner);
     Ok(der)
 }
 
-fn write_der_integer(buf: &mut Vec<u8>, bytes: &[u8]) {
+fn write_der_integer(buf: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
     // Strip redundant leading zeros unless needed to disambiguate
     // sign (high bit of first remaining byte set).
     let mut i = 0;
@@ -547,12 +626,20 @@ fn write_der_integer(buf: &mut Vec<u8>, bytes: &[u8]) {
     let trimmed = &bytes[i..];
     let needs_leading_zero = trimmed.first().is_some_and(|b| b & 0x80 != 0);
     let content_len = trimmed.len() + usize::from(needs_leading_zero);
+    if content_len >= 0x80 {
+        return Err(Error::Other(format!(
+            "write_der_integer: INTEGER content length {content_len} requires DER long-form \
+             encoding (>= 128); this routine only emits short-form lengths"
+        )));
+    }
     buf.push(0x02); // INTEGER
+    #[allow(clippy::cast_possible_truncation)] // bounded < 0x80 above
     buf.push(content_len as u8);
     if needs_leading_zero {
         buf.push(0x00);
     }
     buf.extend_from_slice(trimmed);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -583,6 +670,21 @@ mod tests {
         let ssh_sig = der_to_ssh_signature(&der_original).unwrap();
         let der_round = ssh_sig_to_der(&ssh_sig).unwrap();
         assert_eq!(der_round, der_original);
+    }
+
+    #[test]
+    fn write_der_integer_rejects_oversized_content() {
+        // Synthetic input far larger than any real P-256 r/s. The
+        // routine must surface an explicit error rather than silently
+        // truncating via `as u8` and producing malformed DER.
+        let mut buf = Vec::new();
+        let big = vec![0x42_u8; 200];
+        let err = write_der_integer(&mut buf, &big).unwrap_err();
+        assert!(
+            err.to_string().contains("long-form"),
+            "expected long-form rejection, got: {err}"
+        );
+        assert!(buf.is_empty());
     }
 
     #[test]
@@ -737,6 +839,72 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("cached")
         );
+        std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn rename_cached_artifacts_moves_pub_meta_and_sidecar() {
+        // Regression test for B5 in DEEP_REVIEW_2026-05-06.md:
+        // before this fix, AgentProxyBackend::rename only invoked the
+        // agent and left <old>.{pub,meta,meta.hmac} as ghosts in the
+        // CLI cache. After the fix, the local cache must follow the
+        // rename.
+        let (keys_dir, pub_dir) = cache_test_dirs();
+        let backend = make_backend(keys_dir.clone(), pub_dir, PathBuf::from("/dev/null"));
+
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("ren-old").unwrap(),
+            comment: Some("renamed@host".into()),
+            access_policy: enclaveapp_core::AccessPolicy::None,
+            presence_mode: PresenceMode::None,
+            write_pub_path: None,
+        };
+        let pub_bytes = p256_pub_bytes();
+        backend
+            .cache_key_artifacts_locally(&opts, &pub_bytes, None)
+            .unwrap();
+
+        // Synthesize a `.meta.hmac` sidecar in the cache to mirror
+        // what could land via a shared keys_dir scenario; the proxy
+        // doesn't generate sidecars itself, but it must still move
+        // them to keep the cleanup symmetric with `delete`.
+        std::fs::write(keys_dir.join("ren-old.meta.hmac"), b"deadbeef").unwrap();
+
+        backend.rename_cached_artifacts("ren-old", "ren-new");
+
+        // Old label is gone from the cache.
+        assert!(!keys_dir.join("ren-old.pub").exists());
+        assert!(!keys_dir.join("ren-old.meta").exists());
+        assert!(!keys_dir.join("ren-old.meta.hmac").exists());
+
+        // New label has all three files under the cache.
+        assert!(keys_dir.join("ren-new.pub").exists());
+        assert!(keys_dir.join("ren-new.meta").exists());
+        assert!(keys_dir.join("ren-new.meta.hmac").exists());
+
+        // `.meta` content's internal label field follows the rename.
+        let meta = crate::compat::load_sshenc_meta(&keys_dir, "ren-new").unwrap();
+        assert_eq!(meta.label, "ren-new");
+        assert_eq!(
+            meta.app_specific.get("comment").and_then(|v| v.as_str()),
+            Some("renamed@host")
+        );
+
+        std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn rename_cached_artifacts_is_noop_when_source_missing() {
+        // Shared-keys-dir case: agent already moved the files. The
+        // proxy's cache cleanup must succeed silently (no panic, no
+        // error log noise other than the missing-source skip).
+        let (keys_dir, pub_dir) = cache_test_dirs();
+        let backend = make_backend(keys_dir.clone(), pub_dir, PathBuf::from("/dev/null"));
+
+        // No cache files for either label.
+        backend.rename_cached_artifacts("absent-old", "absent-new");
+        assert!(!keys_dir.join("absent-new.pub").exists());
+        assert!(!keys_dir.join("absent-new.meta").exists());
         std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
     }
 

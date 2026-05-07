@@ -849,4 +849,115 @@ mod tests {
     // Compile-time guards: custom types stay out of OpenSSH's range.
     const _: () = assert!(SSH_AGENTC_SSHENC_GENERATE_KEY >= 0xF0);
     const _: () = assert!(SSH_AGENT_SSHENC_GENERATE_RESPONSE >= 0xF0);
+
+    // ----- malformed input regression tests (DEEP_REVIEW S6) -----
+
+    #[test]
+    fn parse_response_empty_payload_errors() {
+        let err = parse_response(&[]).unwrap_err();
+        assert!(matches!(err, Error::AgentProtocol(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_response_identities_answer_with_truncated_count_errors() {
+        // Type byte present, but the 4-byte nkeys is missing.
+        let payload = vec![SSH_AGENT_IDENTITIES_ANSWER, 0, 0];
+        let err = parse_response(&payload).unwrap_err();
+        assert!(matches!(err, Error::AgentProtocol(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_response_identities_answer_zero_keys_yields_empty_list() {
+        // nkeys = 0 must be a clean Ok(empty list), not an error and
+        // not a panic on the empty `for _ in 0..0` loop.
+        let mut payload = vec![SSH_AGENT_IDENTITIES_ANSWER];
+        payload.extend_from_slice(&0_u32.to_be_bytes());
+        let parsed = parse_response(&payload).unwrap();
+        match parsed {
+            AgentResponse::IdentitiesAnswer(ids) => assert!(ids.is_empty()),
+            other => panic!("expected IdentitiesAnswer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_response_identities_answer_oversize_count_errors_before_alloc() {
+        // nkeys > MAX_KEYS (10_000) must be rejected before the loop
+        // tries to read 10_001+ key_blob/comment pairs.
+        let mut payload = vec![SSH_AGENT_IDENTITIES_ANSWER];
+        payload.extend_from_slice(&20_000_u32.to_be_bytes());
+        // No actual identity body bytes follow — if the bounds check
+        // is bypassed, the wire::read_string on the first iteration
+        // would fail; but we want the explicit MAX_KEYS error.
+        let err = parse_response(&payload).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nkeys") && msg.contains("maximum"),
+            "expected MAX_KEYS-style error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_response_identities_answer_truncated_after_count_errors() {
+        // nkeys = 2 but no actual identity bytes follow.
+        let mut payload = vec![SSH_AGENT_IDENTITIES_ANSWER];
+        payload.extend_from_slice(&2_u32.to_be_bytes());
+        let err = parse_response(&payload).unwrap_err();
+        // Any error is acceptable — we just want a clean error rather
+        // than a panic or silent empty-list return.
+        drop(err);
+    }
+
+    #[test]
+    fn parse_response_identities_answer_short_string_length_errors() {
+        // nkeys = 1, then a length prefix (5) followed by only 1 byte.
+        let mut payload = vec![SSH_AGENT_IDENTITIES_ANSWER];
+        payload.extend_from_slice(&1_u32.to_be_bytes());
+        payload.extend_from_slice(&5_u32.to_be_bytes()); // claim 5 bytes
+        payload.push(b'A'); // only 1 byte present
+        let err = parse_response(&payload).unwrap_err();
+        drop(err);
+    }
+
+    #[test]
+    fn parse_response_sign_response_truncated_errors() {
+        // SIGN_RESPONSE without a signature blob.
+        let payload = vec![SSH_AGENT_SIGN_RESPONSE];
+        let err = parse_response(&payload).unwrap_err();
+        drop(err);
+    }
+
+    #[test]
+    fn parse_response_unknown_msg_type_errors() {
+        let payload = vec![0xAB];
+        let err = parse_response(&payload).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unexpected"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_request_empty_payload_errors() {
+        let err = parse_request(&[]).unwrap_err();
+        assert!(matches!(err, Error::AgentProtocol(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_request_sign_request_truncated_string_length_errors() {
+        // Type byte + length prefix (10) but only 2 body bytes.
+        let mut payload = vec![SSH_AGENTC_SIGN_REQUEST];
+        payload.extend_from_slice(&10_u32.to_be_bytes());
+        payload.extend_from_slice(b"AB");
+        let err = parse_request(&payload).unwrap_err();
+        drop(err);
+    }
+
+    #[test]
+    fn parse_request_sign_request_missing_flags_errors() {
+        // Two strings parse OK but no trailing 4-byte flags field.
+        let mut payload = vec![SSH_AGENTC_SIGN_REQUEST];
+        wire::write_string(&mut payload, b"key");
+        wire::write_string(&mut payload, b"data");
+        // No flags
+        let err = parse_request(&payload).unwrap_err();
+        drop(err);
+    }
 }

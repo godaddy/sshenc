@@ -57,8 +57,9 @@ param(
     # ignore the env var (and this flag becomes a no-op).
     [switch]$Software,
 
-    # Force the persistent shared keys to be regenerated even if they
-    # already exist locally.
+    # No-op as of the pristine-state contract. Kept for backward
+    # compatibility with older invocations; the matrix always
+    # scrubs + regenerates shared keys at every run now.
     [switch]$ResetSharedKeys,
 
     # Skip post-flight cleanup. Useful for debugging a failed run --
@@ -527,19 +528,21 @@ Write-Host "  Binary:   $SshencBin"
 Write-Host "  Policy:   $SharedKeyMode (Strict=$([bool]$Strict))"
 Write-Host "  Shared:   $($SharedKeys -join ', ')"
 
-Banner "Pre-flight: clean transients, ensure shared keys"
-$preCount = Reset-SshencKeys -Keep $AllSharedKeys
+# Pristine-state contract: every matrix run starts from zero sshenc
+# keys and ends at zero sshenc keys. Yes, that means under -Strict
+# you'll fingerprint twice up front for matrix-a-strict + matrix-b-
+# strict make-credential gestures (and again for ps-sk-test in the
+# SK section). The trade-off is no cross-run drift -- every run
+# tests the full keygen path, every run leaves the host clean.
+Banner "Pre-flight: scrub all sshenc keys, generate fresh shared keys"
+$preCount = Reset-SshencKeys
 if ($preCount -gt 0) {
-    Write-Host "  [INFO] Cleaned $preCount transient key(s) from prior runs" -ForegroundColor Yellow
+    Write-Host "  [INFO] Scrubbed $preCount sshenc key(s) from prior runs" -ForegroundColor Yellow
 } else {
-    Write-Host "  [INFO] No transient keys to clean" -ForegroundColor DarkGray
+    Write-Host "  [INFO] No prior sshenc keys to scrub" -ForegroundColor DarkGray
 }
-$created = Ensure-SharedKeys -Labels $SharedKeys -KeygenArgs $KeygenAuthArgs -ForceReset:$ResetSharedKeys
-if ($created -gt 0) {
-    Write-Host "  [INFO] Created $created new shared key(s); future runs will reuse" -ForegroundColor Yellow
-} else {
-    Write-Host "  [INFO] All $($SharedKeys.Count) shared keys already exist" -ForegroundColor Green
-}
+$created = Ensure-SharedKeys -Labels $SharedKeys -KeygenArgs $KeygenAuthArgs -ForceReset
+Write-Host "  [INFO] Generated $created shared key(s) for this run" -ForegroundColor DarkGray
 foreach ($k in $SharedKeys) {
     if (-not (Test-SshencKeyExists -Label $k)) {
         Record "F" "shared key available: $k" "could not be created or read"
@@ -1211,34 +1214,39 @@ exit $FAIL
 }
 
 # ---------------------------------------------------------------------
-# Post-flight: assert no transient keys leaked, persistent keys still
-# there. The pre-flight cleaned the slate; if anything beyond the
-# allowlist exists now, a test section leaked it.
+# Post-flight: scrub everything. Pristine-state contract -- the host
+# leaves the run with zero sshenc-managed keys, same as it started.
+# Every key (the shared matrix-a/b plus any transient that leaked)
+# gets deleted; if anything is left after the scrub we surface it
+# as a failure so a buggy test section can't quietly accumulate
+# keys across runs.
 # ---------------------------------------------------------------------
 if (-not $NoCleanup) {
-    Banner "Post-flight: verify no transient keys leaked"
+    Banner "Post-flight: scrub all sshenc keys"
     $preLeak = & $SshencBin list --json 2>&1 | Out-String
     try {
         $allKeys = $preLeak | ConvertFrom-Json
         if ($allKeys -isnot [System.Array]) { $allKeys = @($allKeys) }
-        $leaked = $allKeys | Where-Object { $AllSharedKeys -notcontains $_.metadata.label }
-        if ($leaked) {
-            $names = ($leaked | ForEach-Object { $_.metadata.label }) -join ", "
-            Write-Host "  [DEBUG] leaked key labels: $names" -ForegroundColor Yellow
-        }
+        $names = ($allKeys | ForEach-Object { $_.metadata.label }) -join ", "
+        if ($names) { Write-Host "  [DEBUG] keys before scrub: $names" -ForegroundColor DarkGray }
     } catch { }
-    $postCount = Reset-SshencKeys -Quiet -Keep $AllSharedKeys
-    if ($postCount -gt 0) {
-        Record "F" "post-flight: no transient keys leaked" "$postCount key(s) leaked; auto-cleaned"
-    } else {
-        Record "P" "post-flight: no transient keys leaked"
-    }
-    foreach ($k in $SharedKeys) {
-        if (Test-SshencKeyExists -Label $k) {
-            Record "P" "post-flight: shared key preserved ($k)"
-        } else {
-            Record "F" "post-flight: shared key preserved ($k)" "removed during run"
+    $deleted = Reset-SshencKeys -Quiet
+    Write-Host "  [INFO] Deleted $deleted sshenc key(s) at end of run" -ForegroundColor DarkGray
+
+    # Verify zero remain.
+    $remaining = & $SshencBin list --json 2>&1 | Out-String
+    $leftover = 0
+    try {
+        $rk = $remaining | ConvertFrom-Json
+        if ($null -ne $rk) {
+            if ($rk -isnot [System.Array]) { $rk = @($rk) }
+            $leftover = $rk.Count
         }
+    } catch { $leftover = 0 }
+    if ($leftover -eq 0) {
+        Record "P" "post-flight: host returned to pristine state (zero keys)"
+    } else {
+        Record "F" "post-flight: pristine state" "$leftover key(s) remain after scrub"
     }
 }
 

@@ -385,12 +385,26 @@ fn rewrite_meta_label(path: &std::path::Path, new_label: &str) -> std::io::Resul
 impl KeyBackend for AgentProxyBackend {
     fn generate(&self, opts: &KeyGenOptions) -> Result<KeyInfo> {
         self.ensure_agent()?;
+        // Send the OpenSSH `.pub` path the CLI plans to write so the
+        // agent records it in the meta the per-key trust-anchor tag
+        // is stamped against. Without this, the agent's meta has
+        // `pub_file_path: null` while the CLI's post-keygen mirror
+        // writes the actual path -- and on native Windows / macOS
+        // (where CLI keys_dir == agent keys_dir) that mirror
+        // overwrite invalidates the tag, surfacing as Tamper on the
+        // first sign of a fresh key. With the path on the wire the
+        // agent writes the final meta in one go.
+        let pub_path_str = opts
+            .write_pub_path
+            .as_ref()
+            .map(|p| p.as_os_str().to_string_lossy().into_owned());
         let public_bytes = client::try_generate_via_socket(
             &self.socket_path,
             opts.label.as_str(),
             opts.comment.as_deref(),
             opts.access_policy.as_ffi_value() as u32,
             presence_mode_to_wire(opts.presence_mode),
+            pub_path_str.as_deref(),
         )
         .ok_or_else(|| {
             Self::agent_refused(
@@ -437,6 +451,15 @@ impl KeyBackend for AgentProxyBackend {
         // restores the read-side invariants AgentProxyBackend depends
         // on without expanding the wire protocol.
         self.cache_key_artifacts_locally(opts, &public_bytes, pub_file_path.as_deref())?;
+
+        // No post-mirror re-stamp is needed: the GenerateKey wire
+        // now carries `pub_file_path`, so the agent's meta and the
+        // CLI's mirror produce byte-identical content (or, on the
+        // WSL bridge case where keys_dir paths differ, the agent's
+        // meta is the security-critical one and the CLI's mirror is
+        // a read-side cache that doesn't need its own tag). The
+        // platform backend's inline meta-tag stamp is now
+        // authoritative for the lifetime of the key.
 
         Ok(KeyInfo {
             metadata: KeyMetadata::with_presence_mode(
@@ -773,6 +796,7 @@ mod tests {
             access_policy: enclaveapp_core::AccessPolicy::None,
             presence_mode: PresenceMode::None,
             write_pub_path: None,
+            record_pub_path: None,
         };
         let pub_bytes = p256_pub_bytes();
         backend
@@ -818,6 +842,7 @@ mod tests {
             access_policy: enclaveapp_core::AccessPolicy::Any,
             presence_mode: PresenceMode::Cached,
             write_pub_path: None,
+            record_pub_path: None,
         };
         let pub_bytes = p256_pub_bytes();
         let pub_file = pub_dir.join("with-pub.pub");
@@ -858,6 +883,7 @@ mod tests {
             access_policy: enclaveapp_core::AccessPolicy::None,
             presence_mode: PresenceMode::None,
             write_pub_path: None,
+            record_pub_path: None,
         };
         let pub_bytes = p256_pub_bytes();
         backend
@@ -923,6 +949,7 @@ mod tests {
             access_policy: enclaveapp_core::AccessPolicy::None,
             presence_mode: PresenceMode::None,
             write_pub_path: None,
+            record_pub_path: None,
         };
         let pub_bytes = p256_pub_bytes();
         backend

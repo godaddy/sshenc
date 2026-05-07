@@ -34,5 +34,22 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 
+# Per-platform direct deps so `SshencBackend::generate` can re-stamp the
+# per-key meta-integrity tag against the FINAL on-disk meta after
+# `app_specific` fields are appended. The platform-backend's inline
+# stamp fires through the `EnclaveKeyManager::generate` trait, which
+# only carries label / key_type / access_policy — `comment` /
+# `presence_mode` / `pub_file_path` get added by SshencBackend after.
+# Without the re-stamp the inline tag is stale on every fresh keygen.
+# See docs/design-meta-hmac-trust-anchor.md.
+[target.'cfg(target_os = "windows")'.dependencies]
+enclaveapp-windows = { workspace = true, features = ["signing"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+enclaveapp-apple = { workspace = true, features = ["signing"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+enclaveapp-keyring = { workspace = true, features = ["signing", "keyring-storage"] }
+
 [lints]
 workspace = true

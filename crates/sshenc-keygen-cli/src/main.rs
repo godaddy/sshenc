@@ -145,6 +145,7 @@ fn main() -> Result<()> {
         access_policy,
         presence_mode,
         write_pub_path: write_pub.clone(),
+        record_pub_path: None,
     };
 
     // `backend` above is an `AgentProxyBackend` on Unix: the

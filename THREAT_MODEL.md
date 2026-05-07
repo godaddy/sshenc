@@ -425,113 +425,206 @@ descriptor) can accept SSH clients' signing requests.
 ## Threat: Metadata File Tamper (`.meta`)
 
 **Scenario**: A same-UID attacker edits `~/.sshenc/keys/<label>.meta` to
-change the stored `AccessPolicy` (e.g. `BiometricOnly` → `None`) or other
-fields.
+change the stored `AccessPolicy` (e.g. `BiometricOnly` → `None`),
+`presence_mode`, the SK `credential_id_b64`, or other fields. Defense
+goes further than just hardware enforcement: even when the chip's
+behavior is fixed, `.meta` is what the agent shows the user, what
+gates which credential the agent uses, and what tells `sshenc inspect`
+whether a key is biometric-locked.
 
 **Mitigations**:
-- The hardware key's real access policy is fixed at **key creation time**
-  on macOS Secure Enclave and Windows CNG. Editing `.meta` cannot relax
-  the hardware's enforcement — Touch ID / Windows Hello still fires on
-  sign regardless of what `access_policy` in the metadata file claims.
+- The hardware key's real access policy is fixed at **key creation
+  time** on macOS Secure Enclave and Windows CNG. Editing `.meta`
+  cannot relax the hardware's enforcement — Touch ID / Windows Hello
+  still fires on sign regardless of what `access_policy` in the
+  metadata file claims.
 - Metadata files are written 0600 via `atomic_write`.
-- On **all** platforms, `.meta` now has an HMAC sidecar
-  `<label>.meta.hmac` generated at key-creation time. The HMAC key
-  is a random per-app 32-byte value stored in the platform's
-  native secure store:
-  - **macOS:** legacy Keychain via
-    `enclaveapp-apple::meta_hmac` (service name
-    `com.godaddy.<app>.meta-hmac`, account
-    `__meta_hmac_key__`, no user-presence ACL).
-  - **Windows:** DPAPI blob at `%APPDATA%\<app>\.meta-hmac.dpapi`
-    encrypted via `CryptProtectData(CRYPTPROTECT_UI_FORBIDDEN)`,
-    bound to the current Windows user.
-  - **Linux:** Secret Service via
-    `enclaveapp-keyring::meta_hmac_key`. The Linux TPM backend
-    uses the same Secret Service entry as the keyring/software
-    backend.
+- The agent never auto-migrates a missing sidecar in the per-op
+  hot path. The earlier design did, and a same-UID attacker who
+  could `rm` the sidecar got the tampered `.meta` blessed silently.
+  The hot path now refuses missing-tag loads outright; the user runs
+  an explicit `sshenc migrate-meta` once per install to bless on-
+  disk state after a confirmation prompt that prints each key's
+  policy fields and meta-JSON SHA-256 fingerprint.
 
-  Each platform module caches the loaded HMAC key process-locally
-  under a `Mutex<HashMap<String, Box<Zeroizing<[u8; 32]>>>>`, so
-  per-op verification is HMAC compute only after the first
-  Keychain/DPAPI/Secret-Service hit per agent session. **Per-op
-  signing operations do not add a biometric or approval prompt
-  on top of the wrapping-key load that the existing flow
-  already does.**
+### Trust anchor: per-key keychain-stored HMAC tag (macOS)
 
-  At load time `enclaveapp-app-storage::platform::verify_meta_integrity`
-  (and the matching path in `encryption::ensure_key`) invokes
-  `metadata::load_meta_with_hmac` in
-  `MetaIntegrityMode::RequireSidecar`:
-  - **HMAC mismatch** → hard error `meta_hmac_verify`.
-  - **Sidecar missing** → hard error `meta_hmac_missing`, then
-    one-shot migration writes a fresh sidecar.
+For each key `<label>` on macOS, the agent stores a 32-byte
+HMAC-SHA256 tag of `<label>.meta` in the legacy Keychain under
+service `com.godaddy.<app>.meta-tag`, account `<label>`. The
+keychain item shares the same code-signature ACL as the per-key
+wrapping key — an attacker without our entitled signed binary can
+neither read nor write either. The on-disk `<label>.meta.hmac`
+sidecar is kept as a derivable cache: the keychain tag is the
+authority. Deleting the sidecar does not change the verification
+outcome; the agent rebuilds it from the keychain tag on next op.
 
-- The macOS module is intended to be called only from
-  `sshenc-agent` (and the equivalent agent for awsenc /
-  sso-jwt), never the CLI binaries. CLI binaries reach
-  `AgentProxyBackend` and rely on the agent's verification —
-  this preserves the "agent-only Keychain reads" invariant
-  documented in *Cross-Binary Keychain ACL Prompt / Fatigue*.
+At every per-op `load_handle_with_context` and `load_pub_key`
+(`enclaveapp-apple::keychain::ensure_meta_integrity`):
 
-- The verification is gated by `<keys_dir>/<label>.meta.exists()`
-  before the platform store is queried at all. A synthetic call
-  site (test binary, fresh-install probe, dev tool, freshly-
-  enrolled label that hasn't been generated yet) does not
-  trigger any Keychain access or DPAPI syscall.
+- **Tag matches recomputed HMAC of `.meta`** → operation proceeds.
+- **Tag mismatch** → hard error
+  `meta_tag_verify`. Refuse the operation. Recommendation:
+  regenerate the key.
+- **No tag in keychain** → hard error `meta_tag_legacy`. The error
+  message is one of two variants depending on the migration marker
+  (see below):
+  - **Marker not set** (gentle, one-time-cutover): "This is a one-
+    time migration required by upgrading to a build that introduces
+    meta integrity tags. Run `sshenc migrate-meta` after verifying
+    the policy fields look correct."
+  - **Marker present** (strong, tamper signal):
+    "`sshenc migrate-meta` has already completed on this install,
+    so this should not have recurred. Regenerate the affected key
+    instead. Do NOT run migrate-meta again."
 
-- **Per-field tamper coverage.** The HMAC authenticates the
-  full `.meta` JSON body, so every field — `access_policy`,
-  `app_specific.presence_mode`, `app_specific.credential_id_b64`
-  + `rp_id` for SK keys, `pub_file_path`, `git_email`,
-  `git_name`, `comment`, etc. — is in scope. The most
-  consequential of these is the SK `credential_id_b64`
-  substitution: planting an attacker-minted TPM credential ID
-  into another label's `.meta` would otherwise let the agent
-  sign with the attacker's key while the user thinks they're
-  using their own. The HMAC sidecar closes that.
+The HMAC key used to compute the per-key tag is the same per-app
+random 32-byte value that authenticates the on-disk sidecar. It
+lives in the macOS legacy Keychain under
+`com.godaddy.<app>.meta-hmac` / `__meta_hmac_key__`, no user-
+presence ACL. The verify path uses a strictly read-only
+`meta_hmac::load_existing` — the create-on-first-call form is
+reserved for the keygen path so a verify can never trigger a
+`SecItemAdd` on a locked keychain.
+
+### Migration: explicit, user-confirmed, one-shot
+
+Pre-upgrade keys do not have a keychain tag yet. The user runs
+`sshenc migrate-meta` once after upgrade. Behavior:
+
+1. Enumerate `<keys_dir>/*.meta`, parse each, print
+   policy + SHA-256 fingerprint table. Keys with
+   `presence_mode: none` or `access_policy: None` are highlighted
+   with `POLICY=NONE !!` and an explanatory annotation so the user
+   has to look at them.
+2. Require typing `yes` (full word). `--yes` exists for scripted
+   environments and is documented as bypassing the human-review
+   step.
+3. For each label, the CLI sends `SSH_AGENTC_SSHENC_MIGRATE_META`
+   to the agent over IPC. The agent — the only binary that should
+   ever write a meta-tag item — computes the tag from the on-disk
+   `.meta` and writes it to the per-key keychain item. The CLI
+   never touches the meta-tag keychain item directly, preserving
+   the cross-binary ACL invariant.
+4. After all keys migrate, the CLI sends
+   `SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER`. The marker lives
+   in the Keychain under `com.godaddy.<app>.migrate-marker` /
+   `__completed__` (NOT a file — a file marker is a trivial
+   deletion primitive that re-opens the auto-migrate hole). After
+   the marker is set, the agent's `legacy_meta` error variant
+   switches to the strong-tamper-warning form, and the CLI
+   refuses repeat invocation without
+   `--force-rerun-i-understand`.
+
+### Sidecar verification (Windows / Linux, unchanged)
+
+Windows TPM and Linux keyring/TPM still rely on the
+`<label>.meta.hmac` sidecar with init-time verification via
+`enclaveapp-app-storage::platform::verify_meta_integrity`. The
+auto-migrate branch in that older path is unchanged on those
+platforms. Migrating Windows and Linux to the trust-anchor design
+is a follow-up — the per-key tag mechanism needs a parallel
+implementation against TPM-backed key storage and the kernel
+keyring. Until that ships:
+
+- Windows / Linux retain the same Migration-window residual risk
+  the prior design documented.
+- macOS post-trust-anchor closes that risk for new keys and
+  reduces it to "the user runs migrate-meta blindly without
+  reading the fingerprint" for legacy keys.
+
+### Per-field tamper coverage
+
+The tag authenticates the full `.meta` JSON body, so every field —
+`access_policy`, `app_specific.presence_mode`,
+`app_specific.credential_id_b64` + `rp_id` for SK keys,
+`pub_file_path`, `git_email`, `git_name`, `comment`, etc. — is in
+scope. The most consequential of these is the SK
+`credential_id_b64` substitution: planting an attacker-minted TPM
+credential ID into another label's `.meta` would otherwise let the
+agent sign with the attacker's key while the user thinks they're
+using their own. The trust anchor closes that.
+
+### Agent-only access invariant
+
+The macOS meta-tag, meta-HMAC key, and migrate-marker modules are
+called only from `sshenc-agent` (and the equivalent agent for
+awsenc / sso-jwt / npmenc), never the CLI binaries. CLI binaries
+reach `AgentProxyBackend` for write ops and read disk-only
+artifacts (`.pub`, `.meta`) for read ops; the cross-platform
+helper `enclaveapp-app-storage::platform::check_meta_integrity`
+also uses `meta_hmac::load_existing` to stay read-only. This
+preserves the "agent-only Keychain reads" invariant documented in
+*Cross-Binary Keychain ACL Prompt / Fatigue*.
+
+### Verification is gated by `.meta` existence
+
+The `meta_path.exists()` check fires before any platform secure-
+store query. A synthetic call site (test binary, fresh-install
+probe, dev tool, freshly-enrolled label that hasn't been
+generated yet) does not trigger any Keychain access or DPAPI
+syscall. Without this guard, every cargo test rebuild from an
+unsigned binary would prompt for ACL grants on the meta-HMAC
+keychain item.
 
 **Residual risk**:
-- A same-UID attacker who **also** has access to the platform
-  secure store (Keychain unlock + ACL grant on macOS, Windows
-  user credentials, Secret Service unlock on Linux) can rewrite
-  both `.meta` and the sidecar. This is the same threshold as
+
+- **Repeat-migration social engineering.** A same-UID attacker
+  could in principle tamper `.meta` then trick the user into
+  running `sshenc migrate-meta --force-rerun-i-understand`. This
+  requires either deceiving the user about the policy-field
+  display (the migrate-meta UI shows each key's current
+  fingerprint and policy fields) or the user dismissing the
+  prompt without reading. The
+  `--force-rerun-i-understand` flag's deliberately awkward name
+  exists to make this hard to do by reflex. The "marker present"
+  agent error message is also tuned to discourage repeat-runs.
+- **Trust-on-first-use at migrate-meta.** The very first
+  migrate-meta run blesses whatever is currently on disk. If a
+  same-UID attacker tampered `.meta` BEFORE the user upgraded
+  sshenc to a build with the trust anchor AND before the user
+  runs migrate-meta, the tampered content is what gets
+  authenticated. The recommendation is for users who suspect
+  tampering on a pre-upgrade install to regenerate keys
+  rather than migrate. The fingerprint/policy display in the
+  migrate-meta prompt exists to give a paranoid user a check
+  before saying yes.
+- **Platform-store-compromise threshold.** A same-UID attacker
+  who **also** has access to the macOS legacy Keychain with our
+  binary's code-signing ACL granted can rewrite the per-key tag
+  to match a tampered `.meta`. This is the same threshold as
   decrypting the wrapping key / KEK that the user's
   authentication state already gates, so no net loss of
   protection beyond what the threat model already accepts at
   that threshold.
-- **Migration window.** On the first load after upgrading to a
-  build that enforces strict mode, the verification path
-  automatically migrates a missing sidecar by computing a
-  fresh HMAC over the current `.meta`. If a same-UID attacker
-  tampered with `.meta` between the upgrade and the first
-  sshenc operation, the migration step blesses the tampered
-  content. There is no oracle that distinguishes legitimate-
-  legacy from tampered at migration time — the warning log is
-  the only signal. Users who suspect tampering should
-  regenerate the affected keys after upgrading.
 - **Approval-sheet cost on macOS dev rebuilds.** The legacy
-  Keychain ACL is bound to the creating binary's code
-  signature. Each rebuild of `sshenc-agent` from an unsigned
-  cargo build is a new signature and costs **one** approval
-  sheet on first access of the meta-HMAC key, equivalent to
-  the wrapping-key-per-rebuild cost already documented in
-  *Cross-Binary Keychain ACL Prompt / Fatigue*. Production
-  signed builds (Homebrew bottle, .app bundle) do not pay
-  this cost.
+  Keychain ACL is bound to the creating binary's code signature.
+  Each rebuild of `sshenc-agent` from an unsigned cargo build is
+  a new signature and costs approval sheets on first access of
+  the meta-HMAC key, the per-key meta-tag items, AND the
+  migrate-marker — equivalent to the wrapping-key-per-rebuild
+  cost already documented in *Cross-Binary Keychain ACL Prompt
+  / Fatigue*. Production signed builds (Homebrew bottle, .app
+  bundle) do not pay this cost.
+- **Windows / Linux platform gap.** Until the per-key trust
+  anchor lands on those platforms, they retain the prior auto-
+  migrate residual risk. macOS users running through the agent
+  get the new guarantees; Windows/Linux users get the strict-
+  sidecar guarantees from the prior design.
 - **DPAPI blob loss on Windows profile reset.** A user-profile
-  reset destroys the DPAPI master key and renders the meta-
-  HMAC blob unreadable. The next strict-mode load returns
+  reset destroys the DPAPI master key and renders the meta-HMAC
+  blob unreadable. The next strict-mode load returns
   `meta_hmac_missing` and the migration path writes a fresh
-  sidecar, so the user is not locked out — they simply lose
-  the integrity guarantee for the meta-content frozen before
-  the reset, equivalent to the migration-window risk above.
-  Same recovery threshold as a TPM hardware reset.
+  sidecar; the user is not locked out but loses the integrity
+  guarantee for `.meta` content frozen before the reset.
+  Equivalent to a TPM hardware reset.
 - The migration from the legacy `biometric: bool` field to
   `AccessPolicy` is handled by compatibility code; a missing
   `access_policy` field is treated per the legacy bool. A
   same-UID attacker who strips the new field from `.meta`
   cannot gain anything the hardware does not already allow,
-  and the HMAC sidecar catches the edit on every platform.
+  and the trust anchor / sidecar catches the edit on every
+  platform.
 
 ## Threat: `SSH_AUTH_SOCK` / `IdentityAgent` Trust
 

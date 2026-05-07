@@ -38,6 +38,15 @@ dirs = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Direct dep on enclaveapp-apple is needed for the migrate-meta RPC,
+# which writes a per-key meta-integrity tag to the macOS legacy
+# Keychain. The agent is the only binary that should be touching that
+# Keychain (legacy ACL is bound to the creating binary's code
+# signature; cross-binary access prompts), so the FFI-bearing call
+# lives here rather than in the CLI.
+enclaveapp-apple = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 socket2 = { version = "0.6", features = ["all"] }
 windows = { version = "0.58", features = [

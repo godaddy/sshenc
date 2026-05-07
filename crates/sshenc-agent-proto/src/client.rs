@@ -26,7 +26,9 @@
 
 use crate::message::{
     self, AgentRequest, AgentResponse, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENTC_SIGN_REQUEST,
-    SSH_AGENTC_SSHENC_DELETE_KEY, SSH_AGENTC_SSHENC_GENERATE_KEY, SSH_AGENTC_SSHENC_RENAME_KEY,
+    SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER, SSH_AGENTC_SSHENC_DELETE_KEY,
+    SSH_AGENTC_SSHENC_GENERATE_KEY, SSH_AGENTC_SSHENC_MIGRATE_META, SSH_AGENTC_SSHENC_RENAME_KEY,
+    SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER,
 };
 use std::io::{Read, Write};
 use std::path::Path;
@@ -160,6 +162,29 @@ pub fn try_rename_via_agent(old_label: &str, new_label: &str) -> Option<()> {
 pub fn try_rename_via_socket(sock_path: &Path, old_label: &str, new_label: &str) -> Option<()> {
     let mut stream = connect_agent(sock_path)?;
     request_rename(&mut stream, old_label, new_label)
+}
+
+#[must_use]
+pub fn try_migrate_meta_via_agent(label: &str) -> Option<()> {
+    let sock = env_agent_socket()?;
+    try_migrate_meta_via_socket(&sock, label)
+}
+
+pub fn try_migrate_meta_via_socket(sock_path: &Path, label: &str) -> Option<()> {
+    let mut stream = connect_agent(sock_path)?;
+    request_migrate_meta(&mut stream, label)
+}
+
+#[must_use]
+pub fn try_check_migration_marker_via_socket(sock_path: &Path) -> Option<bool> {
+    let mut stream = connect_agent(sock_path)?;
+    request_check_migration_marker(&mut stream)
+}
+
+#[must_use]
+pub fn try_set_migration_marker_via_socket(sock_path: &Path) -> Option<()> {
+    let mut stream = connect_agent(sock_path)?;
+    request_set_migration_marker(&mut stream)
 }
 
 /// Best-effort lookup of the agent socket from the environment —
@@ -310,6 +335,65 @@ fn request_rename<S: Read + Write>(stream: &mut S, old_label: &str, new_label: &
         }
         other => {
             tracing::debug!(?other, "agent proxy: unexpected response to rename request");
+            None
+        }
+    }
+}
+
+fn request_migrate_meta<S: Read + Write>(stream: &mut S, label: &str) -> Option<()> {
+    let payload = message::serialize_request(&AgentRequest::MigrateMeta {
+        label: label.as_bytes().to_vec(),
+    });
+    debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_MIGRATE_META);
+    send_framed(stream, &payload)?;
+    match recv_response(stream)? {
+        AgentResponse::Success => Some(()),
+        AgentResponse::Failure => {
+            tracing::debug!("agent proxy: migrate-meta returned FAILURE");
+            None
+        }
+        other => {
+            tracing::debug!(?other, "agent proxy: unexpected response to migrate-meta");
+            None
+        }
+    }
+}
+
+fn request_check_migration_marker<S: Read + Write>(stream: &mut S) -> Option<bool> {
+    let payload = message::serialize_request(&AgentRequest::CheckMigrationMarker);
+    debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER);
+    send_framed(stream, &payload)?;
+    // Success = marker SET. Failure = marker NOT set (or keychain
+    // unreachable; the CLI treats those equivalently as "I can't
+    // confirm the marker, proceed cautiously").
+    match recv_response(stream)? {
+        AgentResponse::Success => Some(true),
+        AgentResponse::Failure => Some(false),
+        other => {
+            tracing::debug!(
+                ?other,
+                "agent proxy: unexpected response to check-migration-marker"
+            );
+            None
+        }
+    }
+}
+
+fn request_set_migration_marker<S: Read + Write>(stream: &mut S) -> Option<()> {
+    let payload = message::serialize_request(&AgentRequest::SetMigrationMarker);
+    debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER);
+    send_framed(stream, &payload)?;
+    match recv_response(stream)? {
+        AgentResponse::Success => Some(()),
+        AgentResponse::Failure => {
+            tracing::debug!("agent proxy: set-migration-marker returned FAILURE");
+            None
+        }
+        other => {
+            tracing::debug!(
+                ?other,
+                "agent proxy: unexpected response to set-migration-marker"
+            );
             None
         }
     }

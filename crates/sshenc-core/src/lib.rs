@@ -12,6 +12,7 @@ pub mod error;
 pub mod fingerprint;
 pub mod key;
 pub mod pubkey;
+pub mod shell_env;
 pub mod ssh_config;
 
 pub use config::{Config, PromptPolicy};

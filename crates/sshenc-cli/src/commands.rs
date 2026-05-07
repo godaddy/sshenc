@@ -1114,6 +1114,46 @@ pub fn install() -> Result<()> {
         dylib_path.as_deref(),
     )?;
 
+    // Shell rc snippet: route SSH_AUTH_SOCK at the sshenc agent so
+    // git commit signing (`ssh-keygen -Y sign`) talks to the right
+    // agent. ~/.ssh/config's IdentityAgent fixes the OpenSSH client
+    // path but not ssh-keygen, so we additionally edit the user's
+    // shell rc.
+    match sshenc_core::shell_env::install_for_detected_shell(&config.socket_path) {
+        Ok((_shell, sshenc_core::shell_env::InstallResult::Installed)) => {
+            println!(
+                "Added SSH_AUTH_SOCK export to your shell rc. Open a new terminal \
+                 (or run `source ~/.zshrc` / `source ~/.bash_profile`) for it to take effect."
+            );
+        }
+        Ok((_shell, sshenc_core::shell_env::InstallResult::Repaired)) => {
+            println!("Updated SSH_AUTH_SOCK export in your shell rc.");
+        }
+        Ok((_shell, sshenc_core::shell_env::InstallResult::AlreadyPresent)) => {}
+        Ok((_, sshenc_core::shell_env::InstallResult::UnknownShell)) => {
+            eprintln!(
+                "Note: couldn't detect a known shell ($SHELL not zsh or bash). \
+                 To enable git commit signing, add this to your shell rc:\n  \
+                 if [ -S \"$HOME/.sshenc/agent.sock\" ]; then export SSH_AUTH_SOCK=\"$HOME/.sshenc/agent.sock\"; fi"
+            );
+        }
+        Ok((_, sshenc_core::shell_env::InstallResult::NoHome)) => {
+            eprintln!(
+                "Note: $HOME not resolvable; skipped writing the SSH_AUTH_SOCK \
+                 shell rc snippet. git commit signing won't pick up sshenc-agent \
+                 until SSH_AUTH_SOCK is set in your shell."
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to write SSH_AUTH_SOCK shell rc snippet: {e}. \
+                 git commit signing won't work until SSH_AUTH_SOCK points at \
+                 {}.",
+                config.socket_path.display()
+            );
+        }
+    }
+
     #[cfg(windows)]
     let install_state =
         match capture_windows_install_state(git_ssh_command.is_some()).and_then(|state| {
@@ -1411,6 +1451,23 @@ pub fn uninstall() -> Result<()> {
                 "No sshenc configuration found in {}",
                 ssh_config_path.display()
             );
+        }
+    }
+
+    // Mirror of the install side: remove the SSH_AUTH_SOCK snippet
+    // from the user's shell rc.
+    match sshenc_core::shell_env::uninstall_for_detected_shell() {
+        Ok((_, sshenc_core::shell_env::UninstallResult::Removed)) => {
+            println!("Removed SSH_AUTH_SOCK shell rc snippet.");
+        }
+        Ok((
+            _,
+            sshenc_core::shell_env::UninstallResult::NotPresent
+            | sshenc_core::shell_env::UninstallResult::UnknownShell
+            | sshenc_core::shell_env::UninstallResult::NoHome,
+        )) => {}
+        Err(e) => {
+            eprintln!("Warning: failed to clean up SSH_AUTH_SOCK shell rc snippet: {e}");
         }
     }
 
@@ -2245,6 +2302,211 @@ fn base64_wrap(data: &[u8], width: usize) -> String {
         .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// One-time post-upgrade migration that stamps a keychain meta-tag
+/// for each existing key based on its current on-disk `.meta` JSON.
+///
+/// See `libenclaveapp/docs/design-meta-hmac-trust-anchor.md`. The
+/// command is interactive: it prints the per-key fingerprint and
+/// policy fields, calls out keys with relaxed presence policies for
+/// review, and requires the user to type `yes` (full word) to
+/// proceed. After completion, a Keychain-backed marker records that
+/// the migration ran on this install — the agent's legacy_meta
+/// error message switches to a stronger tamper-warning variant
+/// after that, and re-running `migrate-meta` requires
+/// `--force-rerun-i-understand`. The marker lives in the legacy
+/// macOS Keychain (signed-binary ACL) rather than a file because a
+/// file marker is a trivial deletion primitive that re-opens the
+/// auto-migrate hole the trust anchor closes.
+#[allow(clippy::print_stdout, clippy::print_stderr)]
+pub fn migrate_meta(yes: bool, force_rerun: bool) -> Result<()> {
+    use sshenc_agent_proto::client as agent_client;
+
+    let keys_dir = sshenc_keys_dir();
+    let config = Config::load_default()?;
+    let socket_path = client_socket_path(&config.socket_path);
+
+    // Marker check via the agent. The marker lives in the legacy
+    // Keychain so a same-UID FS attacker can neither read nor
+    // delete it. Failure of the check is treated as "marker not
+    // set" — the worst-case is a redundant migrate-meta run that
+    // re-stamps current tags, not a security regression.
+    let marker_set =
+        agent_client::try_check_migration_marker_via_socket(&socket_path).unwrap_or(false);
+    if marker_set && !force_rerun {
+        eprintln!(
+            "Error: `sshenc migrate-meta` has already completed on this install \
+             (Keychain marker is set).\n\nRepeat-migration is exactly what an \
+             attacker would want you to do — running it again would re-bless \
+             any tampered `.meta` JSON. If you genuinely need to re-run (e.g., \
+             you are intentionally restoring keys from a backup of an unrelated \
+             machine), pass `--force-rerun-i-understand`. Otherwise, regenerate \
+             the affected key with `sshenc keygen`."
+        );
+        bail!("migrate-meta refused: already completed on this install");
+    }
+
+    // Enumerate `<keys_dir>/*.meta`.
+    if !keys_dir.exists() {
+        eprintln!(
+            "No keys directory at {}; nothing to migrate.",
+            keys_dir.display()
+        );
+        return Ok(());
+    }
+    let mut entries: Vec<MigrateEntry> = Vec::new();
+    for dirent in
+        std::fs::read_dir(&keys_dir).map_err(|e| anyhow!("read {}: {e}", keys_dir.display()))?
+    {
+        let entry = dirent.map_err(|e| anyhow!("read entry: {e}"))?;
+        let path = entry.path();
+        let label = match path.file_name().and_then(|s| s.to_str()) {
+            Some(name) if name.ends_with(".meta") && !name.ends_with(".meta.hmac") => {
+                name.trim_end_matches(".meta").to_string()
+            }
+            _ => continue,
+        };
+        let bytes = std::fs::read(&path).map_err(|e| anyhow!("read {}: {e}", path.display()))?;
+        let parsed: enclaveapp_core::metadata::KeyMeta =
+            serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))?;
+        let presence_mode = sshenc_se::proxy::presence_mode_from_app_specific(&parsed.app_specific)
+            .unwrap_or(sshenc_core::PresenceMode::Cached);
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&bytes);
+        let fingerprint = hasher.finalize();
+        let mut fp_hex = String::with_capacity(64);
+        for byte in fingerprint {
+            fp_hex.push_str(&format!("{byte:02x}"));
+        }
+        entries.push(MigrateEntry {
+            label,
+            access_policy: parsed.access_policy,
+            presence_mode,
+            fingerprint_hex: fp_hex,
+        });
+    }
+    if entries.is_empty() {
+        eprintln!(
+            "No `.meta` files in {}; nothing to migrate.",
+            keys_dir.display()
+        );
+        return Ok(());
+    }
+    entries.sort_by(|a, b| a.label.cmp(&b.label));
+
+    // Print warning + table.
+    eprintln!("migrate-meta is the one-time fix required by the upgrade that introduces");
+    eprintln!("keychain-backed meta integrity tags. Once it finishes successfully on this");
+    eprintln!("install, you will not see this prompt again — future upgrades will NOT");
+    eprintln!("ask you to run it. If this command is ever suggested to you again later,");
+    eprintln!("it likely means someone has tampered with your key metadata; regenerate");
+    eprintln!("affected keys instead of re-running.");
+    eprintln!();
+    eprintln!("Keys to migrate:");
+    let label_width = entries
+        .iter()
+        .map(|e| e.label.len())
+        .max()
+        .unwrap_or(0)
+        .max(20);
+    for entry in &entries {
+        let policy_label = format_policy(entry.access_policy, entry.presence_mode);
+        let warn = matches!(entry.presence_mode, sshenc_core::PresenceMode::None)
+            || matches!(entry.access_policy, AccessPolicy::None);
+        let prefix = if warn { "  ⚠ " } else { "    " };
+        eprintln!(
+            "{prefix}{:<label_width$}  policy={:<25}  fp=sha256:{}",
+            entry.label,
+            policy_label,
+            &entry.fingerprint_hex[..16],
+            label_width = label_width,
+        );
+        if warn {
+            eprintln!("      (no biometric required — verify this is intentional)");
+        }
+    }
+    eprintln!();
+
+    // Confirmation.
+    if !yes {
+        eprint!("Type 'yes' (full word) to migrate, or anything else to cancel: ");
+        Write::flush(&mut io::stderr()).ok();
+        let mut input = String::new();
+        io::BufRead::read_line(&mut io::stdin().lock(), &mut input)
+            .map_err(|e| anyhow!("read stdin: {e}"))?;
+        if input.trim() != "yes" {
+            eprintln!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Send a MigrateMeta RPC per label.
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for entry in &entries {
+        match agent_client::try_migrate_meta_via_socket(&socket_path, &entry.label) {
+            Some(()) => succeeded.push(entry.label.clone()),
+            None => failed.push(entry.label.clone()),
+        }
+    }
+
+    eprintln!();
+    eprintln!("Migrated {}/{} keys.", succeeded.len(), entries.len());
+    if !failed.is_empty() {
+        eprintln!("Failed: {}", failed.join(", "));
+        eprintln!(
+            "Re-run `sshenc migrate-meta` to retry the failures. The marker is \
+             only written when ALL keys migrate successfully."
+        );
+        bail!("migrate-meta partial failure");
+    }
+
+    // Set the Keychain marker so subsequent legacy_meta errors
+    // switch to the strong-tamper-warning variant and so the CLI
+    // refuses repeat migration without `--force-rerun-i-understand`.
+    // The marker lives in the Keychain (signed-binary ACL), not a
+    // file — a same-UID FS attacker can neither read nor delete it,
+    // closing the deletion-primitive that a file marker would open.
+    if agent_client::try_set_migration_marker_via_socket(&socket_path).is_none() {
+        eprintln!(
+            "Warning: migration succeeded but the agent could not write the \
+             Keychain marker. Future legacy_meta errors will use the \
+             gentle-cutover variant until the marker is set. Check the agent \
+             log for details."
+        );
+    }
+
+    eprintln!();
+    eprintln!(
+        "Done. Future tampering with `.meta` files will be detected. \
+         Future upgrades will not require this step."
+    );
+
+    Ok(())
+}
+
+struct MigrateEntry {
+    label: String,
+    access_policy: AccessPolicy,
+    presence_mode: sshenc_core::PresenceMode,
+    fingerprint_hex: String,
+}
+
+fn format_policy(access: AccessPolicy, presence: sshenc_core::PresenceMode) -> String {
+    let access_str = match access {
+        AccessPolicy::None => "none",
+        AccessPolicy::Any => "any",
+        AccessPolicy::BiometricOnly => "biometric",
+        AccessPolicy::PasswordOnly => "password",
+    };
+    let presence_str = match presence {
+        sshenc_core::PresenceMode::Cached => "cached",
+        sshenc_core::PresenceMode::Strict => "strict",
+        sshenc_core::PresenceMode::None => "none",
+    };
+    format!("{access_str}/{presence_str}")
 }
 
 #[cfg(test)]

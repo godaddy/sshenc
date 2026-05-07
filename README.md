@@ -537,7 +537,35 @@ All platform-specific crypto is provided by
 - No Keychain entitlements required on macOS -- uses CryptoKit, not Security.framework
 - Software fallback on Linux stores keys on disk with restrictive permissions
 
-See [THREAT_MODEL.md](THREAT_MODEL.md) for detailed analysis.
+### Compared to `chmod 0600 ~/.ssh/id_ecdsa`
+
+Threat-model summary across configurations. Green ✅ = protects the user;
+red ❌ = exposed; ⚠️ = degraded but key material stays sealed (oracle
+access only, not extraction).
+
+![Security comparison: chmod-0600 vs sshenc configurations](docs/img/security-comparison.png)
+
+The two foundational raises over `chmod 0600` apply to **every** sshenc
+configuration regardless of policy choice:
+
+- **Private key cannot be extracted** by a same-UID FS attacker --
+  hardware-backed.
+- **Compromise is bound to this device while the attacker holds UID** --
+  no offline / cross-machine signing once the attacker loses access.
+
+Biometric prompts (Touch ID / Hello / WebAuthn UV) are additive
+defense-in-depth on top of those two. Strict and SK configurations
+retain the prompt gate even against process-injection or debugger
+attach because the chip enforces, not the agent.
+
+Threats both `chmod 0600` and sshenc share equally (not in the table):
+
+- **`SSH_AUTH_SOCK` / `IdentityAgent` redirection** via attacker-edited
+  dotfiles. Same-UID attacker repoints SSH to their agent. Defeats both.
+- **DoS by killing the agent.** Recoverable via `sshenc install` or
+  `ssh-add -t`; equivalent lockout window for both.
+
+See [THREAT_MODEL.md](THREAT_MODEL.md) for the full analysis.
 
 ## Limitations
 

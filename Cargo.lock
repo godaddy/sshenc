@@ -455,6 +455,7 @@ dependencies = [
  "enclaveapp-wsl",
  "thiserror",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -531,11 +532,13 @@ dependencies = [
  "dirs",
  "elliptic-curve",
  "enclaveapp-core",
+ "enclaveapp-keyring",
  "p256",
  "rand 0.9.4",
  "serde",
  "serde_json",
  "sha2",
+ "tracing",
  "tss-esapi",
 ]
 
@@ -577,7 +580,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tracing",
  "windows",
+ "zeroize",
 ]
 
 [[package]]
@@ -1452,6 +1457,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "enclaveapp-apple",
  "enclaveapp-core",
  "libc",
  "serde",

@@ -1239,7 +1239,14 @@ fn handle_request(
             // dir override on the wire because that would let any
             // local CLI talk the agent into stamping a tag for
             // arbitrary content.
-            let dir = enclaveapp_core::metadata::keys_dir("sshenc");
+            // sshenc overrides the cross-platform default keys-dir
+            // location and stores everything under `~/.sshenc/keys/`
+            // (see `sshenc_se::sshenc_keys_dir`). Using
+            // `enclaveapp_core::metadata::keys_dir("sshenc")` here
+            // would land at `~/Library/Application Support/sshenc/keys/`
+            // on macOS — wrong directory, the agent would report
+            // "no `.meta` for label" for every existing key.
+            let dir = sshenc_se::sshenc_keys_dir();
             match perform_migrate_meta(&dir, label_str) {
                 Ok(()) => {
                     tracing::info!(label = label_str, "migrate_meta: succeeded");

@@ -447,20 +447,54 @@ whether a key is biometric-locked.
   disk state after a confirmation prompt that prints each key's
   policy fields and meta-JSON SHA-256 fingerprint.
 
-### Trust anchor: per-key keychain-stored HMAC tag (macOS)
+### Trust anchor: per-key secure-store-backed HMAC tag (macOS + Windows)
 
-For each key `<label>` on macOS, the agent stores a 32-byte
-HMAC-SHA256 tag of `<label>.meta` in the legacy Keychain under
-service `com.godaddy.<app>.meta-tag`, account `<label>`. The
-keychain item shares the same code-signature ACL as the per-key
-wrapping key — an attacker without our entitled signed binary can
-neither read nor write either. The on-disk `<label>.meta.hmac`
-sidecar is kept as a derivable cache: the keychain tag is the
-authority. Deleting the sidecar does not change the verification
-outcome; the agent rebuilds it from the keychain tag on next op.
+For each key `<label>`, the agent stores a 32-byte HMAC-SHA256 tag
+of `<label>.meta` in a per-key secure-store item:
 
-At every per-op `load_handle_with_context` and `load_pub_key`
-(`enclaveapp-apple::keychain::ensure_meta_integrity`):
+- **macOS**: legacy Keychain entry under service
+  `com.godaddy.<app>.meta-tag`, account `<label>`. The item shares
+  the same code-signature ACL as the per-key wrapping key — an
+  attacker without our entitled signed binary can neither read nor
+  write either.
+- **Windows**: per-key Credential Manager entry under target
+  `com.godaddy.<app>.meta-tag.<label>`, `CRED_TYPE_GENERIC`,
+  `CRED_PERSIST_LOCAL_MACHINE`. Credential Manager binds to the
+  current user's profile (DPAPI under the hood). A same-UID
+  attacker without the user's Windows credentials cannot decrypt
+  or rewrite. Same-user processes can `CredDelete`, but that
+  surfaces as `Legacy` on next op — and after `migrate-meta` runs
+  once, the marker switches the agent's error to the strong-tamper
+  variant. The first attempt at this layer used `NCryptSetProperty`
+  with a custom property name on the TPM-backed key handle, but
+  Microsoft Platform Crypto Provider rejects custom property names
+  (`NTE_NOT_SUPPORTED 0x80090029`) — Credential Manager was the
+  porting doc's documented fallback and is what shipped.
+- **Linux** (keyring + TPM backends): per-key Secret Service entry
+  under service `<app>`, account `__meta_tag_<label>__`, via the
+  `keyring` crate over `org.freedesktop.secrets`. Same Secret
+  Service backend that already holds the per-app meta-HMAC key.
+  Bound to the user's unlocked session keyring; same-UID
+  attackers without an unlocked session cannot read or write.
+  Same-user processes within an unlocked session can call
+  `delete_credential`; surfaces as `Legacy`, gated by the
+  migration marker like the other platforms. **On Linux the trust
+  anchor is the entire defense for `.meta` policy fields**:
+  neither the keyring backend nor the Linux TPM backend (per its
+  design caveat) enforces `AccessPolicy` at sign time. macOS and
+  Windows have hardware-enforced policy bits at the chip layer
+  that catch some bypasses even if the trust anchor is defeated;
+  Linux does not.
+
+The on-disk `<label>.meta.hmac` sidecar is kept as a derivable
+cache: the secure-store tag is the authority. Deleting the sidecar
+does not change the verification outcome; the agent rebuilds it
+from the secure-store tag on next op.
+
+At every per-op load (macOS `load_handle_with_context` /
+`load_pub_key` via `enclaveapp-apple::keychain::ensure_meta_integrity`;
+Windows `TpmSigner::sign` via
+`enclaveapp-windows::sign::ensure_meta_integrity`):
 
 - **Tag matches recomputed HMAC of `.meta`** → operation proceeds.
 - **Tag mismatch** → hard error
@@ -479,13 +513,20 @@ At every per-op `load_handle_with_context` and `load_pub_key`
     instead. Do NOT run migrate-meta again."
 
 The HMAC key used to compute the per-key tag is the same per-app
-random 32-byte value that authenticates the on-disk sidecar. It
-lives in the macOS legacy Keychain under
+random 32-byte value that authenticates the on-disk sidecar. On
+macOS it lives in the legacy Keychain under
 `com.godaddy.<app>.meta-hmac` / `__meta_hmac_key__`, no user-
-presence ACL. The verify path uses a strictly read-only
-`meta_hmac::load_existing` — the create-on-first-call form is
-reserved for the keygen path so a verify can never trigger a
-`SecItemAdd` on a locked keychain.
+presence ACL; on Windows it lives in a DPAPI-encrypted blob at
+`%APPDATA%\<app>\.meta-hmac.dpapi`, bound to the current user's
+master key; on Linux it lives in a Secret Service entry under
+service `<app>` / account `__meta_hmac_key__`, bound to the user's
+unlocked session keyring. The verify path uses a strictly
+read-only companion on every platform (`meta_hmac::load_existing`
+on macOS / Windows, `meta_hmac_key_existing` on Linux) — the
+create-on-first-call form is reserved for the keygen path so a
+verify can never trigger a `SecItemAdd` (macOS),
+`CryptProtectData` (Windows), or `set_secret` (Linux) on a
+locked secure store.
 
 ### Migration: explicit, user-confirmed, one-shot
 
@@ -507,31 +548,17 @@ Pre-upgrade keys do not have a keychain tag yet. The user runs
    never touches the meta-tag keychain item directly, preserving
    the cross-binary ACL invariant.
 4. After all keys migrate, the CLI sends
-   `SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER`. The marker lives
-   in the Keychain under `com.godaddy.<app>.migrate-marker` /
-   `__completed__` (NOT a file — a file marker is a trivial
-   deletion primitive that re-opens the auto-migrate hole). After
-   the marker is set, the agent's `legacy_meta` error variant
-   switches to the strong-tamper-warning form, and the CLI
-   refuses repeat invocation without
-   `--force-rerun-i-understand`.
-
-### Sidecar verification (Windows / Linux, unchanged)
-
-Windows TPM and Linux keyring/TPM still rely on the
-`<label>.meta.hmac` sidecar with init-time verification via
-`enclaveapp-app-storage::platform::verify_meta_integrity`. The
-auto-migrate branch in that older path is unchanged on those
-platforms. Migrating Windows and Linux to the trust-anchor design
-is a follow-up — the per-key tag mechanism needs a parallel
-implementation against TPM-backed key storage and the kernel
-keyring. Until that ships:
-
-- Windows / Linux retain the same Migration-window residual risk
-  the prior design documented.
-- macOS post-trust-anchor closes that risk for new keys and
-  reduces it to "the user runs migrate-meta blindly without
-  reading the fingerprint" for legacy keys.
+   `SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER`. The marker lives in a
+   per-platform secure store — macOS Keychain under
+   `com.godaddy.<app>.migrate-marker` / `__completed__`, Windows
+   Credential Manager target `com.godaddy.<app>.migrate-marker`
+   with `CRED_PERSIST_LOCAL_MACHINE`, Linux Secret Service entry
+   under service `<app>` / account `__meta_migration_marker__`
+   (NOT a file — a file marker is a trivial deletion primitive
+   that re-opens the auto-migrate hole). After the marker is set,
+   the agent's `legacy_meta` error variant switches to the
+   strong-tamper-warning form, and the CLI refuses repeat
+   invocation without `--force-rerun-i-understand`.
 
 ### Per-field tamper coverage
 
@@ -606,11 +633,14 @@ keychain item.
   cost already documented in *Cross-Binary Keychain ACL Prompt
   / Fatigue*. Production signed builds (Homebrew bottle, .app
   bundle) do not pay this cost.
-- **Windows / Linux platform gap.** Until the per-key trust
-  anchor lands on those platforms, they retain the prior auto-
-  migrate residual risk. macOS users running through the agent
-  get the new guarantees; Windows/Linux users get the strict-
-  sidecar guarantees from the prior design.
+- **Backend-without-policy enforcement on Linux.** The keyring
+  backend and the Linux TPM backend (per its design caveat) do
+  not enforce `AccessPolicy` at sign time — the meta-integrity
+  tag is the only defense against same-UID rewriting of policy
+  fields in `.meta` on those backends. macOS and Windows have
+  hardware-enforced policy bits at the chip layer that catch
+  some bypasses even if the trust anchor were defeated; Linux
+  does not.
 - **DPAPI blob loss on Windows profile reset.** A user-profile
   reset destroys the DPAPI master key and renders the meta-HMAC
   blob unreadable. The next strict-mode load returns

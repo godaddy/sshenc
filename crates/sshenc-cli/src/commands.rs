@@ -1114,6 +1114,46 @@ pub fn install() -> Result<()> {
         dylib_path.as_deref(),
     )?;
 
+    // Shell rc snippet: route SSH_AUTH_SOCK at the sshenc agent so
+    // git commit signing (`ssh-keygen -Y sign`) talks to the right
+    // agent. ~/.ssh/config's IdentityAgent fixes the OpenSSH client
+    // path but not ssh-keygen, so we additionally edit the user's
+    // shell rc.
+    match sshenc_core::shell_env::install_for_detected_shell(&config.socket_path) {
+        Ok((_shell, sshenc_core::shell_env::InstallResult::Installed)) => {
+            println!(
+                "Added SSH_AUTH_SOCK export to your shell rc. Open a new terminal \
+                 (or run `source ~/.zshrc` / `source ~/.bash_profile`) for it to take effect."
+            );
+        }
+        Ok((_shell, sshenc_core::shell_env::InstallResult::Repaired)) => {
+            println!("Updated SSH_AUTH_SOCK export in your shell rc.");
+        }
+        Ok((_shell, sshenc_core::shell_env::InstallResult::AlreadyPresent)) => {}
+        Ok((_, sshenc_core::shell_env::InstallResult::UnknownShell)) => {
+            eprintln!(
+                "Note: couldn't detect a known shell ($SHELL not zsh or bash). \
+                 To enable git commit signing, add this to your shell rc:\n  \
+                 if [ -S \"$HOME/.sshenc/agent.sock\" ]; then export SSH_AUTH_SOCK=\"$HOME/.sshenc/agent.sock\"; fi"
+            );
+        }
+        Ok((_, sshenc_core::shell_env::InstallResult::NoHome)) => {
+            eprintln!(
+                "Note: $HOME not resolvable; skipped writing the SSH_AUTH_SOCK \
+                 shell rc snippet. git commit signing won't pick up sshenc-agent \
+                 until SSH_AUTH_SOCK is set in your shell."
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to write SSH_AUTH_SOCK shell rc snippet: {e}. \
+                 git commit signing won't work until SSH_AUTH_SOCK points at \
+                 {}.",
+                config.socket_path.display()
+            );
+        }
+    }
+
     #[cfg(windows)]
     let install_state =
         match capture_windows_install_state(git_ssh_command.is_some()).and_then(|state| {
@@ -1411,6 +1451,23 @@ pub fn uninstall() -> Result<()> {
                 "No sshenc configuration found in {}",
                 ssh_config_path.display()
             );
+        }
+    }
+
+    // Mirror of the install side: remove the SSH_AUTH_SOCK snippet
+    // from the user's shell rc.
+    match sshenc_core::shell_env::uninstall_for_detected_shell() {
+        Ok((_, sshenc_core::shell_env::UninstallResult::Removed)) => {
+            println!("Removed SSH_AUTH_SOCK shell rc snippet.");
+        }
+        Ok((
+            _,
+            sshenc_core::shell_env::UninstallResult::NotPresent
+            | sshenc_core::shell_env::UninstallResult::UnknownShell
+            | sshenc_core::shell_env::UninstallResult::NoHome,
+        )) => {}
+        Err(e) => {
+            eprintln!("Warning: failed to clean up SSH_AUTH_SOCK shell rc snippet: {e}");
         }
     }
 
@@ -2254,35 +2311,38 @@ fn base64_wrap(data: &[u8], width: usize) -> String {
 /// command is interactive: it prints the per-key fingerprint and
 /// policy fields, calls out keys with relaxed presence policies for
 /// review, and requires the user to type `yes` (full word) to
-/// proceed. After completion, a marker file at
-/// `~/.config/sshenc/.meta-migration-completed` records that the
-/// migration ran on this install — the agent's legacy_meta error
-/// message switches to a stronger tamper-warning variant after
-/// that, and re-running `migrate-meta` requires
-/// `--force-rerun-i-understand`.
+/// proceed. After completion, a Keychain-backed marker records that
+/// the migration ran on this install — the agent's legacy_meta
+/// error message switches to a stronger tamper-warning variant
+/// after that, and re-running `migrate-meta` requires
+/// `--force-rerun-i-understand`. The marker lives in the legacy
+/// macOS Keychain (signed-binary ACL) rather than a file because a
+/// file marker is a trivial deletion primitive that re-opens the
+/// auto-migrate hole the trust anchor closes.
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn migrate_meta(yes: bool, force_rerun: bool) -> Result<()> {
     use sshenc_agent_proto::client as agent_client;
 
     let keys_dir = sshenc_keys_dir();
-    let cfg_dir = enclaveapp_core::metadata::config_dir("sshenc");
-    let marker_path = cfg_dir.join(".meta-migration-completed");
+    let config = Config::load_default()?;
+    let socket_path = client_socket_path(&config.socket_path);
 
-    // Marker check. If migrate-meta has already run on this install,
-    // refuse to repeat without explicit override. This is the user-
-    // visible analogue of the design doc's "after marker is set,
-    // missing keychain tag = tamper signal."
-    let already_migrated = marker_path.exists();
-    if already_migrated && !force_rerun {
+    // Marker check via the agent. The marker lives in the legacy
+    // Keychain so a same-UID FS attacker can neither read nor
+    // delete it. Failure of the check is treated as "marker not
+    // set" — the worst-case is a redundant migrate-meta run that
+    // re-stamps current tags, not a security regression.
+    let marker_set =
+        agent_client::try_check_migration_marker_via_socket(&socket_path).unwrap_or(false);
+    if marker_set && !force_rerun {
         eprintln!(
-            "Error: `sshenc migrate-meta` has already run on this install \
-             (marker: {}).\n\nRepeat-migration is exactly what an attacker \
-             would want you to do — running it again would re-bless any \
-             tampered `.meta` JSON. If you genuinely need to re-run (e.g., \
-             you are intentionally restoring keys from a backup), pass \
-             `--force-rerun-i-understand`. Otherwise, regenerate the \
-             affected key with `sshenc keygen`.",
-            marker_path.display()
+            "Error: `sshenc migrate-meta` has already completed on this install \
+             (Keychain marker is set).\n\nRepeat-migration is exactly what an \
+             attacker would want you to do — running it again would re-bless \
+             any tampered `.meta` JSON. If you genuinely need to re-run (e.g., \
+             you are intentionally restoring keys from a backup of an unrelated \
+             machine), pass `--force-rerun-i-understand`. Otherwise, regenerate \
+             the affected key with `sshenc keygen`."
         );
         bail!("migrate-meta refused: already completed on this install");
     }
@@ -2383,8 +2443,6 @@ pub fn migrate_meta(yes: bool, force_rerun: bool) -> Result<()> {
     }
 
     // Send a MigrateMeta RPC per label.
-    let config = Config::load_default()?;
-    let socket_path = client_socket_path(&config.socket_path);
     let mut succeeded = Vec::new();
     let mut failed = Vec::new();
     for entry in &entries {
@@ -2405,29 +2463,18 @@ pub fn migrate_meta(yes: bool, force_rerun: bool) -> Result<()> {
         bail!("migrate-meta partial failure");
     }
 
-    // Write the marker so subsequent legacy_meta errors switch to
-    // the strong-tamper-warning variant in the agent and so the CLI
-    // refuses repeat migration without --force-rerun-i-understand.
-    if let Err(e) = std::fs::create_dir_all(&cfg_dir) {
+    // Set the Keychain marker so subsequent legacy_meta errors
+    // switch to the strong-tamper-warning variant and so the CLI
+    // refuses repeat migration without `--force-rerun-i-understand`.
+    // The marker lives in the Keychain (signed-binary ACL), not a
+    // file — a same-UID FS attacker can neither read nor delete it,
+    // closing the deletion-primitive that a file marker would open.
+    if agent_client::try_set_migration_marker_via_socket(&socket_path).is_none() {
         eprintln!(
-            "Warning: could not create config dir {}: {e}",
-            cfg_dir.display()
-        );
-    }
-    let migrated_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let marker_body = format!(
-        "migrated_at_unix_secs={migrated_at}\nversion={}\n",
-        env!("CARGO_PKG_VERSION"),
-    );
-    if let Err(e) = std::fs::write(&marker_path, marker_body) {
-        eprintln!(
-            "Warning: migration succeeded but could not write marker {}: {e}. \
-             Future legacy_meta errors will not pick up the strong-warning \
-             variant until this is fixed.",
-            marker_path.display()
+            "Warning: migration succeeded but the agent could not write the \
+             Keychain marker. Future legacy_meta errors will use the \
+             gentle-cutover variant until the marker is set. Check the agent \
+             log for details."
         );
     }
 

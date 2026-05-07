@@ -1219,6 +1219,49 @@ fn handle_request(
                 }
             }
         }
+        AgentRequest::CheckMigrationMarker => {
+            // Success = marker SET. Failure = marker NOT set or
+            // keychain unreachable. The CLI treats both failure
+            // cases the same way ("no marker; proceed with
+            // migrate-meta after confirmation").
+            #[cfg(target_os = "macos")]
+            {
+                match enclaveapp_apple::meta_migration_marker::is_set("sshenc") {
+                    Ok(true) => Ok(AgentResponse::Success),
+                    Ok(false) => Ok(AgentResponse::Failure),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "check-migration-marker: keychain unreachable");
+                        Ok(AgentResponse::Failure)
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Other platforms have no marker concept yet — treat
+                // as "not set" so the CLI's migrate-meta logic
+                // proceeds without a no-op short-circuit.
+                Ok(AgentResponse::Failure)
+            }
+        }
+        AgentRequest::SetMigrationMarker => {
+            #[cfg(target_os = "macos")]
+            {
+                match enclaveapp_apple::meta_migration_marker::set("sshenc") {
+                    Ok(()) => {
+                        tracing::info!("set-migration-marker: succeeded");
+                        Ok(AgentResponse::Success)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "set-migration-marker: failed");
+                        Ok(AgentResponse::Failure)
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Ok(AgentResponse::Success)
+            }
+        }
         AgentRequest::Unknown(msg_type) => {
             tracing::debug!(msg_type, "unknown message type");
             Ok(AgentResponse::Failure)

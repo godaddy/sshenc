@@ -46,6 +46,19 @@ pub const SSH_AGENTC_SSHENC_RENAME_KEY: u8 = 0xF3;
 /// ACL invariant), so the CLI delegates rather than calling the
 /// FFI directly.
 pub const SSH_AGENTC_SSHENC_MIGRATE_META: u8 = 0xF4;
+/// `SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER`: ask the agent
+/// whether the migrate-meta keychain marker is set for this
+/// install. The marker lives in the legacy Keychain (signed-binary
+/// ACL, same as the per-key tags); putting it in a file would be a
+/// trivial deletion primitive. The agent answers Success when the
+/// marker IS set, Failure when it's not (or when the Keychain is
+/// unreachable — the CLI treats that as "I can't tell" and bails).
+pub const SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER: u8 = 0xF5;
+/// `SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER`: have the agent write
+/// the marker to the Keychain. Sent by the CLI after all per-label
+/// migrate-meta calls succeed. After this, the agent's legacy_meta
+/// error variant switches to the strong-tamper-warning form.
+pub const SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER: u8 = 0xF6;
 
 // sshenc-specific response: carries the public-key bytes of a
 // freshly-generated key back to the CLI. On failure the agent uses
@@ -129,6 +142,15 @@ pub enum AgentRequest {
         /// The key label as UTF-8 bytes.
         label: Vec<u8>,
     },
+    /// `SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER` (sshenc extension):
+    /// query whether the migrate-meta marker is set in the keychain
+    /// for this install. `Success` = set, `Failure` = absent or
+    /// keychain unreachable.
+    CheckMigrationMarker,
+    /// `SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER` (sshenc extension):
+    /// write the migrate-meta marker to the keychain. Sent by the
+    /// CLI after all per-label migrations succeed.
+    SetMigrationMarker,
     /// An unrecognized message type.
     Unknown(u8),
 }
@@ -221,6 +243,8 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
             let label = wire::read_string(&mut cursor)?;
             Ok(AgentRequest::MigrateMeta { label })
         }
+        SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER => Ok(AgentRequest::CheckMigrationMarker),
+        SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER => Ok(AgentRequest::SetMigrationMarker),
         other => Ok(AgentRequest::Unknown(other)),
     }
 }
@@ -306,6 +330,8 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
             wire::write_string(&mut buf, label);
             buf
         }
+        AgentRequest::CheckMigrationMarker => vec![SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER],
+        AgentRequest::SetMigrationMarker => vec![SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER],
         AgentRequest::Unknown(t) => vec![*t],
     }
 }

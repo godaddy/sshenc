@@ -432,53 +432,106 @@ fields.
 - The hardware key's real access policy is fixed at **key creation time**
   on macOS Secure Enclave and Windows CNG. Editing `.meta` cannot relax
   the hardware's enforcement — Touch ID / Windows Hello still fires on
-  sign regardless of what the metadata file claims.
+  sign regardless of what `access_policy` in the metadata file claims.
 - Metadata files are written 0600 via `atomic_write`.
-- On the Linux keyring / software backend, `.meta` has an HMAC
-  sidecar `<label>.meta.hmac` generated at key-creation time. The
-  HMAC key is a random per-app 32-byte value stored in the system
-  keyring (`enclaveapp-keyring::meta_hmac_key`). At load time
-  `enclaveapp-app-storage` invokes `metadata::load_meta_with_hmac`
-  in `MetaIntegrityMode::RequireSidecar`:
+- On **all** platforms, `.meta` now has an HMAC sidecar
+  `<label>.meta.hmac` generated at key-creation time. The HMAC key
+  is a random per-app 32-byte value stored in the platform's
+  native secure store:
+  - **macOS:** legacy Keychain via
+    `enclaveapp-apple::meta_hmac` (service name
+    `com.godaddy.<app>.meta-hmac`, account
+    `__meta_hmac_key__`, no user-presence ACL).
+  - **Windows:** DPAPI blob at `%APPDATA%\<app>\.meta-hmac.dpapi`
+    encrypted via `CryptProtectData(CRYPTPROTECT_UI_FORBIDDEN)`,
+    bound to the current Windows user.
+  - **Linux:** Secret Service via
+    `enclaveapp-keyring::meta_hmac_key`. The Linux TPM backend
+    uses the same Secret Service entry as the keyring/software
+    backend.
+
+  Each platform module caches the loaded HMAC key process-locally
+  under a `Mutex<HashMap<String, Box<Zeroizing<[u8; 32]>>>>`, so
+  per-op verification is HMAC compute only after the first
+  Keychain/DPAPI/Secret-Service hit per agent session. **Per-op
+  signing operations do not add a biometric or approval prompt
+  on top of the wrapping-key load that the existing flow
+  already does.**
+
+  At load time `enclaveapp-app-storage::platform::verify_meta_integrity`
+  (and the matching path in `encryption::ensure_key`) invokes
+  `metadata::load_meta_with_hmac` in
+  `MetaIntegrityMode::RequireSidecar`:
   - **HMAC mismatch** → hard error `meta_hmac_verify`.
-  - **Sidecar missing** → hard error `meta_hmac_missing`.
-  An attacker without keyring access cannot defeat the check by
-  deleting the sidecar, because a missing sidecar is now a hard
-  error rather than a silent legacy-fallback.
-- One-shot upgrade path: when `ensure_key` sees a `meta_hmac_missing`
-  on first load after upgrading from a pre-strict-mode build, it
-  logs a `warn`, calls `migrate_meta_to_hmac` to write a fresh
-  sidecar from the current meta, and continues. This blesses
-  whatever meta is on disk at the migration moment — see residual
-  risk below.
+  - **Sidecar missing** → hard error `meta_hmac_missing`, then
+    one-shot migration writes a fresh sidecar.
+
+- The macOS module is intended to be called only from
+  `sshenc-agent` (and the equivalent agent for awsenc /
+  sso-jwt), never the CLI binaries. CLI binaries reach
+  `AgentProxyBackend` and rely on the agent's verification —
+  this preserves the "agent-only Keychain reads" invariant
+  documented in *Cross-Binary Keychain ACL Prompt / Fatigue*.
+
+- The verification is gated by `<keys_dir>/<label>.meta.exists()`
+  before the platform store is queried at all. A synthetic call
+  site (test binary, fresh-install probe, dev tool, freshly-
+  enrolled label that hasn't been generated yet) does not
+  trigger any Keychain access or DPAPI syscall.
+
+- **Per-field tamper coverage.** The HMAC authenticates the
+  full `.meta` JSON body, so every field — `access_policy`,
+  `app_specific.presence_mode`, `app_specific.credential_id_b64`
+  + `rp_id` for SK keys, `pub_file_path`, `git_email`,
+  `git_name`, `comment`, etc. — is in scope. The most
+  consequential of these is the SK `credential_id_b64`
+  substitution: planting an attacker-minted TPM credential ID
+  into another label's `.meta` would otherwise let the agent
+  sign with the attacker's key while the user thinks they're
+  using their own. The HMAC sidecar closes that.
 
 **Residual risk**:
-- UI and library-level policy checks (`sshenc list`, `sshenc inspect`,
-  `PromptPolicy::KeyDefault`) still trust the metadata file on
-  hardware backends, where the sidecar is not written (hardware-side
-  enforcement makes the check redundant). An attacker who rewrites
-  `.meta` on a hardware backend can still **mislead** the user into
-  believing a key is unprotected — but signing will still prompt.
-- On the keyring / software backend, a same-UID attacker who also has
-  keyring access can still rewrite both `.meta` and the sidecar. This
-  is the same threshold as decrypting the key material itself, so no
-  net loss of protection.
+- A same-UID attacker who **also** has access to the platform
+  secure store (Keychain unlock + ACL grant on macOS, Windows
+  user credentials, Secret Service unlock on Linux) can rewrite
+  both `.meta` and the sidecar. This is the same threshold as
+  decrypting the wrapping key / KEK that the user's
+  authentication state already gates, so no net loss of
+  protection beyond what the threat model already accepts at
+  that threshold.
 - **Migration window.** On the first load after upgrading to a
-  build that enforces strict mode, `ensure_key` automatically
-  migrates a missing sidecar by computing a fresh HMAC over the
-  current `.meta`. If a same-UID attacker tampered with `.meta`
-  between the upgrade and the first sshenc operation, the
-  migration step blesses the tampered content. There is no way to
-  distinguish a legitimate legacy meta from a tampered legacy meta
-  at migration time — the warning log is the only signal. Users
-  who suspect tampering should regenerate the affected keys after
-  upgrading.
-- The migration from the legacy `biometric: bool` field to `AccessPolicy`
-  is handled by compatibility code; a missing `access_policy` field is
-  treated per the legacy bool. A same-UID attacker who strips the new
-  field from `.meta` can rely on the legacy-compat path behaving
-  intuitively but should not gain anything the hardware does not already
-  allow (and on the keyring backend the HMAC check catches the edit).
+  build that enforces strict mode, the verification path
+  automatically migrates a missing sidecar by computing a
+  fresh HMAC over the current `.meta`. If a same-UID attacker
+  tampered with `.meta` between the upgrade and the first
+  sshenc operation, the migration step blesses the tampered
+  content. There is no oracle that distinguishes legitimate-
+  legacy from tampered at migration time — the warning log is
+  the only signal. Users who suspect tampering should
+  regenerate the affected keys after upgrading.
+- **Approval-sheet cost on macOS dev rebuilds.** The legacy
+  Keychain ACL is bound to the creating binary's code
+  signature. Each rebuild of `sshenc-agent` from an unsigned
+  cargo build is a new signature and costs **one** approval
+  sheet on first access of the meta-HMAC key, equivalent to
+  the wrapping-key-per-rebuild cost already documented in
+  *Cross-Binary Keychain ACL Prompt / Fatigue*. Production
+  signed builds (Homebrew bottle, .app bundle) do not pay
+  this cost.
+- **DPAPI blob loss on Windows profile reset.** A user-profile
+  reset destroys the DPAPI master key and renders the meta-
+  HMAC blob unreadable. The next strict-mode load returns
+  `meta_hmac_missing` and the migration path writes a fresh
+  sidecar, so the user is not locked out — they simply lose
+  the integrity guarantee for the meta-content frozen before
+  the reset, equivalent to the migration-window risk above.
+  Same recovery threshold as a TPM hardware reset.
+- The migration from the legacy `biometric: bool` field to
+  `AccessPolicy` is handled by compatibility code; a missing
+  `access_policy` field is treated per the legacy bool. A
+  same-UID attacker who strips the new field from `.meta`
+  cannot gain anything the hardware does not already allow,
+  and the HMAC sidecar catches the edit on every platform.
 
 ## Threat: `SSH_AUTH_SOCK` / `IdentityAgent` Trust
 

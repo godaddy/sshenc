@@ -994,6 +994,7 @@ fn handle_request(
             comment,
             access_policy,
             presence_mode,
+            pub_file_path,
         } => {
             let label_str = match std::str::from_utf8(&label) {
                 Ok(s) => s,
@@ -1067,12 +1068,43 @@ fn handle_request(
                 None => enclaveapp_core::types::PresenceMode::migration_default(policy),
             };
 
+            // Decode the optional `pub_file_path` field. Newer
+            // (trust-anchor-aware) clients send the path the CLI
+            // plans to write the OpenSSH `.pub` to, so the agent can
+            // record it in the meta the per-key trust-anchor tag is
+            // stamped against. Older clients omit it; we leave
+            // `write_pub_path = None` and the meta records
+            // `app_specific.pub_file_path: null` (the legacy
+            // behavior; user can recover via `sshenc migrate-meta`
+            // once the CLI is upgraded).
+            let pub_path_owned = match pub_file_path {
+                None => None,
+                Some(bytes) if bytes.is_empty() => None,
+                Some(bytes) => match String::from_utf8(bytes) {
+                    Ok(s) => Some(PathBuf::from(s)),
+                    Err(_) => {
+                        tracing::warn!("generate_key: pub_file_path not valid UTF-8");
+                        return Ok(AgentResponse::Failure);
+                    }
+                },
+            };
+
+            // The agent records the CLI-supplied path in `.meta` but
+            // does NOT write the OpenSSH `.pub` file itself — that's
+            // the CLI's job. On native Windows / macOS the CLI's
+            // path is local; on the WSL bridge it's a Linux-side
+            // path that wouldn't make sense to materialize on the
+            // agent's (Windows) filesystem. `record_pub_path` is the
+            // "record but don't write" knob; `write_pub_path` stays
+            // `None` so `SshencBackend::generate` skips the file
+            // write block.
             let opts = KeyGenOptions {
                 label: label_owned,
                 comment: comment_opt,
                 access_policy: policy,
                 presence_mode: presence,
                 write_pub_path: None,
+                record_pub_path: pub_path_owned,
             };
 
             match backend.generate(&opts) {
@@ -1235,11 +1267,30 @@ fn handle_request(
                     }
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             {
-                // Other platforms have no marker concept yet — treat
-                // as "not set" so the CLI's migrate-meta logic
-                // proceeds without a no-op short-circuit.
+                match enclaveapp_windows::meta_migration_marker::is_set("sshenc") {
+                    Ok(true) => Ok(AgentResponse::Success),
+                    Ok(false) => Ok(AgentResponse::Failure),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "check-migration-marker: credential manager unreachable");
+                        Ok(AgentResponse::Failure)
+                    }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                match enclaveapp_keyring::meta_migration_marker::is_set("sshenc") {
+                    Ok(true) => Ok(AgentResponse::Success),
+                    Ok(false) => Ok(AgentResponse::Failure),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "check-migration-marker: secret service unreachable");
+                        Ok(AgentResponse::Failure)
+                    }
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            {
                 Ok(AgentResponse::Failure)
             }
         }
@@ -1257,7 +1308,33 @@ fn handle_request(
                     }
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                match enclaveapp_windows::meta_migration_marker::set("sshenc") {
+                    Ok(()) => {
+                        tracing::info!("set-migration-marker: succeeded");
+                        Ok(AgentResponse::Success)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "set-migration-marker: failed");
+                        Ok(AgentResponse::Failure)
+                    }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                match enclaveapp_keyring::meta_migration_marker::set("sshenc") {
+                    Ok(()) => {
+                        tracing::info!("set-migration-marker: succeeded");
+                        Ok(AgentResponse::Success)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "set-migration-marker: failed");
+                        Ok(AgentResponse::Failure)
+                    }
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
             {
                 Ok(AgentResponse::Success)
             }
@@ -1270,10 +1347,9 @@ fn handle_request(
 }
 
 /// Stamp a fresh meta-integrity tag for `label` based on the current
-/// on-disk `<label>.meta`. macOS-only; on other platforms returns Ok
-/// without doing anything (those platforms don't yet have the
-/// keychain-tag trust anchor; until they do, the existing
-/// sidecar-based path remains in effect).
+/// on-disk `<label>.meta`. Implemented on macOS (legacy Keychain) and
+/// Windows (CNG custom property); Linux returns Ok without doing
+/// anything until that platform's trust anchor lands.
 #[cfg(target_os = "macos")]
 fn perform_migrate_meta(dir: &Path, label: &str) -> Result<(), String> {
     let meta_path = dir.join(format!("{label}.meta"));
@@ -1314,10 +1390,87 @@ fn perform_migrate_meta(dir: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn perform_migrate_meta(dir: &Path, label: &str) -> Result<(), String> {
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Err(format!(
+            "no `.meta` for label `{label}` in {}",
+            dir.display()
+        ));
+    }
+    let meta_bytes =
+        std::fs::read(&meta_path).map_err(|e| format!("read {}: {e}", meta_path.display()))?;
+
+    let hmac_key = match enclaveapp_windows::meta_hmac::load_or_create("sshenc")
+        .map_err(|e| format!("meta-HMAC key load: {e}"))?
+    {
+        Some(k) => k,
+        None => {
+            return Err("meta-HMAC key unavailable (DPAPI unreachable); cannot stamp tag".into());
+        }
+    };
+
+    let tag = enclaveapp_core::metadata::compute_meta_hmac_bytes(hmac_key.as_slice(), &meta_bytes);
+    enclaveapp_windows::meta_tag::store("sshenc", label, &tag)
+        .map_err(|e| format!("meta_tag store: {e}"))?;
+
+    // Best-effort sidecar (cache; the CNG property is the authority).
+    let mut tag_hex = String::with_capacity(64);
+    for byte in tag {
+        tag_hex.push_str(&format!("{byte:02x}"));
+    }
+    let hmac_path = dir.join(format!("{label}.meta.hmac"));
+    if let Err(e) = enclaveapp_core::metadata::atomic_write(&hmac_path, tag_hex.as_bytes()) {
+        tracing::warn!(label = label, error = %e, "migrate_meta: sidecar write failed (best-effort)");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn perform_migrate_meta(dir: &Path, label: &str) -> Result<(), String> {
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Err(format!(
+            "no `.meta` for label `{label}` in {}",
+            dir.display()
+        ));
+    }
+    let meta_bytes =
+        std::fs::read(&meta_path).map_err(|e| format!("read {}: {e}", meta_path.display()))?;
+
+    let hmac_key = match enclaveapp_keyring::meta_hmac_key("sshenc") {
+        Some(k) => k,
+        None => {
+            return Err(
+                "meta-HMAC key unavailable (Secret Service unreachable); cannot stamp tag".into(),
+            );
+        }
+    };
+
+    let tag = enclaveapp_core::metadata::compute_meta_hmac_bytes(hmac_key.as_slice(), &meta_bytes);
+    enclaveapp_keyring::meta_tag::store("sshenc", label, &tag)
+        .map_err(|e| format!("meta_tag store: {e}"))?;
+
+    // Best-effort sidecar (cache; the Secret Service entry is the
+    // authority).
+    let mut tag_hex = String::with_capacity(64);
+    for byte in tag {
+        tag_hex.push_str(&format!("{byte:02x}"));
+    }
+    let hmac_path = dir.join(format!("{label}.meta.hmac"));
+    if let Err(e) = enclaveapp_core::metadata::atomic_write(&hmac_path, tag_hex.as_bytes()) {
+        tracing::warn!(label = label, error = %e, "migrate_meta: sidecar write failed (best-effort)");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn perform_migrate_meta(_dir: &Path, _label: &str) -> Result<(), String> {
-    // Platform doesn't yet have the keychain-tag trust anchor;
-    // migrate-meta is a no-op there until that work lands.
+    // Platform doesn't have the trust-anchor implementation;
+    // migrate-meta is a no-op there until it lands.
     Ok(())
 }
 
@@ -1442,6 +1595,7 @@ mod tests {
             access_policy: AccessPolicy::None,
             presence_mode: enclaveapp_core::types::PresenceMode::None,
             write_pub_path: None,
+            record_pub_path: None,
         };
         backend.generate(&opts).unwrap();
         backend
@@ -1501,6 +1655,7 @@ mod tests {
                 access_policy: AccessPolicy::None,
                 presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
+                record_pub_path: None,
             })
             .unwrap();
         backend
@@ -1510,6 +1665,7 @@ mod tests {
                 access_policy: AccessPolicy::None,
                 presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
+                record_pub_path: None,
             })
             .unwrap();
 
@@ -1685,6 +1841,7 @@ mod tests {
                 comment: b"test-comment".to_vec(),
                 access_policy: 0,
                 presence_mode: None,
+                pub_file_path: None,
             },
             &backend,
             &empty_labels(),
@@ -1715,6 +1872,7 @@ mod tests {
                 comment: Vec::new(),
                 access_policy: 99,
                 presence_mode: None,
+                pub_file_path: None,
             },
             &backend,
             &empty_labels(),
@@ -1737,6 +1895,7 @@ mod tests {
                 comment: Vec::new(),
                 access_policy: 0,
                 presence_mode: None,
+                pub_file_path: None,
             },
             &backend,
             &allowed,
@@ -1757,6 +1916,7 @@ mod tests {
                 comment: Vec::new(),
                 access_policy: 0,
                 presence_mode: None,
+                pub_file_path: None,
             },
             &backend,
             &empty_labels(),
@@ -1776,6 +1936,7 @@ mod tests {
                 comment: Vec::new(),
                 access_policy: 0,
                 presence_mode: None,
+                pub_file_path: None,
             },
             &backend,
             &empty_labels(),
@@ -1880,6 +2041,7 @@ mod tests {
                 access_policy: AccessPolicy::None,
                 presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
+                record_pub_path: None,
             })
             .unwrap();
         // Generate the "default" key second
@@ -1890,6 +2052,7 @@ mod tests {
                 access_policy: AccessPolicy::None,
                 presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
+                record_pub_path: None,
             })
             .unwrap();
 
@@ -1921,6 +2084,7 @@ mod tests {
                 access_policy: AccessPolicy::None,
                 presence_mode: enclaveapp_core::types::PresenceMode::None,
                 write_pub_path: None,
+                record_pub_path: None,
             })
             .unwrap();
 

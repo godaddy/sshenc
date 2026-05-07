@@ -319,8 +319,24 @@ pub struct KeyGenOptions {
     /// prompts within the wrapping-key cache TTL; `Strict` prompts
     /// per sign; `None` does not prompt.
     pub presence_mode: PresenceMode,
-    /// If set, write the public key to this path.
+    /// If set, write the public key to this path AND record this
+    /// path in the meta's `app_specific.pub_file_path` field. The
+    /// CLI sets this for native keygen. The sshenc-agent receiving
+    /// a remote `GenerateKey` RPC leaves it `None` (the CLI is the
+    /// pub-file writer in that flow) and uses `record_pub_path`
+    /// below to populate the meta without doing the file write.
     pub write_pub_path: Option<PathBuf>,
+    /// If set AND `write_pub_path` is `None`, record this path in
+    /// the meta's `app_specific.pub_file_path` field WITHOUT
+    /// actually writing the file. Used by the sshenc-agent's
+    /// `GenerateKey` handler so the per-key trust-anchor tag is
+    /// stamped against a meta that already names the path the CLI
+    /// is about to write to — without the agent itself touching
+    /// the (possibly cross-platform) file path. When both are set,
+    /// `write_pub_path` wins (the sshenc CLI's local-keygen flow);
+    /// when both are `None`, the meta records `pub_file_path:
+    /// null`. See docs/design-meta-hmac-trust-anchor.md.
+    pub record_pub_path: Option<PathBuf>,
 }
 
 /// Options for SK (FIDO2 / WebAuthn) key generation. Kept as a

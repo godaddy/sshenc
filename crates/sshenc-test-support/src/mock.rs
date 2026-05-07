@@ -186,6 +186,7 @@ mod tests {
             access_policy: AccessPolicy::None,
             presence_mode: sshenc_core::PresenceMode::None,
             write_pub_path: None,
+            record_pub_path: None,
         }
     }
 
@@ -268,6 +269,7 @@ mod tests {
             access_policy: AccessPolicy::None,
             presence_mode: sshenc_core::PresenceMode::None,
             write_pub_path: None,
+            record_pub_path: None,
         };
         let info = backend.generate(&opts).unwrap();
         assert!(info.metadata.comment.is_none());
@@ -288,6 +290,7 @@ mod tests {
             access_policy: AccessPolicy::None,
             presence_mode: sshenc_core::PresenceMode::None,
             write_pub_path: Some(pub_path.clone()),
+            record_pub_path: None,
         };
         let info = backend.generate(&opts).unwrap();
         assert_eq!(info.pub_file_path, Some(pub_path.clone()));

@@ -122,6 +122,23 @@ pub enum AgentRequest {
         /// [`PresenceMode::migration_default`] based on the access
         /// policy. Newer clients always send this byte.
         presence_mode: Option<u8>,
+        /// OpenSSH `.pub` file path the CLI plans to write, as UTF-8
+        /// bytes. The agent records this in the `.meta`'s
+        /// `app_specific.pub_file_path` field so the meta the agent
+        /// stamps the trust-anchor tag against matches the meta the
+        /// CLI mirrors locally — without this, the CLI's post-keygen
+        /// mirror writes a richer meta than the agent stamped, which
+        /// invalidates the tag and surfaces as a Tamper outcome on
+        /// the very first sign of a fresh key.
+        ///
+        /// Optional on the wire for backwards compatibility: empty
+        /// (`Some(Vec::new())`) means "explicit null", `None` means
+        /// "older client, payload ended before this field" (treated
+        /// as null too). Old agents that don't read this field will
+        /// stop after `presence_mode` and write `pub_file_path: null`
+        /// — the legacy behavior; users can recover by running
+        /// `sshenc migrate-meta` once.
+        pub_file_path: Option<Vec<u8>>,
     },
     /// `SSH_AGENTC_SSHENC_RENAME_KEY` (sshenc extension): relabel an
     /// existing key on disk and in the keychain. Used by `sshenc
@@ -222,11 +239,20 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
             // A legacy payload deserializes here with `presence_mode =
             // None`; the server applies the migration default.
             let presence_mode = wire::read_u8(&mut cursor).ok();
+            // `pub_file_path` is appended by even newer clients (the
+            // trust-anchor cohort) so the agent can write the final
+            // meta in one go and stamp the per-key tag against it,
+            // without the CLI's post-keygen mirror invalidating the
+            // tag. Older clients end the payload after `presence_mode`
+            // and we record `pub_file_path = None`; the agent writes
+            // `app_specific.pub_file_path: null`.
+            let pub_file_path = wire::read_string(&mut cursor).ok();
             Ok(AgentRequest::GenerateKey {
                 label,
                 comment,
                 access_policy,
                 presence_mode,
+                pub_file_path,
             })
         }
         SSH_AGENTC_SSHENC_RENAME_KEY => {
@@ -306,13 +332,25 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
             comment,
             access_policy,
             presence_mode,
+            pub_file_path,
         } => {
             let mut buf = vec![SSH_AGENTC_SSHENC_GENERATE_KEY];
             wire::write_string(&mut buf, label);
             wire::write_string(&mut buf, comment);
             buf.extend_from_slice(&access_policy.to_be_bytes());
+            // Optional trailing fields are positional: `pub_file_path`
+            // sits AFTER `presence_mode`, so writing it requires
+            // `presence_mode` to be present too. In practice the
+            // proto-level client always emits `presence_mode = Some`;
+            // the (None, Some) case here is unreachable from real
+            // callers and we drop the path silently rather than
+            // invent a sentinel that would have to be decoded
+            // upstream.
             if let Some(mode) = presence_mode {
                 buf.push(*mode);
+                if let Some(path) = pub_file_path {
+                    wire::write_string(&mut buf, path);
+                }
             }
             buf
         }
@@ -798,6 +836,7 @@ mod tests {
             comment: b"jay@box".to_vec(),
             access_policy: 0,
             presence_mode: Some(0),
+            pub_file_path: Some(b"/home/jay/.ssh/gen-test.pub".to_vec()),
         };
         let payload = serialize_request(&original);
         assert_eq!(payload[0], SSH_AGENTC_SSHENC_GENERATE_KEY);
@@ -808,11 +847,16 @@ mod tests {
                 comment,
                 access_policy,
                 presence_mode,
+                pub_file_path,
             } => {
                 assert_eq!(label, b"gen-test");
                 assert_eq!(comment, b"jay@box");
                 assert_eq!(access_policy, 0);
                 assert_eq!(presence_mode, Some(0));
+                assert_eq!(
+                    pub_file_path.as_deref(),
+                    Some(b"/home/jay/.ssh/gen-test.pub".as_ref())
+                );
             }
             other => panic!("expected GenerateKey, got {other:?}"),
         }
@@ -826,6 +870,7 @@ mod tests {
                 comment: Vec::new(),
                 access_policy: policy,
                 presence_mode: Some(0),
+                pub_file_path: None,
             };
             let parsed = parse_request(&serialize_request(&original)).unwrap();
             match parsed {
@@ -844,6 +889,7 @@ mod tests {
             comment: Vec::new(),
             access_policy: 2,
             presence_mode: Some(1),
+            pub_file_path: None,
         };
         let parsed = parse_request(&serialize_request(&original)).unwrap();
         match parsed {
@@ -856,8 +902,10 @@ mod tests {
     fn legacy_generate_key_payload_without_presence_mode_decodes() {
         // Hand-serialize a payload missing the trailing presence_mode
         // byte (older clients write only label, comment, access_policy).
-        // The parser must accept it and yield `presence_mode = None`,
-        // letting the agent apply the migration default.
+        // The parser must accept it and yield `presence_mode = None`
+        // and `pub_file_path = None`, letting the agent apply the
+        // migration default and recording `pub_file_path: null` in
+        // the meta.
         let mut payload = vec![SSH_AGENTC_SSHENC_GENERATE_KEY];
         wire::write_string(&mut payload, b"legacy");
         wire::write_string(&mut payload, b"comment");
@@ -869,11 +917,36 @@ mod tests {
                 comment,
                 access_policy,
                 presence_mode,
+                pub_file_path,
             } => {
                 assert_eq!(label, b"legacy");
                 assert_eq!(comment, b"comment");
                 assert_eq!(access_policy, 1);
                 assert!(presence_mode.is_none());
+                assert!(pub_file_path.is_none());
+            }
+            other => panic!("expected GenerateKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_pub_file_path_payload_with_presence_mode_decodes() {
+        // Mid-vintage clients that send `presence_mode` but not yet
+        // `pub_file_path` must decode with `pub_file_path = None`.
+        let mut payload = vec![SSH_AGENTC_SSHENC_GENERATE_KEY];
+        wire::write_string(&mut payload, b"midver");
+        wire::write_string(&mut payload, b"");
+        payload.extend_from_slice(&0_u32.to_be_bytes());
+        payload.push(1_u8); // presence_mode = Strict
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::GenerateKey {
+                presence_mode,
+                pub_file_path,
+                ..
+            } => {
+                assert_eq!(presence_mode, Some(1));
+                assert!(pub_file_path.is_none());
             }
             other => panic!("expected GenerateKey, got {other:?}"),
         }

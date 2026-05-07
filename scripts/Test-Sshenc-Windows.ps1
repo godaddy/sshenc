@@ -378,6 +378,120 @@ if ($signOut -match "BEGIN SSH SIGNATURE") {
 }
 
 # ---------------------------------------------------------------------
+# Trust anchor (.meta integrity). Asserts the windows-tpm-trust-anchor
+# end-to-end on real Windows TPM + Credential Manager. Skipped in
+# software mode: the trust anchor is layered on top of the platform
+# meta-HMAC blob, which the software backend doesn't write. Each
+# scenario uses --auth-policy none so no UI / fingerprint / password
+# prompt fires; the trust anchor is orthogonal to AccessPolicy.
+#
+# Scenarios:
+#   T1 fresh-keygen sign succeeds (re-stamp ran)
+#   T2 .meta.hmac sidecar deleted -> sign still OK (Cred Mgr is the
+#      authority, not the sidecar; deletion primitive is closed)
+#   T3 .meta tampered -> sign refused (Tamper outcome)
+#   T4 .meta restored -> sign succeeds again
+#   T5 per-key Cred-Mgr entry deleted -> sign refused (Legacy outcome)
+#   migrate-meta --yes round-trip stamps tag and sets marker
+#   T6 post-migrate sign succeeds
+#   marker present in Credential Manager
+#   T8 tamper + delete tag with marker set -> sign refused
+#      (strong-tamper variant)
+# ---------------------------------------------------------------------
+Banner "Trust anchor (.meta integrity)"
+if ($BackendMode -eq "software") {
+    Record "S" "trust anchor: skipped (software backend has no platform meta-tag)"
+} else {
+    $taLabel  = "trust-anchor-$PID"
+    $taDir    = Join-Path $env:APPDATA "sshenc\keys"
+    $taPub    = Join-Path $env:USERPROFILE ".ssh\$taLabel.pub"
+    $taData   = Join-Path $env:TEMP "$taLabel.data"
+    $taTarget = "com.godaddy.sshenc.meta-tag.$taLabel"
+    $taMarker = "com.godaddy.sshenc.migrate-marker"
+    $sshKeygenExe = "$env:SystemRoot\System32\OpenSSH\ssh-keygen.exe"
+    "trust-anchor matrix probe" | Out-File -Encoding ascii -NoNewline $taData
+    & $SshencBin delete -y --delete-pub $taLabel 2>&1 | Out-Null
+    & cmdkey /delete:$taTarget 2>&1 | Out-Null
+    # Clear the migration marker too -- the test exercises the
+    # gentle-cutover migrate-meta path (T5 -> migrate -> T6), and a
+    # prior matrix run may have already set the marker, in which
+    # case migrate-meta refuses with "already completed". Clearing
+    # here makes the test deterministic across repeated runs.
+    & cmdkey /delete:$taMarker 2>&1 | Out-Null
+
+    function Test-TaSign {
+        param([string]$tag, [bool]$ExpectOk)
+        Remove-Item "$taData.sig" -ErrorAction SilentlyContinue
+        & $sshKeygenExe -Y sign -n test -f $taPub $taData 2>&1 | Out-Null
+        $signed = Test-Path "$taData.sig"
+        Remove-Item "$taData.sig" -ErrorAction SilentlyContinue
+        if ($signed -eq $ExpectOk) {
+            Record "P" "trust anchor: $tag"
+        } else {
+            $expected = if ($ExpectOk) { "SIGN OK" } else { "SIGN REFUSED" }
+            $actual   = if ($signed)   { "SIGN OK" } else { "SIGN REFUSED" }
+            Record "F" "trust anchor: $tag" "expected $expected, got $actual"
+        }
+    }
+
+    $taKg = & $SshencBin keygen -l $taLabel --auth-policy none -C "trust-anchor" 2>&1 | Out-String
+    if ($taKg -match "Generated") {
+        Record "P" "trust anchor: keygen"
+
+        Test-TaSign "T1 fresh key signs" $true
+
+        $sidecarPath = Join-Path $taDir "$taLabel.meta.hmac"
+        if (Test-Path $sidecarPath) { Remove-Item $sidecarPath -Force }
+        Test-TaSign "T2 sidecar deleted -> still signs" $true
+
+        $taMetaPath = Join-Path $taDir "$taLabel.meta"
+        $taOrig = Get-Content $taMetaPath -Raw
+        Set-Content $taMetaPath -Value ($taOrig -replace 'trust-anchor','tampered') -NoNewline
+        Test-TaSign "T3 .meta tampered -> refuses" $false
+        Set-Content $taMetaPath -Value $taOrig -NoNewline
+        Test-TaSign "T4 .meta restored -> signs" $true
+
+        & cmdkey /delete:$taTarget 2>&1 | Out-Null
+        Test-TaSign "T5 cred-mgr tag deleted -> refuses (Legacy)" $false
+
+        # `--yes` instead of piping "yes\n" because PowerShell's object
+        # pipeline does NOT deliver byte stdin to native exes (the same
+        # gotcha that bit `sshenc delete` in matrix v0.6.33 -- Issue 4).
+        $taMig = & $SshencBin migrate-meta --yes 2>&1 | Out-String
+        if ($taMig -match "Migrated") {
+            Record "P" "trust anchor: migrate-meta succeeds"
+        } else {
+            $snippet = $taMig.Trim().Substring(0, [Math]::Min(120, $taMig.Trim().Length))
+            Record "F" "trust anchor: migrate-meta succeeds" $snippet
+        }
+        Test-TaSign "T6 post-migrate -> signs" $true
+
+        $markerOut = (& cmdkey /list:$taMarker 2>&1 | Out-String)
+        if ($markerOut -match [regex]::Escape($taMarker)) {
+            Record "P" "trust anchor: marker present after migrate"
+        } else {
+            Record "F" "trust anchor: marker present after migrate" "cmdkey /list shows no entry"
+        }
+
+        Set-Content $taMetaPath -Value ($taOrig -replace 'trust-anchor','tampered') -NoNewline
+        & cmdkey /delete:$taTarget 2>&1 | Out-Null
+        Test-TaSign "T8 strong-tamper-after-marker -> refuses" $false
+        Set-Content $taMetaPath -Value $taOrig -NoNewline
+    } else {
+        $kgSnip = $taKg.Trim().Substring(0, [Math]::Min(120, $taKg.Trim().Length))
+        Record "F" "trust anchor: keygen" $kgSnip
+    }
+
+    # Cleanup transient state. Marker stays set across runs (intentional --
+    # real users only run migrate-meta once per install, so subsequent
+    # matrix runs find the marker already present).
+    & $SshencBin delete -y --delete-pub $taLabel 2>&1 | Out-Null
+    & cmdkey /delete:$taTarget 2>&1 | Out-Null
+    Remove-Item $taData -ErrorAction SilentlyContinue
+    Remove-Item "$taData.sig" -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------
 # Git Bash shell. Skipped if Git Bash is unavailable (most CI runners
 # install Git, so the bash.exe path resolves; on a stripped-down image
 # we record SKIP and move on).

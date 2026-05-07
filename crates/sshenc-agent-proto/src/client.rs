@@ -137,9 +137,17 @@ pub fn try_generate_via_agent(
     comment: Option<&str>,
     access_policy: u32,
     presence_mode: u8,
+    pub_file_path: Option<&str>,
 ) -> Option<Vec<u8>> {
     let sock = env_agent_socket()?;
-    try_generate_via_socket(&sock, label, comment, access_policy, presence_mode)
+    try_generate_via_socket(
+        &sock,
+        label,
+        comment,
+        access_policy,
+        presence_mode,
+        pub_file_path,
+    )
 }
 
 pub fn try_generate_via_socket(
@@ -148,9 +156,17 @@ pub fn try_generate_via_socket(
     comment: Option<&str>,
     access_policy: u32,
     presence_mode: u8,
+    pub_file_path: Option<&str>,
 ) -> Option<Vec<u8>> {
     let mut stream = connect_agent(sock_path)?;
-    request_generate(&mut stream, label, comment, access_policy, presence_mode)
+    request_generate(
+        &mut stream,
+        label,
+        comment,
+        access_policy,
+        presence_mode,
+        pub_file_path,
+    )
 }
 
 #[must_use]
@@ -289,12 +305,14 @@ fn request_generate<S: Read + Write>(
     comment: Option<&str>,
     access_policy: u32,
     presence_mode: u8,
+    pub_file_path: Option<&str>,
 ) -> Option<Vec<u8>> {
     let payload = message::serialize_request(&AgentRequest::GenerateKey {
         label: label.as_bytes().to_vec(),
         comment: comment.map(|c| c.as_bytes().to_vec()).unwrap_or_default(),
         access_policy,
         presence_mode: Some(presence_mode),
+        pub_file_path: pub_file_path.map(|p| p.as_bytes().to_vec()),
     });
     debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_GENERATE_KEY);
     send_framed(stream, &payload)?;
@@ -719,7 +737,14 @@ mod tests {
             }],
         );
 
-        let got = try_generate_via_socket(&sock_path, "my-gen", Some("jay@box"), 0, 0);
+        let got = try_generate_via_socket(
+            &sock_path,
+            "my-gen",
+            Some("jay@box"),
+            0,
+            0,
+            Some("/home/jay/.ssh/my-gen.pub"),
+        );
         let captured = handle.join().unwrap().expect("agent thread");
         drop(std::fs::remove_file(&sock_path));
 
@@ -731,11 +756,16 @@ mod tests {
                 comment,
                 access_policy,
                 presence_mode,
+                pub_file_path,
             } => {
                 assert_eq!(label, b"my-gen");
                 assert_eq!(comment, b"jay@box");
                 assert_eq!(*access_policy, 0);
                 assert_eq!(*presence_mode, Some(0));
+                assert_eq!(
+                    pub_file_path.as_deref(),
+                    Some(b"/home/jay/.ssh/my-gen.pub".as_ref())
+                );
             }
             other => panic!("expected GenerateKey, got {other:?}"),
         }
@@ -751,7 +781,9 @@ mod tests {
             }],
         );
 
-        drop(try_generate_via_socket(&sock_path, "label", None, 1, 0));
+        drop(try_generate_via_socket(
+            &sock_path, "label", None, 1, 0, None,
+        ));
         let captured = handle.join().unwrap().expect("agent thread");
         drop(std::fs::remove_file(&sock_path));
 
@@ -773,7 +805,7 @@ mod tests {
         let sock_path = unique_socket_path("gen-fail");
         let handle = spawn_fake_agent(&sock_path, vec![AgentResponse::Failure]);
 
-        let got = try_generate_via_socket(&sock_path, "x", None, 0, 0);
+        let got = try_generate_via_socket(&sock_path, "x", None, 0, 0, None);
         drop(handle.join().ok());
         drop(std::fs::remove_file(&sock_path));
 
@@ -790,7 +822,7 @@ mod tests {
             }],
         );
 
-        let got = try_generate_via_socket(&sock_path, "x", None, 0, 0);
+        let got = try_generate_via_socket(&sock_path, "x", None, 0, 0, None);
         drop(handle.join().ok());
         drop(std::fs::remove_file(&sock_path));
 
@@ -804,6 +836,6 @@ mod tests {
             std::process::id()
         ));
         drop(std::fs::remove_file(&bogus));
-        assert!(try_generate_via_socket(&bogus, "x", None, 0, 0).is_none());
+        assert!(try_generate_via_socket(&bogus, "x", None, 0, 0, None).is_none());
     }
 }

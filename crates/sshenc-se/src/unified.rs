@@ -327,6 +327,10 @@ impl SshencBackend {
         if let Some(ref c) = opts.comment {
             meta.set_app_field("comment", c.clone());
         }
+        // SK keys take a separate `SkKeyGenOptions` (no
+        // `record_pub_path`); the SK keygen RPC isn't routed through
+        // the agent's `GenerateKey` handler today, so the
+        // record-only path doesn't apply here.
         match opts.write_pub_path.as_ref() {
             Some(path) => meta.set_app_field(
                 "pub_file_path",
@@ -336,6 +340,85 @@ impl SshencBackend {
         }
         metadata::save_meta(&self.keys_dir, label_str, &meta)
             .map_err(|e| map_err("save_meta", e))?;
+
+        // Stamp the per-key trust-anchor tag against the SK
+        // `.meta` we just wrote. The legacy ECDSA path gets this
+        // for free via the platform-backend's inline stamp inside
+        // `key_manager().generate(...)` plus a SshencBackend
+        // re-stamp; SK keygen skips both layers (it goes directly
+        // through `crate::sk::generate` → WebAuthn). Without this
+        // stamp the very first `sk_sign` after keygen would observe
+        // `Legacy` from `check_meta_integrity` and refuse — exactly
+        // the regression the trust-anchor's gentle-cutover migration
+        // path exists to handle, but during normal keygen we should
+        // produce a valid tag immediately.
+        //
+        // Best-effort on a meta-HMAC-key load failure (rare): the
+        // SK key is still usable on this install, but `sk_sign`
+        // will fail with `Legacy` until the user runs
+        // `sshenc migrate-meta`. Same posture as the legacy keygen
+        // path's fallback.
+        const SSHENC_APP_NAME: &str = "sshenc";
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_apple::meta_hmac::load_existing(SSHENC_APP_NAME) {
+                let meta_path = self.keys_dir.join(format!("{label_str}.meta"));
+                if let Ok(meta_bytes) = std::fs::read(&meta_path) {
+                    let tag = metadata::compute_meta_hmac_bytes(hk.as_slice(), &meta_bytes);
+                    if let Err(e) =
+                        enclaveapp_apple::meta_tag::store(SSHENC_APP_NAME, label_str, &tag)
+                    {
+                        tracing::warn!(
+                            label = label_str,
+                            error = %e,
+                            "post-sk-keygen meta-tag stamp failed; \
+                             first sk_sign will refuse with Legacy until \
+                             user runs `sshenc migrate-meta`"
+                        );
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_windows::meta_hmac::load_or_create(SSHENC_APP_NAME) {
+                if let Err(e) = enclaveapp_windows::meta_tag::stamp_from_disk(
+                    SSHENC_APP_NAME,
+                    label_str,
+                    &self.keys_dir,
+                    hk.as_slice(),
+                ) {
+                    tracing::warn!(
+                        label = label_str,
+                        error = %e,
+                        "post-sk-keygen meta-tag stamp failed; \
+                         first sk_sign will refuse with Legacy until \
+                         user runs `sshenc migrate-meta`"
+                    );
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_keyring::meta_hmac_key_existing(SSHENC_APP_NAME) {
+                if let Err(e) = enclaveapp_keyring::meta_tag::stamp_from_disk(
+                    SSHENC_APP_NAME,
+                    label_str,
+                    &self.keys_dir,
+                    hk.as_slice(),
+                ) {
+                    tracing::warn!(
+                        label = label_str,
+                        error = %e,
+                        "post-sk-keygen meta-tag stamp failed; \
+                         first sk_sign will refuse with Legacy until \
+                         user runs `sshenc migrate-meta`"
+                    );
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        let _ = SSHENC_APP_NAME;
 
         Ok(info)
     }
@@ -449,6 +532,33 @@ impl SshencBackend {
     #[allow(clippy::same_name_method)]
     pub fn sk_sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         drop(KeyLabel::new(label)?);
+
+        // Per-op trust-anchor check before reading anything from
+        // the SK key's `.meta`. The SK sign path consumes
+        // `credential_id_b64` (chooses which authenticator credential
+        // to sign with) and `rp_id` (relying-party identifier) out
+        // of `app_specific`; both are security-critical. A same-UID
+        // attacker who swaps `credential_id_b64` to an attacker-
+        // minted credential would otherwise get the agent to sign
+        // with the wrong credential under the user's name. The
+        // legacy ECDSA path goes through `key_manager().sign()`
+        // which fires `ensure_meta_integrity` inside the platform
+        // backend; the SK path skips that platform layer (it goes
+        // directly to WebAuthn / FIDO2), so the verify has to live
+        // here at the dispatcher.
+        //
+        // `check_meta_integrity` is platform-dispatching (macOS
+        // Keychain, Windows Credential Manager, Linux Secret
+        // Service) and read-only on every backend.
+        const SSHENC_APP_NAME: &str = "sshenc";
+        if let Err(e) = enclaveapp_app_storage::platform::check_meta_integrity(
+            SSHENC_APP_NAME,
+            label,
+            &self.keys_dir,
+        ) {
+            return Err(Error::Other(format!("sk_sign: {e}")));
+        }
+
         let meta =
             compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
         if meta.get_app_field("algorithm") != Some("sk-ecdsa-sha2-nistp256") {
@@ -569,7 +679,16 @@ impl KeyBackend for SshencBackend {
         if let Some(ref comment) = opts.comment {
             meta.set_app_field("comment", comment.clone());
         }
-        match opts.write_pub_path.as_ref() {
+        // Prefer `write_pub_path` (we're about to write this file) but
+        // fall back to `record_pub_path` (the agent's case: the CLI
+        // will write the file, we just record the path so the
+        // trust-anchor tag stamps the correct meta). See
+        // `KeyGenOptions::record_pub_path`.
+        match opts
+            .write_pub_path
+            .as_ref()
+            .or(opts.record_pub_path.as_ref())
+        {
             Some(path) => meta.set_app_field(
                 "pub_file_path",
                 path.as_os_str().to_string_lossy().to_string(),
@@ -582,6 +701,91 @@ impl KeyBackend for SshencBackend {
         );
         metadata::save_meta(&self.keys_dir, label_str, &meta)
             .map_err(|e| map_err("save_meta", e))?;
+
+        // Re-stamp the per-key meta-integrity tag against the FINAL
+        // on-disk meta. The platform backend (`TpmSigner::generate` /
+        // `Apple::generate_and_save_key`) already stamped a tag at
+        // the end of `key_manager().generate(...)` above, but those
+        // saw a meta WITHOUT the `app_specific` fields appended just
+        // now — the platform backend goes through the
+        // `EnclaveKeyManager` trait which only carries label /
+        // key_type / access_policy, never `comment` /
+        // `presence_mode` / `pub_file_path`. The platform tag is
+        // therefore stale by the time keygen completes; without this
+        // re-stamp the first sign-time `meta_tag::verify` would
+        // observe a tamper-style mismatch on a freshly-created key.
+        //
+        // Both Credential Manager (Windows) and the macOS legacy
+        // Keychain make the underlying secure-store write idempotent
+        // on overwrite, so a re-stamp is cheap. Best-effort on a
+        // meta-HMAC-key load failure: the platform-backend's inline
+        // stamp survives as a fallback and the user can recover by
+        // running `sshenc migrate-meta` once.
+        //
+        // SshencBackend hardcodes the "sshenc" app namespace (see
+        // `SshencBackend::new` / test fixture); the platform
+        // secure-store paths share that namespace.
+        const SSHENC_APP_NAME: &str = "sshenc";
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_windows::meta_hmac::load_or_create(SSHENC_APP_NAME) {
+                if let Err(e) = enclaveapp_windows::meta_tag::stamp_from_disk(
+                    SSHENC_APP_NAME,
+                    label_str,
+                    &self.keys_dir,
+                    hk.as_slice(),
+                ) {
+                    tracing::warn!(
+                        label = label_str,
+                        error = %e,
+                        "post-app-specific meta-tag re-stamp failed; \
+                         platform-backend inline tag remains as fallback — \
+                         user should run `sshenc migrate-meta` to recover"
+                    );
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_apple::meta_hmac::load_existing(SSHENC_APP_NAME) {
+                let meta_path = self.keys_dir.join(format!("{label_str}.meta"));
+                if let Ok(meta_bytes) = std::fs::read(&meta_path) {
+                    let tag = metadata::compute_meta_hmac_bytes(hk.as_slice(), &meta_bytes);
+                    if let Err(e) =
+                        enclaveapp_apple::meta_tag::store(SSHENC_APP_NAME, label_str, &tag)
+                    {
+                        tracing::warn!(
+                            label = label_str,
+                            error = %e,
+                            "post-app-specific meta-tag re-stamp failed; \
+                             platform-backend inline tag remains as fallback — \
+                             user should run `sshenc migrate-meta` to recover"
+                        );
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_keyring::meta_hmac_key_existing(SSHENC_APP_NAME) {
+                if let Err(e) = enclaveapp_keyring::meta_tag::stamp_from_disk(
+                    SSHENC_APP_NAME,
+                    label_str,
+                    &self.keys_dir,
+                    hk.as_slice(),
+                ) {
+                    tracing::warn!(
+                        label = label_str,
+                        error = %e,
+                        "post-app-specific meta-tag re-stamp failed; \
+                         platform-backend inline tag remains as fallback — \
+                         user should run `sshenc migrate-meta` to recover"
+                    );
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        let _ = SSHENC_APP_NAME;
 
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, opts.comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);

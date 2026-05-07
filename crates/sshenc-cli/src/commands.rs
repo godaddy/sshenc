@@ -689,6 +689,7 @@ pub fn keygen(
         access_policy,
         presence_mode,
         write_pub_path: write_pub.clone(),
+        record_pub_path: None,
     };
     let first_attempt = backend.generate(&opts);
 
@@ -730,6 +731,7 @@ pub fn keygen(
                 access_policy,
                 presence_mode,
                 write_pub_path: write_pub.clone(),
+                record_pub_path: None,
             };
             let new_info = backend.generate(&opts)?;
             (new_info, Some(old), Some((old_blob_b64, hits)))
@@ -2572,6 +2574,7 @@ mod tests {
             access_policy: AccessPolicy::None,
             presence_mode: sshenc_core::PresenceMode::None,
             write_pub_path: None,
+            record_pub_path: None,
         };
         backend.generate(&opts).unwrap();
         backend

@@ -236,6 +236,59 @@ impl SshSkPublicKey {
     pub fn comment(&self) -> Option<&str> {
         self.comment.as_deref()
     }
+
+    /// Parse an OpenSSH `sk-ecdsa-sha2-nistp256@openssh.com` line back
+    /// into an SshSkPublicKey. Mirrors `SshPublicKey::from_openssh_line`
+    /// for the SK key type so callers (notably the CLI's `-Y sign`
+    /// path) can accept either format and route the resulting wire
+    /// blob to the agent for signing.
+    pub fn from_openssh_line(line: &str) -> Result<Self> {
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        if parts.len() < 2 {
+            return Err(Error::InvalidPublicKey(
+                "expected at least 'key-type base64-blob'".into(),
+            ));
+        }
+        let key_type = parts[0];
+        if key_type != KeyAlgorithm::SkEcdsaP256.ssh_key_type() {
+            return Err(Error::InvalidPublicKey(format!(
+                "expected sk-ecdsa-sha2-nistp256@openssh.com, got: {key_type}"
+            )));
+        }
+        let blob = STANDARD
+            .decode(parts[1])
+            .map_err(|e| Error::InvalidPublicKey(format!("invalid base64: {e}")))?;
+        let comment = parts.get(2).map(|s| (*s).to_string());
+        // Wire format per PROTOCOL.u2f:
+        //   string  "sk-ecdsa-sha2-nistp256@openssh.com"
+        //   string  "nistp256"
+        //   string  ec_point   (uncompressed: 0x04 || X || Y, 65 bytes)
+        //   string  application
+        let (algo, rest) = read_ssh_string(&blob)?;
+        if algo != KeyAlgorithm::SkEcdsaP256.ssh_key_type().as_bytes() {
+            return Err(Error::InvalidPublicKey(format!(
+                "wire algo mismatch: got {}",
+                String::from_utf8_lossy(algo)
+            )));
+        }
+        let (curve, rest) = read_ssh_string(rest)?;
+        if curve != KeyAlgorithm::SkEcdsaP256.ssh_curve_id().as_bytes() {
+            return Err(Error::InvalidPublicKey(format!(
+                "wire curve mismatch: got {}",
+                String::from_utf8_lossy(curve)
+            )));
+        }
+        let (ec_point, rest) = read_ssh_string(rest)?;
+        let (application, rest) = read_ssh_string(rest)?;
+        if !rest.is_empty() {
+            return Err(Error::InvalidPublicKey(
+                "trailing bytes in sk-ecdsa pubkey blob".into(),
+            ));
+        }
+        let application = String::from_utf8(application.to_vec())
+            .map_err(|e| Error::InvalidPublicKey(format!("invalid application string: {e}")))?;
+        SshSkPublicKey::from_sec1_bytes(ec_point, application, comment)
+    }
 }
 
 /// Encode an SSH SK signature blob from a DER-encoded ECDSA

@@ -2213,6 +2213,28 @@ fn ssh_sign_with_backend(
     write_sshsig_pem_file(&sig_blob, &sign_args.data_file)
 }
 
+/// Either flavor of public key the `-Y sign` agent path accepts. Regular
+/// ECDSA P-256 keys (`ecdsa-sha2-nistp256`) and FIDO2/WebAuthn-backed
+/// SK keys (`sk-ecdsa-sha2-nistp256@openssh.com`) have different
+/// wire encodings but both end up as identity blobs the agent matches
+/// against and signs through. The CLI doesn't need to know which
+/// flavor it has past the parse step -- it just hands the blob to
+/// the agent and stuffs the returned signature into the SSHSIG
+/// envelope.
+enum SignablePubkey {
+    Ecdsa(SshPublicKey),
+    Sk(sshenc_core::pubkey::SshSkPublicKey),
+}
+
+impl SignablePubkey {
+    fn wire_blob(&self) -> Vec<u8> {
+        match self {
+            SignablePubkey::Ecdsa(k) => k.wire_blob(),
+            SignablePubkey::Sk(k) => k.to_wire_format(),
+        }
+    }
+}
+
 /// Handle ssh-keygen-compatible signing mode.
 ///
 /// Git calls: `sshenc -Y sign -n <namespace> -f <pubkey_path> <data_file>`.
@@ -2225,6 +2247,11 @@ fn ssh_sign_with_backend(
 /// because that would reintroduce the cross-binary
 /// code-signature prompts centralizing through the agent is
 /// supposed to eliminate.
+///
+/// Both regular ECDSA-P256 keys and SK (FIDO2/WebAuthn) keys are
+/// supported -- they go through the same agent path; the agent
+/// dispatches to webauthn.dll for SK, CNG/CryptoKit/keyring for
+/// regular.
 pub fn ssh_sign(args: &[String]) -> Result<()> {
     let sign_args = parse_ssh_sign_args(args)?;
     let file_data = std::fs::read(&sign_args.data_file)?;
@@ -2247,26 +2274,42 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
         )
     })?;
     tracing::debug!("ssh_sign: signed via agent proxy");
-    let sig_blob = build_ssh_signature_from_ssh_sig(&requested_pub, &sign_args.namespace, &ssh_sig);
+    let sig_blob = build_ssh_signature_from_ssh_sig(&pubkey_blob, &sign_args.namespace, &ssh_sig);
     write_sshsig_pem_file(&sig_blob, &sign_args.data_file)
 }
 
-fn read_pubkey_from_openssh_file(path: &Path) -> Result<SshPublicKey> {
+fn read_pubkey_from_openssh_file(path: &Path) -> Result<SignablePubkey> {
     let contents = std::fs::read_to_string(path)?;
     let line = contents
         .lines()
         .find(|line| !line.trim().is_empty())
         .map(str::trim)
         .ok_or_else(|| anyhow!("public key file is empty: {}", path.display()))?;
-    Ok(SshPublicKey::from_openssh_line(line)?)
+    // Dispatch on the key-type prefix. SK keys live in webauthn.dll
+    // / Secure Enclave passkeys; regular keys live in TPM/keyring.
+    // The agent figures out which on its end -- we just need to
+    // hand it the right wire-format blob.
+    let key_type = line.split_whitespace().next().unwrap_or("");
+    if key_type == "sk-ecdsa-sha2-nistp256@openssh.com" {
+        Ok(SignablePubkey::Sk(
+            sshenc_core::pubkey::SshSkPublicKey::from_openssh_line(line)?,
+        ))
+    } else {
+        Ok(SignablePubkey::Ecdsa(SshPublicKey::from_openssh_line(
+            line,
+        )?))
+    }
 }
 
 /// Build an SSH signature blob from an already-SSH-formatted
-/// signature (`string(algo) || string(mpint(r) || mpint(s))`). The
-/// agent proxy path uses this directly; the local-backend path goes
-/// through [`build_ssh_signature`] first to convert DER.
+/// signature. For regular ECDSA the inner format is
+/// `string(algo) || string(mpint(r) || mpint(s))`; for SK keys the
+/// agent already returns the full SK-format blob
+/// (`string(algo) || string(ecdsa_sig) || byte(flags) || uint32(counter)`).
+/// Either way, this function just stuffs the bytes into the SSHSIG
+/// envelope alongside the public-key blob the verifier needs.
 fn build_ssh_signature_from_ssh_sig(
-    pubkey: &SshPublicKey,
+    pubkey_blob: &[u8],
     namespace: &str,
     ssh_sig: &[u8],
 ) -> Vec<u8> {
@@ -2275,8 +2318,7 @@ fn build_ssh_signature_from_ssh_sig(
     let mut buf = Vec::new();
     buf.extend_from_slice(b"SSHSIG");
     buf.extend_from_slice(&1_u32.to_be_bytes());
-    let pubkey_blob = pubkey.wire_blob();
-    write_ssh_string(&mut buf, &pubkey_blob);
+    write_ssh_string(&mut buf, pubkey_blob);
     write_ssh_string(&mut buf, namespace.as_bytes());
     write_ssh_string(&mut buf, b"");
     write_ssh_string(&mut buf, b"sha256");
@@ -2285,11 +2327,15 @@ fn build_ssh_signature_from_ssh_sig(
 }
 
 /// Build an SSH signature blob from a DER-encoded ECDSA signature.
+/// Used only by the local-backend (non-agent) signing path, which
+/// never sees SK keys, so this stays typed to `SshPublicKey`.
 #[allow(dead_code)] // Windows uses this; on Unix, tests may call it.
 fn build_ssh_signature(pubkey: &SshPublicKey, namespace: &str, der_sig: &[u8]) -> Result<Vec<u8>> {
     let ssh_sig = sshenc_agent_proto::signature::der_to_ssh_signature(der_sig)?;
     Ok(build_ssh_signature_from_ssh_sig(
-        pubkey, namespace, &ssh_sig,
+        &pubkey.wire_blob(),
+        namespace,
+        &ssh_sig,
     ))
 }
 

@@ -256,6 +256,31 @@ enum Commands {
         /// Shell to generate completions for (bash, zsh, fish).
         shell: clap_complete::Shell,
     },
+
+    /// One-time meta-integrity migration after upgrading to a build
+    /// that introduces keychain-backed integrity tags.
+    ///
+    /// Re-stamps a meta-integrity tag for every existing key based on
+    /// the current `.meta` content on disk, after showing the
+    /// per-key fingerprint and policy fields for human review. Once
+    /// it completes, future upgrades will NOT ask you to run this
+    /// again — if you see this prompt suggested again later, treat
+    /// it as a tamper signal and regenerate the affected key
+    /// instead.
+    MigrateMeta {
+        /// Skip the interactive `yes` confirmation. Intended for
+        /// scripted installers / CI fixtures only. Bypasses the
+        /// human-review step that exists for security reasons.
+        #[arg(long)]
+        yes: bool,
+
+        /// Run migrate-meta a second time on an install where it has
+        /// already completed. Refused without this flag because
+        /// repeat migration is exactly what an attacker would want
+        /// you to do. Carries a long, deliberately awkward name.
+        #[arg(long, hide = true)]
+        force_rerun_i_understand: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -528,6 +553,10 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
         Commands::Identity { label, name, email } => commands::set_identity(&label, &name, &email),
         Commands::Default { label } => commands::promote_to_default(&label),
         Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
+        Commands::MigrateMeta {
+            yes,
+            force_rerun_i_understand,
+        } => commands::migrate_meta(yes, force_rerun_i_understand),
         Commands::Completions { shell } => {
             if shell == clap_complete::Shell::Zsh {
                 // Wrap zsh completions: guard all compdef calls so they only

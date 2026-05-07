@@ -1183,11 +1183,99 @@ fn handle_request(
                 }
             }
         }
+        AgentRequest::MigrateMeta { label } => {
+            let label_str = match std::str::from_utf8(&label) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("migrate_meta: label not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            tracing::info!(label = label_str, "handling migrate_meta request");
+
+            if !allowed_labels.is_empty() && !allowed_labels.contains(label_str) {
+                tracing::warn!(
+                    label = label_str,
+                    "migrate_meta: label not in agent's allowed list"
+                );
+                return Ok(AgentResponse::Failure);
+            }
+
+            // Always use the canonical sshenc keys directory for
+            // migrate-meta. The agent never writes meta-tags for
+            // labels it doesn't already manage; we don't accept a
+            // dir override on the wire because that would let any
+            // local CLI talk the agent into stamping a tag for
+            // arbitrary content.
+            let dir = enclaveapp_core::metadata::keys_dir("sshenc");
+            match perform_migrate_meta(&dir, label_str) {
+                Ok(()) => {
+                    tracing::info!(label = label_str, "migrate_meta: succeeded");
+                    Ok(AgentResponse::Success)
+                }
+                Err(e) => {
+                    tracing::warn!(label = label_str, error = %e, "migrate_meta: failed");
+                    Ok(AgentResponse::Failure)
+                }
+            }
+        }
         AgentRequest::Unknown(msg_type) => {
             tracing::debug!(msg_type, "unknown message type");
             Ok(AgentResponse::Failure)
         }
     }
+}
+
+/// Stamp a fresh meta-integrity tag for `label` based on the current
+/// on-disk `<label>.meta`. macOS-only; on other platforms returns Ok
+/// without doing anything (those platforms don't yet have the
+/// keychain-tag trust anchor; until they do, the existing
+/// sidecar-based path remains in effect).
+#[cfg(target_os = "macos")]
+fn perform_migrate_meta(dir: &Path, label: &str) -> Result<(), String> {
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Err(format!(
+            "no `.meta` for label `{label}` in {}",
+            dir.display()
+        ));
+    }
+    let meta_bytes =
+        std::fs::read(&meta_path).map_err(|e| format!("read {}: {e}", meta_path.display()))?;
+
+    let hmac_key = match enclaveapp_apple::meta_hmac::load_or_create("sshenc")
+        .map_err(|e| format!("meta-HMAC key load: {e}"))?
+    {
+        Some(k) => k,
+        None => {
+            return Err(
+                "meta-HMAC key unavailable (Keychain unreachable); cannot stamp tag".into(),
+            );
+        }
+    };
+
+    let tag = enclaveapp_core::metadata::compute_meta_hmac_bytes(hmac_key.as_slice(), &meta_bytes);
+    enclaveapp_apple::meta_tag::store("sshenc", label, &tag)
+        .map_err(|e| format!("meta_tag store: {e}"))?;
+
+    // Best-effort sidecar (cache).
+    let mut tag_hex = String::with_capacity(64);
+    for byte in tag {
+        tag_hex.push_str(&format!("{byte:02x}"));
+    }
+    let hmac_path = dir.join(format!("{label}.meta.hmac"));
+    if let Err(e) = enclaveapp_core::metadata::atomic_write(&hmac_path, tag_hex.as_bytes()) {
+        tracing::warn!(label = label, error = %e, "migrate_meta: sidecar write failed (best-effort)");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn perform_migrate_meta(_dir: &std::path::Path, _label: &str) -> Result<(), String> {
+    // Platform doesn't yet have the keychain-tag trust anchor;
+    // migrate-meta is a no-op there until that work lands.
+    Ok(())
 }
 
 /// Windows named-pipe security-attributes holder.

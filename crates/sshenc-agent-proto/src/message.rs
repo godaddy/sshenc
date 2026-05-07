@@ -37,6 +37,15 @@ pub const SSH_AGENT_SUCCESS: u8 = 6;
 pub const SSH_AGENTC_SSHENC_DELETE_KEY: u8 = 0xF0;
 pub const SSH_AGENTC_SSHENC_GENERATE_KEY: u8 = 0xF1;
 pub const SSH_AGENTC_SSHENC_RENAME_KEY: u8 = 0xF3;
+/// `SSH_AGENTC_SSHENC_MIGRATE_META`: have the agent stamp a
+/// keychain meta-tag for the named label using the current on-disk
+/// `.meta` content. Used by `sshenc migrate-meta` to one-shot
+/// upgrade pre-trust-anchor keys after the user has reviewed and
+/// confirmed each key's policy fields. The agent is the only
+/// binary that should ever write meta-tag items (legacy-keychain
+/// ACL invariant), so the CLI delegates rather than calling the
+/// FFI directly.
+pub const SSH_AGENTC_SSHENC_MIGRATE_META: u8 = 0xF4;
 
 // sshenc-specific response: carries the public-key bytes of a
 // freshly-generated key back to the CLI. On failure the agent uses
@@ -108,6 +117,17 @@ pub enum AgentRequest {
     RenameKey {
         old_label: Vec<u8>,
         new_label: Vec<u8>,
+    },
+    /// `SSH_AGENTC_SSHENC_MIGRATE_META` (sshenc extension): stamp a
+    /// keychain meta-tag for the named label using the current
+    /// on-disk `.meta` content. The agent reads `<label>.meta`,
+    /// computes its HMAC under the per-app meta-HMAC key, and
+    /// writes the result to the per-key meta-tag Keychain item.
+    /// One label per request — the CLI's `migrate-meta` subcommand
+    /// iterates after the user confirms.
+    MigrateMeta {
+        /// The key label as UTF-8 bytes.
+        label: Vec<u8>,
     },
     /// An unrecognized message type.
     Unknown(u8),
@@ -196,6 +216,11 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
                 new_label,
             })
         }
+        SSH_AGENTC_SSHENC_MIGRATE_META => {
+            let mut cursor = Cursor::new(body);
+            let label = wire::read_string(&mut cursor)?;
+            Ok(AgentRequest::MigrateMeta { label })
+        }
         other => Ok(AgentRequest::Unknown(other)),
     }
 }
@@ -274,6 +299,11 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
             let mut buf = vec![SSH_AGENTC_SSHENC_RENAME_KEY];
             wire::write_string(&mut buf, old_label);
             wire::write_string(&mut buf, new_label);
+            buf
+        }
+        AgentRequest::MigrateMeta { label } => {
+            let mut buf = vec![SSH_AGENTC_SSHENC_MIGRATE_META];
+            wire::write_string(&mut buf, label);
             buf
         }
         AgentRequest::Unknown(t) => vec![*t],

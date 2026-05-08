@@ -83,8 +83,20 @@ param(
     # Per-distro timeout (seconds) for the WSL bash matrix script.
     # Hot machines complete in ~30s; cold WSL VM + cold Windows TPM
     # bridge can take 90+. 180s is a comfortable upper bound.
-    [int]$WslTimeout = 180
+    [int]$WslTimeout = 180,
+
+    # Allow Initialize-WslDistroForTest to escalate to
+    # `wsl --terminate docker-desktop` on probe failure. Stops the
+    # user's Docker containers; opt-in only. Without this, a probe
+    # failure logs an INFO and proceeds (the bridge path generally
+    # works regardless of whether the probe caught the ready state
+    # in time -- documented inside Initialize-WslDistroForTest).
+    [switch]$AggressiveWslReset
 )
+
+# Surface the param into a script-scope variable so the helper
+# functions defined below can see it without taking an extra arg.
+$script:AggressiveWslReset = $AggressiveWslReset.IsPresent
 
 $ErrorActionPreference = "Continue"
 $script:Pass = 0
@@ -439,18 +451,42 @@ function Sync-SharedKeysToWsl {
 # `/proc/sys/fs/binfmt_misc/register`. Idempotent -- if WSLInterop
 # is already registered the kernel returns EEXIST which we ignore.
 # Requires root; we always pass `-u root`.
+# Force-reregister the WSLInterop binfmt_misc handler. Unconditional
+# unregister-then-register: a stale `:WSLInterop:` entry whose magic
+# bytes don't match `MZ` (or whose interpreter path points at a
+# torn-down Docker Desktop /init) silently fails every PE/COFF exec
+# attempt. The previous `[ -f WSLInterop ] || register` form skipped
+# the write whenever the file existed, so a stale entry never got
+# cleared. Run as root in the target distro.
 function Repair-WslInterop {
     param([string]$Distro)
-    & wsl.exe -d $Distro -u root -- bash -c '[ -f /proc/sys/fs/binfmt_misc/WSLInterop ] || echo ":WSLInterop:M::MZ::/init:PF" > /proc/sys/fs/binfmt_misc/register' 2>&1 | Out-Null
+    $repair = @'
+[ -d /proc/sys/fs/binfmt_misc ] || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null
+[ -f /proc/sys/fs/binfmt_misc/WSLInterop ] && echo -1 > /proc/sys/fs/binfmt_misc/WSLInterop 2>/dev/null
+echo ":WSLInterop:M::MZ::/init:PF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null
+'@
+    & wsl.exe -d $Distro -u root -- bash -c $repair 2>&1 | Out-Null
 }
 
-# Probe WSLInterop in the named distro by trying to exec `whoami.exe`
-# with a 5-second timeout. Returns $true if the probe succeeds.
-# Calls Repair-WslInterop first, so a missing registration is fixed
-# automatically before the probe runs.
+# Probe WSLInterop with a retry loop tolerant of cold-start latency.
+# After `wsl --shutdown`, the next `wsl.exe -d <distro>` invocation
+# cold-starts the distro -- /init mounts, binfmt_misc registers,
+# /mnt/c bind-mounts. On Ubuntu/Debian/Fedora/Alma that sequence
+# routinely takes 5-8 seconds; a single 2.5s settle + 5s probe-
+# timeout (the previous shape) probed mid-init and false-negative'd
+# on every distro, even though the actual sshenc bridge calls a few
+# seconds later worked fine. Net effect: every matrix run printed
+# "still broken after terminate+shutdown" warnings, terminated the
+# user's docker-desktop containers, then PASS'd 9/9 anyway.
+#
+# Loop: try whoami.exe via the binfmt_misc interp every 1s for up
+# to 20 attempts (~20s wall clock). Exit early on the first success.
+# Repair-WslInterop is rerun on each iteration so a stale registration
+# that gets clobbered by a sibling distro's startup (Docker Desktop's
+# `docker-desktop` distro is the known culprit) is force-recovered
+# without escalating to `wsl --terminate`.
 function Test-WslInteropWorking {
-    param([string]$Distro)
-    Repair-WslInterop -Distro $Distro
+    param([string]$Distro, [int]$AttemptBudget = 20)
     $probe = @'
 timeout 5 /mnt/c/Windows/System32/whoami.exe >/dev/null 2>&1
 echo "exit=$?"
@@ -461,30 +497,50 @@ echo "exit=$?"
         [System.Text.UTF8Encoding]::new($false).GetBytes($probe)
     )
     $wslProbe = ConvertTo-WslPath $probePath
-    $out = (& wsl.exe -d $Distro -- bash $wslProbe 2>&1 | Out-String)
-    Remove-Item $probePath -ErrorAction SilentlyContinue
-    return ($out -match 'exit=0\b')
+    try {
+        for ($i = 0; $i -lt $AttemptBudget; $i++) {
+            Repair-WslInterop -Distro $Distro
+            $out = (& wsl.exe -d $Distro -- bash $wslProbe 2>&1 | Out-String)
+            if ($out -match 'exit=0\b') { return $true }
+            Start-Sleep -Milliseconds 1000
+        }
+    } finally {
+        Remove-Item $probePath -ErrorAction SilentlyContinue
+    }
+    return $false
 }
 
-# Reset WSL state in front of the next test distro. With the
-# Repair-WslInterop helper inside Test-WslInteropWorking, the
-# common case is now a single `wsl --shutdown` + repair + probe.
-# The escalating retries (longer settle, terminate docker-desktop)
-# stay as defense-in-depth for the rare case where WSL itself is
-# in a really bad state and the binfmt_misc filesystem isn't even
-# mounted. Returns $true if the distro is ready.
+# Reset WSL state in front of the next test distro.
+#
+# Default: `wsl --shutdown`, brief settle, then a retry-loop probe
+# (Test-WslInteropWorking) that handles cold-start timing internally.
+# Returns true on success, false if 20 retries (~20s) couldn't get
+# WSLInterop to register.
+#
+# `-AggressiveWslReset` (matrix-script param): on probe failure,
+# escalate to `wsl --terminate docker-desktop`. This stops the user's
+# Docker containers and is opt-in only. Previously this fired
+# automatically on every distro because the cold-start race made the
+# probe false-negative reliably, killing containers on every matrix
+# run for no real benefit -- the test paths that follow work without
+# the terminate step (the matrix recorded 9/9 PASS per distro even
+# when the probe was reporting "broken after terminate+shutdown").
+# Operators who really need a clean slate can opt in.
 function Initialize-WslDistroForTest {
     param([string]$Distro)
     & wsl.exe --shutdown 2>&1 | Out-Null
     Start-Sleep -Milliseconds 2500
     if (Test-WslInteropWorking -Distro $Distro) { return $true }
 
-    Write-Host "  [WARN] $Distro WSLInterop probe failed; retrying with longer settle" -ForegroundColor Yellow
-    & wsl.exe --shutdown 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 5000
-    if (Test-WslInteropWorking -Distro $Distro) { return $true }
+    if (-not $script:AggressiveWslReset) {
+        Write-Host "  [INFO] $Distro WSLInterop probe didn't catch ready state in 20s; proceeding anyway" -ForegroundColor DarkGray
+        Write-Host "         (the bridge path generally settles by the time the test runs;" -ForegroundColor DarkGray
+        Write-Host "          re-run with -AggressiveWslReset to terminate docker-desktop and" -ForegroundColor DarkGray
+        Write-Host "          retry if you do see the WSL section actually fail)" -ForegroundColor DarkGray
+        return $false
+    }
 
-    Write-Host "  [WARN] $Distro WSLInterop still broken after retry; escalating to" -ForegroundColor Red
+    Write-Host "  [WARN] $Distro WSLInterop still broken; -AggressiveWslReset set, escalating to" -ForegroundColor Red
     Write-Host "         'wsl --terminate docker-desktop'. This will stop any running" -ForegroundColor Red
     Write-Host "         Docker containers; restart Docker Desktop after the matrix" -ForegroundColor Red
     Write-Host "         finishes if you need them back." -ForegroundColor Red

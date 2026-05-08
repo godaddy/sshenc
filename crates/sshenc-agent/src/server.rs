@@ -397,35 +397,72 @@ pub async fn run_agent(
 /// Force the backend's identity enumeration to complete before the
 /// caller signals ready. On WSL the unified backend's `list` round-
 /// trips through the JSON-RPC bridge to a Windows-side TPM; the very
-/// first call after the bridge subprocess spawns can take 5-10s.
-/// Letting the agent's first client request pay that cost surfaces
-/// as a race where ssh-keygen -Y sign runs before the agent has
-/// finished enumerating and gets "No private key found" back even
-/// though the key is on disk.
+/// first call after the bridge subprocess spawns can take 5-10s,
+/// and on a cold Hyper-V VM + cold TPM service it can ENOEXEC or
+/// time out for the first 30+ seconds.
 ///
-/// Errors here are intentionally swallowed (logged at WARN). A
-/// transient enumeration failure shouldn't block the agent from
-/// starting -- subsequent client requests will retry naturally and
-/// surface the real failure with full context.
+/// Without retry, a failed first list() left the matrix's polling
+/// loop spinning for 60s on every WSL distro start, then forced an
+/// agent restart. The race wasn't transient — it was an architecture
+/// hole where every cold-start paid 60s wall-clock per distro for
+/// no functional reason.
+///
+/// Retry with exponential backoff up to ~30s. The socket is already
+/// bound by the time we get here, so any client connecting during
+/// the warmup blocks on `accept` rather than seeing an empty
+/// identity list. signal_ready (called next) only fires after a
+/// successful warmup or the full retry budget, so when the agent
+/// signals ready it really IS ready: clients see the identities
+/// from their very first request.
+///
+/// If the retries all fail (e.g. truly broken bridge / no TPM
+/// available), proceed anyway — the agent must still start so
+/// clients can surface the real error rather than getting "agent
+/// not running" forever.
 fn warm_backend_identities(backend: &dyn KeyBackend) {
+    // Total budget: 200+500+1000+2000+4000+8000+16000 = 31700ms.
+    // Roughly matches the cold-bridge wall-clock observed on a
+    // cold WSL VM + cold Windows TPM service in matrix runs.
+    const BACKOFFS_MS: &[u64] = &[200, 500, 1000, 2000, 4000, 8000, 16000];
+
     let started = Instant::now();
-    match backend.list() {
-        Ok(keys) => {
-            tracing::info!(
-                count = keys.len(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "agent: backend identity cache warmed"
-            );
+    let mut last_err: Option<sshenc_core::error::Error> = None;
+    let mut tried = 0_usize;
+
+    for &delay in std::iter::once(&0_u64).chain(BACKOFFS_MS.iter()) {
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
         }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "agent: backend identity warmup failed; first client request \
-                 will retry and surface any real failure"
-            );
+        tried += 1;
+        match backend.list() {
+            Ok(keys) => {
+                tracing::info!(
+                    count = keys.len(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    attempts = tried,
+                    "agent: backend identity cache warmed"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    attempt = tried,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "agent: identity warmup attempt failed; retrying"
+                );
+                last_err = Some(e);
+            }
         }
     }
+
+    tracing::warn!(
+        error = %last_err.map_or_else(|| "<unknown>".to_string(), |e| format!("{e}")),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        attempts = tried,
+        "agent: backend identity warmup failed after retries; signaling ready anyway \
+         so the next client request surfaces the real failure"
+    );
 }
 
 fn signal_ready(path: Option<&Path>) -> Result<()> {

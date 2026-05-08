@@ -460,11 +460,17 @@ function Sync-SharedKeysToWsl {
 # cleared. Run as root in the target distro.
 function Repair-WslInterop {
     param([string]$Distro)
+    # `@'...'@` heredocs preserve the source file's line endings.
+    # On Windows that's CRLF, and bash interprets the trailing
+    # `\r` as part of the redirect target -- e.g. `2>&1\r` parses
+    # as a redirect to fd `&1\r` and bash bails with
+    # `line 1: 1: ambiguous redirect`. Normalize to LF before
+    # running the heredoc inside Linux.
     $repair = @'
 [ -d /proc/sys/fs/binfmt_misc ] || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null
 [ -f /proc/sys/fs/binfmt_misc/WSLInterop ] && echo -1 > /proc/sys/fs/binfmt_misc/WSLInterop 2>/dev/null
 echo ":WSLInterop:M::MZ::/init:PF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null
-'@
+'@ -replace "`r`n", "`n" -replace "`r", "`n"
     & wsl.exe -d $Distro -u root -- bash -c $repair 2>&1 | Out-Null
 }
 
@@ -487,10 +493,17 @@ echo ":WSLInterop:M::MZ::/init:PF" > /proc/sys/fs/binfmt_misc/register 2>/dev/nu
 # without escalating to `wsl --terminate`.
 function Test-WslInteropWorking {
     param([string]$Distro, [int]$AttemptBudget = 20)
-    $probe = @'
+    # Normalize CRLF -> LF: see same-named comment in Repair-WslInterop.
+    # The "ambiguous redirect" failure that motivated this whole
+    # function being a retry-loop in the first place was actually
+    # CRLF in the script content, not a binfmt_misc race. Without
+    # this, every probe fails with `line 1: 1: ambiguous redirect`
+    # because bash sees `2>&1\r` and treats `&1\r` as the fd-dup
+    # target. With LF-only, the same probe succeeds on attempt 0.
+    $probe = (@'
 timeout 5 /mnt/c/Windows/System32/whoami.exe >/dev/null 2>&1
 echo "exit=$?"
-'@
+'@ -replace "`r`n", "`n" -replace "`r", "`n")
     $probePath = "$env:TEMP\sshenc-wslinterop-probe-$PID.sh"
     [System.IO.File]::WriteAllBytes(
         $probePath,

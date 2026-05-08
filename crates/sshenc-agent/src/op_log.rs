@@ -185,7 +185,12 @@ fn write_line(path: &std::path::Path, line: &str) {
 #[cfg(unix)]
 fn set_private_permissions(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    // `drop(...)` rather than `let _ = ...` so we don't trip
+    // `clippy::let_underscore_drop` (Result has a destructor); and
+    // not `let _unused = ...` either, which trips
+    // `clippy::no_effect_underscore_binding`. Permission-tighten
+    // failures are best-effort: we already wrote the line.
+    drop(fs::set_permissions(path, fs::Permissions::from_mode(0o600)));
 }
 
 #[cfg(not(unix))]

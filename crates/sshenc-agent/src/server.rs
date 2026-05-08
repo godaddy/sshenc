@@ -21,7 +21,6 @@ use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(unix)]
 use std::time::Instant;
 use tokio::signal;
 
@@ -409,10 +408,6 @@ pub async fn run_agent(
 /// starting -- subsequent client requests will retry naturally and
 /// surface the real failure with full context.
 fn warm_backend_identities(backend: &dyn KeyBackend) {
-    // Local import: the file-level `use std::time::Instant` is
-    // `#[cfg(unix)]`, but this helper is called from both the unix
-    // and windows variants of `run_agent`.
-    use std::time::Instant;
     let started = Instant::now();
     match backend.list() {
         Ok(keys) => {
@@ -903,7 +898,7 @@ fn handle_request(
             // legacy ECDSA where we have to wrap a DER signature.
             if backend.is_sk_label(label.as_str()) {
                 tracing::debug!(label = label.as_str(), "dispatching SK sign request");
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 let sk_result = backend.sk_sign(label.as_str(), &data);
                 crate::op_log::record(
                     "sign",
@@ -985,7 +980,7 @@ fn handle_request(
             // wrapping-key cache uses); macOS plumbs this into the
             // `LAContext.touchIDAuthenticationAllowableReuseDuration`
             // for `Cached` mode.
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             let sign_result = backend.sign_with_presence(label.as_str(), &data, effective_mode, 0);
             crate::op_log::record(
                 "sign",
@@ -1125,7 +1120,7 @@ fn handle_request(
                 record_pub_path: pub_path_owned,
             };
 
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             let gen_result = backend.generate(&opts);
             crate::op_log::record(
                 "generate",
@@ -1183,7 +1178,7 @@ fn handle_request(
                 return Ok(AgentResponse::Failure);
             }
 
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             let rename_result = backend.rename(old_str, new_str);
             crate::op_log::record(
                 "rename",
@@ -1233,7 +1228,7 @@ fn handle_request(
             // user's Windows passkey list -- otherwise the OS
             // accumulates orphaned passkey entries every time the
             // matrix test churns through fresh SK labels.
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             let result = if backend.is_sk_label(label_str) {
                 tracing::debug!(label = label_str, "dispatching SK delete");
                 backend.sk_delete(label_str)
@@ -1291,7 +1286,7 @@ fn handle_request(
             // on macOS — wrong directory, the agent would report
             // "no `.meta` for label" for every existing key.
             let dir = sshenc_se::sshenc_keys_dir();
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             let migrate_result = perform_migrate_meta(&dir, label_str);
             crate::op_log::record(
                 "migrate_meta",

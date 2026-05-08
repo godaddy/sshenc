@@ -791,7 +791,27 @@ fn handle_request(
         AgentRequest::RequestIdentities => {
             tracing::debug!("handling identity request");
 
-            let keys = backend.list()?;
+            // Legacy enumeration goes through the platform/bridge
+            // backend (CNG / keychain / WSL bridge -> Windows TPM).
+            // The previous `let keys = backend.list()?` form
+            // propagated the error — which meant a cold-bridge
+            // failure on the WSL path blocked SK enumeration too
+            // (SK keys are local-meta-file-only and don't need
+            // the bridge at all). Symptom: `matrix-a-strict` (SK)
+            // invisible to ssh-add -L for the lifetime of the
+            // matrix's polling window even though the .meta file
+            // was right there on disk. Graceful fallback: log and
+            // continue to SK with an empty legacy list.
+            let keys = match backend.list() {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "legacy backend.list() failed; continuing with SK enumeration only"
+                    );
+                    Vec::new()
+                }
+            };
             blob_cache.clear();
             let mut identities: Vec<(bool, Identity)> = Vec::new();
             for k in keys {
@@ -884,7 +904,17 @@ fn handle_request(
             let label = if let Some(l) = blob_cache.get(&key_blob) {
                 l.clone()
             } else {
-                let keys = backend.list()?;
+                // Same graceful fallback as RequestIdentities: a cold
+                // bridge that errors legacy list() must NOT block SK
+                // sign for keys whose enumeration is local-only.
+                let keys = backend.list().unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "legacy backend.list() failed during sign blob lookup; \
+                         continuing with SK enumeration only"
+                    );
+                    Vec::new()
+                });
                 blob_cache.clear();
                 for k in &keys {
                     if let Ok(pubkey) = SshPublicKey::from_sec1_bytes(&k.public_key_bytes, None) {

@@ -763,19 +763,17 @@ mod tests {
 
     #[test]
     fn configure_repo_with_temp_git_repo() {
-        let dir = std::env::temp_dir().join(format!(
-            "sshenc-test-configure-repo-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        // tempfile guarantees per-test uniqueness and auto-removes
+        // on drop -- so a parallel test thread can't accidentally
+        // delete this dir mid-`git init`.
+        let dir = tempfile::Builder::new()
+            .prefix("sshenc-test-configure-repo-")
+            .tempdir()
+            .expect("tempdir");
 
         let status = Command::new("git")
             .args(["init"])
-            .current_dir(&dir)
+            .current_dir(dir.path())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -801,7 +799,7 @@ mod tests {
         for (key, value) in &configs {
             let status = Command::new("git")
                 .args(["config", key, value])
-                .current_dir(&dir)
+                .current_dir(dir.path())
                 .status()
                 .unwrap();
             assert!(status.success(), "git config {key} failed");
@@ -811,16 +809,13 @@ mod tests {
         for (key, expected) in &configs {
             let output = Command::new("git")
                 .args(["config", "--get", key])
-                .current_dir(&dir)
+                .current_dir(dir.path())
                 .output()
                 .unwrap();
             assert!(output.status.success(), "git config --get {key} failed");
             let actual = String::from_utf8(output.stdout).unwrap();
             assert_eq!(actual.trim(), expected, "config {key} mismatch");
         }
-
-        // Cleanup
-        drop(std::fs::remove_dir_all(&dir));
     }
 
     #[test]
@@ -1106,22 +1101,24 @@ mod tests {
             .is_some()
     }
 
-    fn init_temp_git_repo() -> Option<PathBuf> {
+    fn init_temp_git_repo() -> Option<tempfile::TempDir> {
         if !git_available() {
             return None;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "gitenc-hint-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        // tempfile::tempdir generates a process-unique, OS-unique
+        // path and the returned guard removes the directory on drop.
+        // Replaces a homemade pid+nanos scheme that could collide
+        // when two cargo test threads in the same process hit the
+        // same coarse-resolution `as_nanos()` value -- the loser of
+        // that race would see its directory removed mid-`git init`
+        // by the winner's cleanup.
+        let dir = tempfile::Builder::new()
+            .prefix("gitenc-hint-test-")
+            .tempdir()
+            .expect("tempdir");
         let status = Command::new("git")
             .arg("-C")
-            .arg(&dir)
+            .arg(dir.path())
             .args(["init", "--quiet"])
             .status()
             .unwrap();
@@ -1136,12 +1133,11 @@ mod tests {
         };
         Command::new("git")
             .arg("-C")
-            .arg(&repo)
+            .arg(repo.path())
             .args(["config", "--local", "core.sshCommand", "sshenc ssh --"])
             .status()
             .unwrap();
-        assert!(repo_already_configured(&repo));
-        drop(std::fs::remove_dir_all(&repo));
+        assert!(repo_already_configured(repo.path()));
     }
 
     #[test]
@@ -1151,12 +1147,11 @@ mod tests {
         };
         Command::new("git")
             .arg("-C")
-            .arg(&repo)
+            .arg(repo.path())
             .args(["config", "--local", "core.sshCommand", "/usr/bin/ssh"])
             .status()
             .unwrap();
-        assert!(!repo_already_configured(&repo));
-        drop(std::fs::remove_dir_all(&repo));
+        assert!(!repo_already_configured(repo.path()));
     }
 
     #[test]
@@ -1165,8 +1160,7 @@ mod tests {
             return;
         };
         // No core.sshCommand set.
-        assert!(!repo_already_configured(&repo));
-        drop(std::fs::remove_dir_all(&repo));
+        assert!(!repo_already_configured(repo.path()));
     }
 
     #[test]

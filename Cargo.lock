@@ -1556,6 +1556,7 @@ dependencies = [
  "enclaveapp-core",
  "serde_json",
  "sshenc-core",
+ "tempfile",
 ]
 
 [[package]]

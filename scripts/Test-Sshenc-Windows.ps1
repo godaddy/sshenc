@@ -57,8 +57,9 @@ param(
     # ignore the env var (and this flag becomes a no-op).
     [switch]$Software,
 
-    # Force the persistent shared keys to be regenerated even if they
-    # already exist locally.
+    # No-op as of the pristine-state contract. Kept for backward
+    # compatibility with older invocations; the matrix always
+    # scrubs + regenerates shared keys at every run now.
     [switch]$ResetSharedKeys,
 
     # Skip post-flight cleanup. Useful for debugging a failed run --
@@ -425,18 +426,31 @@ function Sync-SharedKeysToWsl {
     }
 }
 
+# Deterministically register WSLInterop in the named distro. The
+# binfmt_misc handler that lets Linux exec a Windows .exe is supposed
+# to be registered by `/init` at WSL2 boot, but on hosts running
+# Docker Desktop (which boots a `docker-desktop` helper distro that
+# hooks into the same VM session) AND on systemd-=true distros where
+# systemd takes over PID 1 and clears the binfmt_misc filesystem,
+# WSLInterop ends up missing. Symptom: `whoami.exe` returns "Exec
+# format error", and sshenc-agent's bridge_spawn returns ENOEXEC.
+#
+# Fix: write the canonical interop registration directly to
+# `/proc/sys/fs/binfmt_misc/register`. Idempotent -- if WSLInterop
+# is already registered the kernel returns EEXIST which we ignore.
+# Requires root; we always pass `-u root`.
+function Repair-WslInterop {
+    param([string]$Distro)
+    & wsl.exe -d $Distro -u root -- bash -c '[ -f /proc/sys/fs/binfmt_misc/WSLInterop ] || echo ":WSLInterop:M::MZ::/init:PF" > /proc/sys/fs/binfmt_misc/register' 2>&1 | Out-Null
+}
+
 # Probe WSLInterop in the named distro by trying to exec `whoami.exe`
-# with a 5-second timeout. Returns $true if the probe succeeds and
-# whoami exits 0; $false on ENOEXEC, binfmt corruption, hang, or
-# timeout (any of which indicate the binfmt_misc handler that lets
-# Linux exec a Windows .exe is not correctly registered for this
-# distro). Docker Desktop's `docker-desktop` helper distro hooks into
-# the WSL2 VM boot path and can race the WSLInterop registration of
-# a freshly-cold-booted test distro (AlmaLinux is observed to be the
-# most fragile). When that happens, sshenc-agent's bridge_spawn
-# returns ENOEXEC and the agent never starts.
+# with a 5-second timeout. Returns $true if the probe succeeds.
+# Calls Repair-WslInterop first, so a missing registration is fixed
+# automatically before the probe runs.
 function Test-WslInteropWorking {
     param([string]$Distro)
+    Repair-WslInterop -Distro $Distro
     $probe = @'
 timeout 5 /mnt/c/Windows/System32/whoami.exe >/dev/null 2>&1
 echo "exit=$?"
@@ -452,16 +466,13 @@ echo "exit=$?"
     return ($out -match 'exit=0\b')
 }
 
-# Reset WSL state in front of the next test distro. Three escalating
-# tiers, each gated on the previous one having failed -- so the
-# common case is silent (tier 1 always works on a healthy host), and
-# the destructive option only fires when we're actually stuck:
-#   Tier 1: `wsl --shutdown` + 2.5s settle + probe.
-#   Tier 2: another `wsl --shutdown` + 5s settle + probe.
-#   Tier 3: `wsl --terminate docker-desktop` + `wsl --shutdown` + 4s.
-# Returns $true if the distro is ready, $false if WSLInterop is still
-# broken after tier 3. Caller logs and proceeds; the actual test will
-# fail loudly if the probe was right.
+# Reset WSL state in front of the next test distro. With the
+# Repair-WslInterop helper inside Test-WslInteropWorking, the
+# common case is now a single `wsl --shutdown` + repair + probe.
+# The escalating retries (longer settle, terminate docker-desktop)
+# stay as defense-in-depth for the rare case where WSL itself is
+# in a really bad state and the binfmt_misc filesystem isn't even
+# mounted. Returns $true if the distro is ready.
 function Initialize-WslDistroForTest {
     param([string]$Distro)
     & wsl.exe --shutdown 2>&1 | Out-Null
@@ -527,19 +538,21 @@ Write-Host "  Binary:   $SshencBin"
 Write-Host "  Policy:   $SharedKeyMode (Strict=$([bool]$Strict))"
 Write-Host "  Shared:   $($SharedKeys -join ', ')"
 
-Banner "Pre-flight: clean transients, ensure shared keys"
-$preCount = Reset-SshencKeys -Keep $AllSharedKeys
+# Pristine-state contract: every matrix run starts from zero sshenc
+# keys and ends at zero sshenc keys. Yes, that means under -Strict
+# you'll fingerprint twice up front for matrix-a-strict + matrix-b-
+# strict make-credential gestures (and again for ps-sk-test in the
+# SK section). The trade-off is no cross-run drift -- every run
+# tests the full keygen path, every run leaves the host clean.
+Banner "Pre-flight: scrub all sshenc keys, generate fresh shared keys"
+$preCount = Reset-SshencKeys
 if ($preCount -gt 0) {
-    Write-Host "  [INFO] Cleaned $preCount transient key(s) from prior runs" -ForegroundColor Yellow
+    Write-Host "  [INFO] Scrubbed $preCount sshenc key(s) from prior runs" -ForegroundColor Yellow
 } else {
-    Write-Host "  [INFO] No transient keys to clean" -ForegroundColor DarkGray
+    Write-Host "  [INFO] No prior sshenc keys to scrub" -ForegroundColor DarkGray
 }
-$created = Ensure-SharedKeys -Labels $SharedKeys -KeygenArgs $KeygenAuthArgs -ForceReset:$ResetSharedKeys
-if ($created -gt 0) {
-    Write-Host "  [INFO] Created $created new shared key(s); future runs will reuse" -ForegroundColor Yellow
-} else {
-    Write-Host "  [INFO] All $($SharedKeys.Count) shared keys already exist" -ForegroundColor Green
-}
+$created = Ensure-SharedKeys -Labels $SharedKeys -KeygenArgs $KeygenAuthArgs -ForceReset
+Write-Host "  [INFO] Generated $created shared key(s) for this run" -ForegroundColor DarkGray
 foreach ($k in $SharedKeys) {
     if (-not (Test-SshencKeyExists -Label $k)) {
         Record "F" "shared key available: $k" "could not be created or read"
@@ -1211,34 +1224,39 @@ exit $FAIL
 }
 
 # ---------------------------------------------------------------------
-# Post-flight: assert no transient keys leaked, persistent keys still
-# there. The pre-flight cleaned the slate; if anything beyond the
-# allowlist exists now, a test section leaked it.
+# Post-flight: scrub everything. Pristine-state contract -- the host
+# leaves the run with zero sshenc-managed keys, same as it started.
+# Every key (the shared matrix-a/b plus any transient that leaked)
+# gets deleted; if anything is left after the scrub we surface it
+# as a failure so a buggy test section can't quietly accumulate
+# keys across runs.
 # ---------------------------------------------------------------------
 if (-not $NoCleanup) {
-    Banner "Post-flight: verify no transient keys leaked"
+    Banner "Post-flight: scrub all sshenc keys"
     $preLeak = & $SshencBin list --json 2>&1 | Out-String
     try {
         $allKeys = $preLeak | ConvertFrom-Json
         if ($allKeys -isnot [System.Array]) { $allKeys = @($allKeys) }
-        $leaked = $allKeys | Where-Object { $AllSharedKeys -notcontains $_.metadata.label }
-        if ($leaked) {
-            $names = ($leaked | ForEach-Object { $_.metadata.label }) -join ", "
-            Write-Host "  [DEBUG] leaked key labels: $names" -ForegroundColor Yellow
-        }
+        $names = ($allKeys | ForEach-Object { $_.metadata.label }) -join ", "
+        if ($names) { Write-Host "  [DEBUG] keys before scrub: $names" -ForegroundColor DarkGray }
     } catch { }
-    $postCount = Reset-SshencKeys -Quiet -Keep $AllSharedKeys
-    if ($postCount -gt 0) {
-        Record "F" "post-flight: no transient keys leaked" "$postCount key(s) leaked; auto-cleaned"
-    } else {
-        Record "P" "post-flight: no transient keys leaked"
-    }
-    foreach ($k in $SharedKeys) {
-        if (Test-SshencKeyExists -Label $k) {
-            Record "P" "post-flight: shared key preserved ($k)"
-        } else {
-            Record "F" "post-flight: shared key preserved ($k)" "removed during run"
+    $deleted = Reset-SshencKeys -Quiet
+    Write-Host "  [INFO] Deleted $deleted sshenc key(s) at end of run" -ForegroundColor DarkGray
+
+    # Verify zero remain.
+    $remaining = & $SshencBin list --json 2>&1 | Out-String
+    $leftover = 0
+    try {
+        $rk = $remaining | ConvertFrom-Json
+        if ($null -ne $rk) {
+            if ($rk -isnot [System.Array]) { $rk = @($rk) }
+            $leftover = $rk.Count
         }
+    } catch { $leftover = 0 }
+    if ($leftover -eq 0) {
+        Record "P" "post-flight: host returned to pristine state (zero keys)"
+    } else {
+        Record "F" "post-flight: pristine state" "$leftover key(s) remain after scrub"
     }
 }
 

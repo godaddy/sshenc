@@ -40,7 +40,7 @@ fn is_likely_duplicate_label(e: &SshencError) -> bool {
 }
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)] // KeyGenOptions used on Windows prod path and by Unix tests.
-use sshenc_core::key::{KeyGenOptions, KeyLabel};
+use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
 use sshenc_core::{AccessPolicy, Config, PromptPolicy};
 use sshenc_se::{sshenc_keys_dir, KeyBackend};
@@ -704,9 +704,49 @@ pub fn keygen(
             // does exist and we're in the rotation path. If `get`
             // fails too, the original generate error wasn't about a
             // duplicate -- propagate it untouched.
-            let old = match backend.get(label) {
-                Ok(info) => info,
-                Err(_) => return Err(e.into()),
+            //
+            // Retry `get` a handful of times on transient KeyNotFound
+            // before giving up. Under concurrent keygens against the
+            // same label, the agent is parallel: T1's generate
+            // returns success at the agent level, but its CLI-side
+            // `cache_key_artifacts_locally` (which writes the SEC1
+            // .pub cache) hasn't necessarily finished by the time
+            // T2's generate sees a duplicate-label rejection from
+            // the agent. T2's `backend.get(label)` then races T1's
+            // post-generate cache write -- without the retry, T2
+            // would observe `load_pub_key: KeyNotFound` here,
+            // propagate the original "refused generate" error, and
+            // skip the rotation path entirely. The window is
+            // milliseconds in practice; 5 x 50ms = 250ms upper
+            // bound is invisible to humans and well under any
+            // practical concurrent-keygen scenario.
+            let mut old: Option<KeyInfo> = None;
+            let mut last_err = None;
+            for attempt in 0..5 {
+                match backend.get(label) {
+                    Ok(info) => {
+                        old = Some(info);
+                        break;
+                    }
+                    Err(get_err) => {
+                        last_err = Some(get_err);
+                        if attempt < 4 {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                    }
+                }
+            }
+            let old = match old {
+                Some(info) => info,
+                None => {
+                    tracing::debug!(
+                        label,
+                        ?last_err,
+                        "rotation: backend.get failed after retries; \
+                         propagating original generate error"
+                    );
+                    return Err(e.into());
+                }
             };
             let old_pubkey =
                 SshPublicKey::from_sec1_bytes(&old.public_key_bytes, old.metadata.comment.clone())?;
@@ -2108,10 +2148,7 @@ fn resolve_signing_label(backend: &dyn KeyBackend, key_file: &Path) -> Result<St
 }
 
 #[cfg(windows)]
-fn maybe_verify_user_presence(
-    info: &sshenc_core::key::KeyInfo,
-    policy: PromptPolicy,
-) -> Result<()> {
+fn maybe_verify_user_presence(info: &KeyInfo, policy: PromptPolicy) -> Result<()> {
     let should_prompt = match policy {
         PromptPolicy::Always => true,
         PromptPolicy::Never => false,
@@ -2127,10 +2164,7 @@ fn maybe_verify_user_presence(
 
 #[cfg(not(windows))]
 #[allow(dead_code, clippy::print_stderr)] // Tests may call; prod path now goes through agent.
-fn maybe_verify_user_presence(
-    info: &sshenc_core::key::KeyInfo,
-    policy: PromptPolicy,
-) -> Result<()> {
+fn maybe_verify_user_presence(info: &KeyInfo, policy: PromptPolicy) -> Result<()> {
     let should_prompt = match policy {
         PromptPolicy::Always => true,
         PromptPolicy::Never => false,

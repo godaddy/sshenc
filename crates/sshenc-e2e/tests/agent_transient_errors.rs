@@ -152,7 +152,7 @@ fn list_with_orphaned_key_file_skips_entry() {
 
     let valid = unique_label("torn-valid2");
     let orphan = unique_label("torn-orphan-key");
-    assert!(run(env.sshenc_cmd().expect("sshenc").args([
+    let kg = run(env.sshenc_cmd().expect("sshenc").args([
         "keygen",
         "--label",
         &valid,
@@ -160,8 +160,14 @@ fn list_with_orphaned_key_file_skips_entry() {
         "none",
         "--no-pub-file",
     ]))
-    .expect("keygen valid")
-    .succeeded());
+    .expect("keygen valid");
+    assert!(
+        kg.succeeded(),
+        "keygen valid: status={:?}\nstdout:\n{}\nstderr:\n{}",
+        kg.status,
+        kg.stdout,
+        kg.stderr,
+    );
 
     // Plant a fake .key with no matching .meta.
     let orphan_key_path = keys_dir.join(format!("{orphan}.key"));
@@ -227,7 +233,7 @@ fn agent_keeps_serving_with_orphan_files_present() {
 
     // Mint a real key.
     let real = unique_label("orph-svc-real");
-    assert!(run(env.sshenc_cmd().expect("sshenc").args([
+    let kg_real = run(env.sshenc_cmd().expect("sshenc").args([
         "keygen",
         "--label",
         &real,
@@ -235,8 +241,14 @@ fn agent_keeps_serving_with_orphan_files_present() {
         "none",
         "--no-pub-file",
     ]))
-    .expect("keygen")
-    .succeeded());
+    .expect("keygen");
+    assert!(
+        kg_real.succeeded(),
+        "keygen real: status={:?}\nstdout:\n{}\nstderr:\n{}",
+        kg_real.status,
+        kg_real.stdout,
+        kg_real.stderr,
+    );
 
     // Plant both kinds of orphan to maximize the surface area.
     let orphan_meta = unique_label("orph-svc-meta-only");

@@ -801,13 +801,26 @@ mod tests {
     }
 
     fn tempdir() -> PathBuf {
+        // pid + nanos isn't unique enough under cargo's multi-threaded
+        // test runner: two parallel tests can call `SystemTime::now()`
+        // within the same nanosecond on a fast machine and end up
+        // sharing a directory. The cross-pollution then breaks the
+        // PowerShell rc-path probe tests, where one test creates
+        // `Documents/PowerShell` and another creates
+        // `Documents/WindowsPowerShell` in what they each think is
+        // their own dir. Fold in a process-local atomic counter so
+        // two concurrent calls always produce distinct paths.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "sshenc-shell-env-test-{}-{}",
+            "sshenc-shell-env-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            n,
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir

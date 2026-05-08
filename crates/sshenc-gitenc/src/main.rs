@@ -104,6 +104,26 @@ fn resolve_config_label(
 fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
     let ssh_command = build_ssh_command(label).unwrap_or_else(|err| exit_invalid_label(&err));
 
+    let mut cmd = Command::new("git");
+
+    // For unconfigured repos, inject signing config inline via
+    // `git -c key=value` so `gitenc git commit -S` / `gitenc git tag -s`
+    // sign with sshenc's default identity (or the explicit --label
+    // when given) — without requiring the user to have run
+    // `gitenc --config` first. We DON'T set commit.gpgsign=true:
+    // surprising users with auto-signing on every commit isn't
+    // right; users opt in by passing `-S`. Setting just the
+    // gpg.format/program/signingkey/allowedSignersFile shape makes
+    // `-S` use sshenc when the user asks for it.
+    //
+    // Skipped if the repo is already configured (via
+    // `gitenc --config` or hand-edited gitconfig) so we don't
+    // override an explicit operator choice.
+    let inline_signing_args = inline_signing_args_if_unconfigured(label);
+    for arg in &inline_signing_args {
+        cmd.arg("-c").arg(arg);
+    }
+
     // Spawn-and-wait (rather than exec on Unix) so we can run the
     // post-success nudge that points users at `gitenc --config` when
     // they're in a repo that hasn't opted into persistent sshenc
@@ -111,7 +131,7 @@ fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
     // the git operation; signals propagate naturally (the shell
     // sends SIGINT to the whole process group), and the exit code
     // is forwarded faithfully.
-    let status = Command::new("git")
+    let status = cmd
         .args(git_args)
         .env("GIT_SSH_COMMAND", &ssh_command)
         .status();
@@ -128,6 +148,82 @@ fn run_git(label: Option<&str>, git_args: &[String]) -> ! {
             std::process::exit(1);
         }
     }
+}
+
+/// Build the `key=value` pairs to pass via `git -c` so an
+/// unconfigured repo still uses sshenc's default identity (or the
+/// explicit `--label`) for `git commit -S` / `git tag -s`.
+///
+/// Returns an empty Vec if any of these is true:
+/// - We can't resolve `$HOME` (so we can't compute `.pub` paths).
+/// - We can't find the trusted sshenc binary (so the
+///   `gpg.ssh.program` we'd advertise wouldn't run).
+/// - The default `.pub` file doesn't exist on disk (so signing
+///   would fail anyway — falling through to git's default config
+///   surfaces a clearer error than "sshenc -Y sign: file missing").
+/// - The repo's `core.sshCommand` already routes through sshenc
+///   (the operator ran `gitenc --config` — their explicit settings
+///   should win, including any custom `user.signingkey`).
+///
+/// The empty-Vec returns are intentional silent fall-throughs:
+/// `gitenc git push` on a host without any sshenc keys configured
+/// should still work — it just won't auto-enable signing.
+fn inline_signing_args_if_unconfigured(label: Option<&str>) -> Vec<String> {
+    let Some(home_os) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        return Vec::new();
+    };
+    let Some(home) = home_os.to_str() else {
+        return Vec::new();
+    };
+
+    // Resolved label that signing_key_path() / load_git_key_metadata()
+    // expect. Mirrors the same `label.unwrap_or("default")` choice
+    // configure_repo() makes.
+    let signing_label = label.unwrap_or("default");
+    let signing_key = match signing_key_path(home, signing_label) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    if !Path::new(&signing_key).exists() {
+        return Vec::new();
+    }
+
+    // Skip the inline shape if the repo is already configured
+    // (operator's explicit choice should win).
+    if let Some(repo_root) = git_repo_root() {
+        if repo_already_configured(&repo_root) {
+            return Vec::new();
+        }
+    }
+
+    let binary_name = if cfg!(windows) {
+        "sshenc.exe"
+    } else {
+        "sshenc"
+    };
+    let Some(sshenc_bin) =
+        enclaveapp_core::bin_discovery::find_trusted_binary(binary_name, "sshenc")
+    else {
+        return Vec::new();
+    };
+
+    inline_signing_args_pure(home, &sshenc_bin.display().to_string(), &signing_key)
+}
+
+/// Pure helper extracted for unit testing — produces the
+/// `key=value` pairs given fully-resolved inputs. The caller
+/// (`inline_signing_args_if_unconfigured`) is responsible for the
+/// gating: HOME resolved, key file exists, repo not already
+/// configured, sshenc binary discovered. This function just
+/// formats; no I/O, no env, no process state.
+fn inline_signing_args_pure(home: &str, sshenc_bin: &str, signing_key: &str) -> Vec<String> {
+    let allowed_signers = Path::new(home).join(".ssh").join("allowed_signers");
+    vec![
+        "gpg.format=ssh".to_string(),
+        format!("gpg.ssh.program={sshenc_bin}"),
+        format!("user.signingkey={signing_key}"),
+        format!("gpg.ssh.allowedSignersFile={}", allowed_signers.display()),
+    ]
 }
 
 /// One-shot duration after which the "configure this repo" nudge can
@@ -759,6 +855,41 @@ mod tests {
     fn build_ssh_command_rejects_invalid_label() {
         let err = build_ssh_command(Some("bad;label")).unwrap_err();
         assert!(err.to_lowercase().contains("label"));
+    }
+
+    #[test]
+    fn inline_signing_args_pure_emits_expected_keys() {
+        let out = inline_signing_args_pure(
+            "/home/u",
+            "/usr/local/bin/sshenc",
+            "/home/u/.ssh/id_ecdsa.pub",
+        );
+        assert_eq!(out.len(), 4);
+        assert!(out.contains(&"gpg.format=ssh".to_string()));
+        assert!(out.contains(&"gpg.ssh.program=/usr/local/bin/sshenc".to_string()));
+        assert!(out.contains(&"user.signingkey=/home/u/.ssh/id_ecdsa.pub".to_string()));
+        // allowed_signers path is platform-formatted; check the prefix
+        // and the expected leaf rather than a literal full string so
+        // this passes on Windows (`\`) and Unix (`/`) alike.
+        let allowed = out
+            .iter()
+            .find(|s| s.starts_with("gpg.ssh.allowedSignersFile="))
+            .expect("allowed signers entry");
+        assert!(allowed.contains("allowed_signers"));
+        assert!(allowed.contains(".ssh"));
+    }
+
+    #[test]
+    fn inline_signing_args_pure_does_not_set_commit_gpgsign() {
+        // commit.gpgsign=true would surprise users with auto-signing
+        // every commit. The point of inline-signing is making `-S`
+        // work; users opt in by passing it.
+        let out = inline_signing_args_pure(
+            "/home/u",
+            "/usr/local/bin/sshenc",
+            "/home/u/.ssh/id_ecdsa.pub",
+        );
+        assert!(out.iter().all(|s| !s.starts_with("commit.gpgsign=")));
     }
 
     #[test]

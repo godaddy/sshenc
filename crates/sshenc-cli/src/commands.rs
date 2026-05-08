@@ -1174,9 +1174,12 @@ pub fn install() -> Result<()> {
         Ok((_shell, sshenc_core::shell_env::InstallResult::AlreadyPresent)) => {}
         Ok((_, sshenc_core::shell_env::InstallResult::UnknownShell)) => {
             eprintln!(
-                "Note: couldn't detect a known shell ($SHELL not zsh or bash). \
-                 To enable git commit signing, add this to your shell rc:\n  \
-                 if [ -S \"$HOME/.sshenc/agent.sock\" ]; then export SSH_AUTH_SOCK=\"$HOME/.sshenc/agent.sock\"; fi"
+                "Note: couldn't detect a known shell ($SHELL not zsh, bash, fish, \
+                 or pwsh). To enable git commit signing, add the equivalent of \
+                 this to your shell rc:\n  \
+                 if [ -S \"$HOME/.sshenc/agent.sock\" ]; then export SSH_AUTH_SOCK=\"$HOME/.sshenc/agent.sock\"; fi\n\
+                 (fish:  if test -S \"$HOME/.sshenc/agent.sock\"; set -gx SSH_AUTH_SOCK \"$HOME/.sshenc/agent.sock\"; end)\n\
+                 (pwsh:  if (Test-Path \"$HOME/.sshenc/agent.sock\") {{ $env:SSH_AUTH_SOCK = \"$HOME/.sshenc/agent.sock\" }})"
             );
         }
         Ok((_, sshenc_core::shell_env::InstallResult::NoHome)) => {

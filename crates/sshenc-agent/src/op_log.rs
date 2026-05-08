@@ -51,23 +51,60 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// below the floor of a real biometric prompt.
 const FINGERPRINT_THRESHOLD_MS_DEFAULT: u64 = 250;
 
-/// Env override for the prompt-inferred threshold. Useful for tests
-/// (set to 0 to force `prompt_inferred: true`) and for hosts where
-/// the default heuristic is noisy.
+/// Lower bound for the threshold env override. Anything below this
+/// is dominated by filesystem / RPC noise and would mark virtually
+/// every op as `prompt_inferred: true`, which neuters the signal.
+const FINGERPRINT_THRESHOLD_MS_MIN: u64 = 10;
+
+/// Upper bound for the threshold env override. 5 minutes generously
+/// covers slow VMs / paged-out hosts / cold-start TPM warm-up. Past
+/// that, any "high threshold" value is either a misconfiguration or
+/// a deliberate attempt to hide prompt activity from the audit log
+/// (e.g. setting it to days so every op records `prompt_inferred:
+/// false`). The HSM still enforces presence regardless — this is a
+/// log-accuracy clamp, not a presence-policy gate — but a tamperable
+/// audit log is itself a defect.
+const FINGERPRINT_THRESHOLD_MS_MAX: u64 = 5 * 60 * 1000;
+
+/// Env override for the prompt-inferred threshold. Honored only
+/// when the value is in `[FINGERPRINT_THRESHOLD_MS_MIN, MAX]`;
+/// otherwise we fall back to the default with a warn-level trace.
 const THRESHOLD_ENV: &str = "SSHENC_FINGERPRINT_THRESHOLD_MS";
 
-/// Env override for the log path. When set, replaces the default
-/// `~/.sshenc/enclave-events.log` location wholesale.
+/// Env override for the log path. Honored only when the value is
+/// (a) absolute, (b) has an existing parent directory, (c) is not
+/// a symlink, and (d) does not resolve to a parent that is a
+/// symlink (defense against
+/// `mkdir /tmp/sneaky && ln -s /var/log /tmp/sneaky/parent`).
+/// Otherwise we fall back to the `~/.sshenc/` default with a warn.
 const LOG_PATH_ENV: &str = "SSHENC_OP_LOG";
 
 fn fingerprint_threshold() -> Duration {
-    Duration::from_millis(
-        std::env::var(THRESHOLD_ENV)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v: &u64| *v > 0)
-            .unwrap_or(FINGERPRINT_THRESHOLD_MS_DEFAULT),
-    )
+    let raw = match std::env::var(THRESHOLD_ENV) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Duration::from_millis(FINGERPRINT_THRESHOLD_MS_DEFAULT),
+    };
+    match raw.parse::<u64>() {
+        Ok(n) if (FINGERPRINT_THRESHOLD_MS_MIN..=FINGERPRINT_THRESHOLD_MS_MAX).contains(&n) => {
+            Duration::from_millis(n)
+        }
+        Ok(n) => {
+            tracing::warn!(
+                value = n,
+                min = FINGERPRINT_THRESHOLD_MS_MIN,
+                max = FINGERPRINT_THRESHOLD_MS_MAX,
+                "op_log: SSHENC_FINGERPRINT_THRESHOLD_MS out of range; using default"
+            );
+            Duration::from_millis(FINGERPRINT_THRESHOLD_MS_DEFAULT)
+        }
+        Err(_) => {
+            tracing::warn!(
+                value = %raw,
+                "op_log: SSHENC_FINGERPRINT_THRESHOLD_MS not a positive integer; using default"
+            );
+            Duration::from_millis(FINGERPRINT_THRESHOLD_MS_DEFAULT)
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -95,10 +132,64 @@ fn default_log_path() -> Option<PathBuf> {
 fn resolved_log_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var(LOG_PATH_ENV) {
         if !p.is_empty() {
-            return Some(PathBuf::from(p));
+            match validate_log_path_override(&PathBuf::from(p)) {
+                Ok(path) => return Some(path),
+                Err(reason) => {
+                    tracing::warn!(
+                        reason,
+                        "op_log: SSHENC_OP_LOG override rejected; using default"
+                    );
+                }
+            }
         }
     }
     default_log_path()
+}
+
+/// Validate an `SSHENC_OP_LOG` override before honoring it.
+///
+/// Rules — same intent as OpenSSH's `IdentityFile` validation in
+/// principle: don't let an env var trick the agent into writing
+/// audit lines somewhere the user didn't mean.
+///
+/// 1. **Absolute path**: relative paths are interpreted relative
+///    to the agent's CWD which is whatever directory the user
+///    happened to launch the agent from — basically random. An
+///    audit log at `enclave-events.log` is worse than no override.
+/// 2. **Parent directory exists**: don't auto-create deep paths
+///    that might land in attacker-controlled prefixes. If the
+///    operator wants to put the log elsewhere, they create the
+///    directory first.
+/// 3. **Not a symlink at the target**: refuse if the path itself
+///    already exists as a symlink. We never want to follow a
+///    symlink for an audit-log write — a malicious symlink could
+///    redirect us to clobber a sensitive file.
+/// 4. **Parent directory is not a symlink**: closes the
+///    `mkdir sneaky/ && ln -s /var/log sneaky/parent` redirect.
+///
+/// Returns the path on success, or a static reason string on
+/// rejection. The reason is suitable for the warn log.
+fn validate_log_path_override(path: &std::path::Path) -> Result<PathBuf, &'static str> {
+    if !path.is_absolute() {
+        return Err("path is not absolute");
+    }
+    let parent = path.parent().ok_or("path has no parent")?;
+    let parent_meta =
+        fs::symlink_metadata(parent).map_err(|_| "parent directory does not exist")?;
+    if parent_meta.file_type().is_symlink() {
+        return Err("parent directory is a symlink");
+    }
+    if !parent_meta.is_dir() {
+        return Err("parent path is not a directory");
+    }
+    // The target file may or may not exist yet (first run). If it
+    // exists, it must be a regular file — never a symlink.
+    if let Ok(target_meta) = fs::symlink_metadata(path) {
+        if target_meta.file_type().is_symlink() {
+            return Err("log path is a symlink");
+        }
+    }
+    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]
@@ -156,6 +247,17 @@ fn record_to(
     write_line(path, &line.to_string());
 }
 
+/// Maximum size of the active log file before we rotate. 10 MiB
+/// is generous for a single-user audit log — at typical agent
+/// volume that's months of events per rotation.
+const ROTATE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Number of historical rotations to retain. With ROTATE_MAX_BYTES
+/// = 10MiB and ROTATE_KEEP = 5, the audit log occupies at most
+/// ~60MiB total (active + 5 rotations). The oldest rotation is
+/// dropped when a new one is created.
+const ROTATE_KEEP: u32 = 5;
+
 fn write_line(path: &std::path::Path, line: &str) {
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
@@ -163,6 +265,7 @@ fn write_line(path: &std::path::Path, line: &str) {
             return;
         }
     }
+    maybe_rotate(path);
     let opened = fs::OpenOptions::new().create(true).append(true).open(path);
     let mut file = match opened {
         Ok(f) => f,
@@ -201,6 +304,79 @@ fn set_private_permissions(_path: &std::path::Path) {
     // account in the supported configurations, so re-stamping
     // explicit DACLs would be redundant — and getting it wrong
     // (e.g. dropping the user's own access) would lose events.
+}
+
+/// Rotate `path` if its current size is at or above
+/// `ROTATE_MAX_BYTES`. Best-effort: failures are surfaced louder
+/// than other op_log errors (eprintln + tracing::warn) because a
+/// silent rotation failure means the audit log will continue to
+/// grow unbounded — exactly the failure mode rotation exists to
+/// prevent. We do NOT propagate the error: a rotation failure must
+/// not block a successful sign from being recorded (or the caller
+/// from succeeding).
+///
+/// Layout: `path`, `path.1`, `path.2`, ..., `path.{ROTATE_KEEP}`.
+/// Rotation shifts `.K-1` → `.K` for `K = ROTATE_KEEP..=1`,
+/// dropping any pre-existing `.{ROTATE_KEEP}`. Then `path` →
+/// `path.1`, leaving a fresh hole for the next append.
+#[allow(clippy::print_stderr)] // intentional loud surface for unbounded-log defect
+fn maybe_rotate(path: &std::path::Path) {
+    let size = match fs::metadata(path) {
+        Ok(m) => m.len(),
+        // Doesn't exist yet → nothing to rotate.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        // Stat failed for some other reason (perms, IO). Don't try
+        // to rotate; let the open() in write_line surface the
+        // underlying problem.
+        Err(_) => return,
+    };
+    if size < ROTATE_MAX_BYTES {
+        return;
+    }
+
+    // Shift `.K-1` → `.K`, oldest first so we don't clobber.
+    // `K = ROTATE_KEEP` is the special drop slot.
+    for k in (1..=ROTATE_KEEP).rev() {
+        let to = rotation_path(path, k);
+        let from = if k == 1 {
+            path.to_path_buf()
+        } else {
+            rotation_path(path, k - 1)
+        };
+        if !from.exists() {
+            continue;
+        }
+        if k == ROTATE_KEEP {
+            // Dropping the oldest rotation. `from` (== `.K-1`) will
+            // overwrite `to` (== `.K`); on Windows rename refuses
+            // to overwrite, so remove first.
+            #[cfg(windows)]
+            drop(fs::remove_file(&to));
+        }
+        if let Err(e) = fs::rename(&from, &to) {
+            // Surface louder than usual: a failed rotation means
+            // the audit log will grow unbounded. We still don't
+            // panic — log + carry on.
+            eprintln!(
+                "op_log: failed to rotate {} -> {}: {e}",
+                from.display(),
+                to.display()
+            );
+            tracing::warn!(
+                from = %from.display(),
+                to = %to.display(),
+                error = %e,
+                "op_log: rotation step failed"
+            );
+            return;
+        }
+    }
+}
+
+fn rotation_path(path: &std::path::Path, k: u32) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{k}"));
+    PathBuf::from(name)
 }
 
 /// Format `SystemTime::now()` as an RFC3339 string with millisecond
@@ -504,6 +680,234 @@ mod tests {
             !log.exists(),
             "cfg(test) should disable env-driven log writes"
         );
+        cleanup(&dir);
+    }
+
+    // ---- threshold env clamp ----------------------------------
+
+    #[test]
+    fn threshold_env_default_when_unset() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(THRESHOLD_ENV);
+        let t = fingerprint_threshold();
+        drop(guard);
+        assert_eq!(t, Duration::from_millis(FINGERPRINT_THRESHOLD_MS_DEFAULT));
+    }
+
+    #[test]
+    fn threshold_env_in_range_is_honored() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(THRESHOLD_ENV, "750");
+        let t = fingerprint_threshold();
+        std::env::remove_var(THRESHOLD_ENV);
+        drop(guard);
+        assert_eq!(t, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn threshold_env_below_min_falls_back_to_default() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(THRESHOLD_ENV, "5"); // below MIN=10
+        let t = fingerprint_threshold();
+        std::env::remove_var(THRESHOLD_ENV);
+        drop(guard);
+        assert_eq!(t, Duration::from_millis(FINGERPRINT_THRESHOLD_MS_DEFAULT));
+    }
+
+    #[test]
+    fn threshold_env_above_max_falls_back_to_default() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The exact value the user worried about: a threshold high
+        // enough that no real op could ever exceed it, masking
+        // every prompt as "no prompt fired" in the audit log.
+        std::env::set_var(THRESHOLD_ENV, "999999999"); // > MAX = 5min
+        let t = fingerprint_threshold();
+        std::env::remove_var(THRESHOLD_ENV);
+        drop(guard);
+        assert_eq!(t, Duration::from_millis(FINGERPRINT_THRESHOLD_MS_DEFAULT));
+    }
+
+    #[test]
+    fn threshold_env_at_boundaries_is_honored() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(THRESHOLD_ENV, FINGERPRINT_THRESHOLD_MS_MIN.to_string());
+        assert_eq!(
+            fingerprint_threshold(),
+            Duration::from_millis(FINGERPRINT_THRESHOLD_MS_MIN)
+        );
+        std::env::set_var(THRESHOLD_ENV, FINGERPRINT_THRESHOLD_MS_MAX.to_string());
+        assert_eq!(
+            fingerprint_threshold(),
+            Duration::from_millis(FINGERPRINT_THRESHOLD_MS_MAX)
+        );
+        std::env::remove_var(THRESHOLD_ENV);
+        drop(guard);
+    }
+
+    #[test]
+    fn threshold_env_unparseable_falls_back_to_default() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(THRESHOLD_ENV, "not-a-number");
+        let t = fingerprint_threshold();
+        std::env::remove_var(THRESHOLD_ENV);
+        drop(guard);
+        assert_eq!(t, Duration::from_millis(FINGERPRINT_THRESHOLD_MS_DEFAULT));
+    }
+
+    // ---- log path override validation -------------------------
+
+    #[test]
+    fn validate_log_path_relative_rejected() {
+        let result = validate_log_path_override(std::path::Path::new("relative/path.log"));
+        assert!(matches!(result, Err(reason) if reason.contains("absolute")));
+    }
+
+    #[test]
+    fn validate_log_path_missing_parent_rejected() {
+        // Use a clearly nonexistent absolute path. On Windows we
+        // need a drive letter; on Unix `/` is fine. Use a tempdir
+        // and append a subpath that doesn't exist.
+        let dir = tempdir();
+        let bogus = dir.join("does-not-exist").join("events.log");
+        let result = validate_log_path_override(&bogus);
+        assert!(matches!(result, Err(reason) if reason.contains("parent")));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn validate_log_path_existing_parent_accepted() {
+        let dir = tempdir();
+        let log = dir.join("events.log");
+        let result = validate_log_path_override(&log);
+        assert!(result.is_ok(), "expected accept; got {result:?}");
+        cleanup(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_log_path_symlink_target_rejected() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir();
+        let real = dir.join("real.log");
+        fs::write(&real, b"existing").unwrap();
+        let link = dir.join("events.log");
+        symlink(&real, &link).unwrap();
+        let result = validate_log_path_override(&link);
+        assert!(matches!(result, Err(reason) if reason.contains("symlink")));
+        cleanup(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_log_path_symlinked_parent_rejected() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir();
+        let real_parent = dir.join("real_parent");
+        fs::create_dir_all(&real_parent).unwrap();
+        let link_parent = dir.join("link_parent");
+        symlink(&real_parent, &link_parent).unwrap();
+        let log = link_parent.join("events.log");
+        let result = validate_log_path_override(&log);
+        assert!(matches!(result, Err(reason) if reason.contains("symlink")));
+        cleanup(&dir);
+    }
+
+    // ---- log rotation -----------------------------------------
+
+    #[test]
+    fn rotate_does_nothing_when_under_threshold() {
+        let dir = tempdir();
+        let log = dir.join("events.log");
+        fs::write(&log, b"under-threshold").unwrap();
+        maybe_rotate(&log);
+        assert!(log.exists(), "log should still exist");
+        assert!(
+            !rotation_path(&log, 1).exists(),
+            "no rotation should have happened"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn rotate_shifts_when_over_threshold() {
+        let dir = tempdir();
+        let log = dir.join("events.log");
+        // Write enough to exceed ROTATE_MAX_BYTES.
+        let big = vec![b'x'; (ROTATE_MAX_BYTES + 1) as usize];
+        fs::write(&log, &big).unwrap();
+        maybe_rotate(&log);
+        // After rotation, .log is gone (renamed to .log.1) and we
+        // start fresh on the next write_line.
+        assert!(!log.exists(), "active log should have been rotated away");
+        assert!(
+            rotation_path(&log, 1).exists(),
+            "first rotation slot should now exist"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn rotate_caps_at_rotate_keep() {
+        let dir = tempdir();
+        let log = dir.join("events.log");
+
+        // Pre-populate every rotation slot from .1 up to .ROTATE_KEEP
+        // so we know the rotation has to drop the oldest. Mark each
+        // slot with its number so we can verify the shift.
+        for k in 1..=ROTATE_KEEP {
+            fs::write(rotation_path(&log, k), format!("rot-{k}")).unwrap();
+        }
+        // Active log is over the threshold, so rotation fires.
+        let big = vec![b'y'; (ROTATE_MAX_BYTES + 1) as usize];
+        fs::write(&log, &big).unwrap();
+
+        maybe_rotate(&log);
+
+        // .1 should now hold the previously-active log (size > MAX).
+        let r1 = fs::read(rotation_path(&log, 1)).unwrap();
+        assert_eq!(r1.len(), big.len(), ".log.1 should be the old active");
+        // .2 should hold what was in .1 before rotation.
+        assert_eq!(
+            fs::read_to_string(rotation_path(&log, 2)).unwrap(),
+            "rot-1",
+            ".log.2 should be the old .log.1"
+        );
+        // .ROTATE_KEEP should hold what was in .ROTATE_KEEP-1 before;
+        // the previous .ROTATE_KEEP must have been dropped.
+        let last = rotation_path(&log, ROTATE_KEEP);
+        assert_eq!(
+            fs::read_to_string(&last).unwrap(),
+            format!("rot-{}", ROTATE_KEEP - 1),
+            "oldest rotation slot should be old next-to-last; previous oldest must be dropped"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn write_line_triggers_rotation() {
+        // End-to-end: drive record_to with a pre-bloated log file
+        // and verify that the next write produces a fresh file
+        // containing only the new line, with the old contents
+        // moved to .log.1.
+        let dir = tempdir();
+        let log = dir.join("events.log");
+        let big = vec![b'z'; (ROTATE_MAX_BYTES + 1) as usize];
+        fs::write(&log, &big).unwrap();
+
+        record_to(
+            Some(&log),
+            "sign",
+            Some("after-rotation"),
+            None,
+            Duration::from_millis(0),
+            true,
+        );
+
+        let after = fs::read_to_string(&log).unwrap();
+        assert!(after.lines().count() == 1);
+        assert!(after.contains("after-rotation"));
+        let r1 = fs::read(rotation_path(&log, 1)).unwrap();
+        assert_eq!(r1.len(), big.len());
         cleanup(&dir);
     }
 }

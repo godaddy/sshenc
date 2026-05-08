@@ -3,4 +3,5 @@
 
 //! SSH agent daemon library for sshenc Secure Enclave keys.
 
+pub mod op_log;
 pub mod server;

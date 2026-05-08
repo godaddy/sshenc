@@ -649,7 +649,7 @@ pub fn keygen_sk(
     Ok(())
 }
 
-#[allow(clippy::print_stdout, clippy::too_many_arguments)]
+#[allow(clippy::print_stdout, clippy::print_stderr, clippy::too_many_arguments)]
 pub fn keygen(
     backend: &dyn KeyBackend,
     label: &str,
@@ -705,24 +705,28 @@ pub fn keygen(
             // fails too, the original generate error wasn't about a
             // duplicate -- propagate it untouched.
             //
-            // Retry `get` a handful of times on transient KeyNotFound
-            // before giving up. Under concurrent keygens against the
-            // same label, the agent is parallel: T1's generate
-            // returns success at the agent level, but its CLI-side
-            // `cache_key_artifacts_locally` (which writes the SEC1
-            // .pub cache) hasn't necessarily finished by the time
-            // T2's generate sees a duplicate-label rejection from
-            // the agent. T2's `backend.get(label)` then races T1's
-            // post-generate cache write -- without the retry, T2
-            // would observe `load_pub_key: KeyNotFound` here,
-            // propagate the original "refused generate" error, and
-            // skip the rotation path entirely. The window is
-            // milliseconds in practice; 5 x 50ms = 250ms upper
-            // bound is invisible to humans and well under any
-            // practical concurrent-keygen scenario.
+            // Retry `get` until a deadline before giving up. Under
+            // concurrent keygens against the same label, T1's
+            // generate returns success from the agent (which has
+            // serialized via DirLock and written .pub/.meta), but
+            // T1's CLI-side `cache_key_artifacts_locally` mirror —
+            // which fsyncs .pub and .meta — runs AFTER the agent's
+            // reply and races T2's `backend.get`. On a contended
+            // CI runner, two atomic_writes (each = O_CREAT/EXCL +
+            // write + fsync + rename + sync_parent_dir) can stall
+            // beyond a hundred milliseconds.
+            //
+            // The previous 5 × 50ms (=250ms) budget proved too
+            // tight in CI; bump to 2s total with 50ms polls so a
+            // pathological fsync stall still resolves into a
+            // successful rotation rather than a misleading
+            // "refused generate" error. 2s is invisible to humans
+            // for a one-time keygen and well under any practical
+            // concurrency scenario.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             let mut old: Option<KeyInfo> = None;
             let mut last_err = None;
-            for attempt in 0..5 {
+            loop {
                 match backend.get(label) {
                     Ok(info) => {
                         old = Some(info);
@@ -730,20 +734,31 @@ pub fn keygen(
                     }
                     Err(get_err) => {
                         last_err = Some(get_err);
-                        if attempt < 4 {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        if std::time::Instant::now() >= deadline {
+                            break;
                         }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                 }
             }
             let old = match old {
                 Some(info) => info,
                 None => {
-                    tracing::debug!(
-                        label,
-                        ?last_err,
-                        "rotation: backend.get failed after retries; \
-                         propagating original generate error"
+                    // Surface the rotation-path failure rather than
+                    // swallowing it: the original `e` is "agent
+                    // refused generate", which is a *symptom*; the
+                    // diagnostic the user needs is *why* we couldn't
+                    // observe the existing key after the rejection.
+                    // Log to stderr so a contended-CI failure can be
+                    // root-caused next time without re-running with
+                    // RUST_LOG=debug.
+                    let detail = last_err
+                        .as_ref()
+                        .map(|err| format!("{err}"))
+                        .unwrap_or_else(|| "no get attempts recorded".to_string());
+                    eprintln!(
+                        "rotation: backend.get for label {label:?} did not converge within \
+                         deadline (last error: {detail}); propagating original generate error",
                     );
                     return Err(e.into());
                 }
@@ -1174,9 +1189,12 @@ pub fn install() -> Result<()> {
         Ok((_shell, sshenc_core::shell_env::InstallResult::AlreadyPresent)) => {}
         Ok((_, sshenc_core::shell_env::InstallResult::UnknownShell)) => {
             eprintln!(
-                "Note: couldn't detect a known shell ($SHELL not zsh or bash). \
-                 To enable git commit signing, add this to your shell rc:\n  \
-                 if [ -S \"$HOME/.sshenc/agent.sock\" ]; then export SSH_AUTH_SOCK=\"$HOME/.sshenc/agent.sock\"; fi"
+                "Note: couldn't detect a known shell ($SHELL not zsh, bash, fish, \
+                 or pwsh). To enable git commit signing, add the equivalent of \
+                 this to your shell rc:\n  \
+                 if [ -S \"$HOME/.sshenc/agent.sock\" ]; then export SSH_AUTH_SOCK=\"$HOME/.sshenc/agent.sock\"; fi\n\
+                 (fish:  if test -S \"$HOME/.sshenc/agent.sock\"; set -gx SSH_AUTH_SOCK \"$HOME/.sshenc/agent.sock\"; end)\n\
+                 (pwsh:  if (Test-Path \"$HOME/.sshenc/agent.sock\") {{ $env:SSH_AUTH_SOCK = \"$HOME/.sshenc/agent.sock\" }})"
             );
         }
         Ok((_, sshenc_core::shell_env::InstallResult::NoHome)) => {

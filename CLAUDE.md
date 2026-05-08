@@ -78,6 +78,16 @@ Supports macOS, Windows, and Linux:
 - **Windows**: Uses TPM 2.0 via Windows CNG.
 - **Linux**: Uses software-backed ECDSA P-256 keys via `enclaveapp-software`. Keys are stored on disk in `~/.sshenc/keys/` and are NOT hardware-protected.
 
+## Test failures: no flakes
+
+Test failures are never "flakes". A red is a real defect in the code, the
+test, or the test environment, and must be investigated to root cause and
+resolved before moving on. Do not report a partially-green run as success.
+Do not retry-and-hope. Capture the failing state (`/proc/sys/fs/binfmt_misc/WSLInterop`,
+`wsl --status`, agent logs, `dmesg | tail`, etc.), reason about which
+component is misbehaving, and fix it -- in code, in the harness, or in a
+documented host-side prerequisite. Every matrix run targets 0 fail.
+
 ## Commits
 
 Do not add Co-Authored-By lines for Claude Code in commit messages.

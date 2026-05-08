@@ -426,18 +426,31 @@ function Sync-SharedKeysToWsl {
     }
 }
 
+# Deterministically register WSLInterop in the named distro. The
+# binfmt_misc handler that lets Linux exec a Windows .exe is supposed
+# to be registered by `/init` at WSL2 boot, but on hosts running
+# Docker Desktop (which boots a `docker-desktop` helper distro that
+# hooks into the same VM session) AND on systemd-=true distros where
+# systemd takes over PID 1 and clears the binfmt_misc filesystem,
+# WSLInterop ends up missing. Symptom: `whoami.exe` returns "Exec
+# format error", and sshenc-agent's bridge_spawn returns ENOEXEC.
+#
+# Fix: write the canonical interop registration directly to
+# `/proc/sys/fs/binfmt_misc/register`. Idempotent -- if WSLInterop
+# is already registered the kernel returns EEXIST which we ignore.
+# Requires root; we always pass `-u root`.
+function Repair-WslInterop {
+    param([string]$Distro)
+    & wsl.exe -d $Distro -u root -- bash -c '[ -f /proc/sys/fs/binfmt_misc/WSLInterop ] || echo ":WSLInterop:M::MZ::/init:PF" > /proc/sys/fs/binfmt_misc/register' 2>&1 | Out-Null
+}
+
 # Probe WSLInterop in the named distro by trying to exec `whoami.exe`
-# with a 5-second timeout. Returns $true if the probe succeeds and
-# whoami exits 0; $false on ENOEXEC, binfmt corruption, hang, or
-# timeout (any of which indicate the binfmt_misc handler that lets
-# Linux exec a Windows .exe is not correctly registered for this
-# distro). Docker Desktop's `docker-desktop` helper distro hooks into
-# the WSL2 VM boot path and can race the WSLInterop registration of
-# a freshly-cold-booted test distro (AlmaLinux is observed to be the
-# most fragile). When that happens, sshenc-agent's bridge_spawn
-# returns ENOEXEC and the agent never starts.
+# with a 5-second timeout. Returns $true if the probe succeeds.
+# Calls Repair-WslInterop first, so a missing registration is fixed
+# automatically before the probe runs.
 function Test-WslInteropWorking {
     param([string]$Distro)
+    Repair-WslInterop -Distro $Distro
     $probe = @'
 timeout 5 /mnt/c/Windows/System32/whoami.exe >/dev/null 2>&1
 echo "exit=$?"
@@ -453,16 +466,13 @@ echo "exit=$?"
     return ($out -match 'exit=0\b')
 }
 
-# Reset WSL state in front of the next test distro. Three escalating
-# tiers, each gated on the previous one having failed -- so the
-# common case is silent (tier 1 always works on a healthy host), and
-# the destructive option only fires when we're actually stuck:
-#   Tier 1: `wsl --shutdown` + 2.5s settle + probe.
-#   Tier 2: another `wsl --shutdown` + 5s settle + probe.
-#   Tier 3: `wsl --terminate docker-desktop` + `wsl --shutdown` + 4s.
-# Returns $true if the distro is ready, $false if WSLInterop is still
-# broken after tier 3. Caller logs and proceeds; the actual test will
-# fail loudly if the probe was right.
+# Reset WSL state in front of the next test distro. With the
+# Repair-WslInterop helper inside Test-WslInteropWorking, the
+# common case is now a single `wsl --shutdown` + repair + probe.
+# The escalating retries (longer settle, terminate docker-desktop)
+# stay as defense-in-depth for the rare case where WSL itself is
+# in a really bad state and the binfmt_misc filesystem isn't even
+# mounted. Returns $true if the distro is ready.
 function Initialize-WslDistroForTest {
     param([string]$Distro)
     & wsl.exe --shutdown 2>&1 | Out-Null

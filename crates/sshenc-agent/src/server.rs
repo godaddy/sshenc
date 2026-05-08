@@ -903,7 +903,16 @@ fn handle_request(
             // legacy ECDSA where we have to wrap a DER signature.
             if backend.is_sk_label(label.as_str()) {
                 tracing::debug!(label = label.as_str(), "dispatching SK sign request");
-                let sig_blob = match backend.sk_sign(label.as_str(), &data) {
+                let started = std::time::Instant::now();
+                let sk_result = backend.sk_sign(label.as_str(), &data);
+                crate::op_log::record(
+                    "sign",
+                    Some(label.as_str()),
+                    None,
+                    started.elapsed(),
+                    sk_result.is_ok(),
+                );
+                let sig_blob = match sk_result {
                     Ok(b) => b,
                     Err(e) => {
                         tracing::warn!(
@@ -976,7 +985,16 @@ fn handle_request(
             // wrapping-key cache uses); macOS plumbs this into the
             // `LAContext.touchIDAuthenticationAllowableReuseDuration`
             // for `Cached` mode.
-            let der_sig = backend.sign_with_presence(label.as_str(), &data, effective_mode, 0)?;
+            let started = std::time::Instant::now();
+            let sign_result = backend.sign_with_presence(label.as_str(), &data, effective_mode, 0);
+            crate::op_log::record(
+                "sign",
+                Some(label.as_str()),
+                None,
+                started.elapsed(),
+                sign_result.is_ok(),
+            );
+            let der_sig = sign_result?;
             let ssh_sig = signature::der_to_ssh_signature(&der_sig)?;
 
             tracing::debug!(
@@ -1107,7 +1125,16 @@ fn handle_request(
                 record_pub_path: pub_path_owned,
             };
 
-            match backend.generate(&opts) {
+            let started = std::time::Instant::now();
+            let gen_result = backend.generate(&opts);
+            crate::op_log::record(
+                "generate",
+                Some(label_str),
+                None,
+                started.elapsed(),
+                gen_result.is_ok(),
+            );
+            match gen_result {
                 Ok(info) => {
                     tracing::info!(label = label_str, "generate_key: succeeded");
                     blob_cache.clear();
@@ -1156,7 +1183,16 @@ fn handle_request(
                 return Ok(AgentResponse::Failure);
             }
 
-            match backend.rename(old_str, new_str) {
+            let started = std::time::Instant::now();
+            let rename_result = backend.rename(old_str, new_str);
+            crate::op_log::record(
+                "rename",
+                Some(old_str),
+                Some(new_str),
+                started.elapsed(),
+                rename_result.is_ok(),
+            );
+            match rename_result {
                 Ok(()) => {
                     tracing::info!(old = old_str, new = new_str, "rename_key: succeeded");
                     blob_cache.clear();
@@ -1197,12 +1233,20 @@ fn handle_request(
             // user's Windows passkey list -- otherwise the OS
             // accumulates orphaned passkey entries every time the
             // matrix test churns through fresh SK labels.
+            let started = std::time::Instant::now();
             let result = if backend.is_sk_label(label_str) {
                 tracing::debug!(label = label_str, "dispatching SK delete");
                 backend.sk_delete(label_str)
             } else {
                 backend.delete(label_str)
             };
+            crate::op_log::record(
+                "delete",
+                Some(label_str),
+                None,
+                started.elapsed(),
+                result.is_ok(),
+            );
             match result {
                 Ok(()) => {
                     tracing::info!(label = label_str, "delete_key: succeeded");
@@ -1247,7 +1291,16 @@ fn handle_request(
             // on macOS — wrong directory, the agent would report
             // "no `.meta` for label" for every existing key.
             let dir = sshenc_se::sshenc_keys_dir();
-            match perform_migrate_meta(&dir, label_str) {
+            let started = std::time::Instant::now();
+            let migrate_result = perform_migrate_meta(&dir, label_str);
+            crate::op_log::record(
+                "migrate_meta",
+                Some(label_str),
+                None,
+                started.elapsed(),
+                migrate_result.is_ok(),
+            );
+            match migrate_result {
                 Ok(()) => {
                     tracing::info!(label = label_str, "migrate_meta: succeeded");
                     Ok(AgentResponse::Success)

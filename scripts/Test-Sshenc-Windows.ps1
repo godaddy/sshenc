@@ -1063,6 +1063,17 @@ if ($configBackup) { Set-Content $sshConfigPath -Value $configBackup -NoNewline 
 if (-not $SkipWSL -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
     $bashTests = @'
 #!/usr/bin/env bash
+# Make absolutely sure WSLInterop binfmt_misc is registered before
+# we try to touch a Windows .exe. The Windows-side
+# Initialize-WslDistroForTest already ran Repair-WslInterop, but
+# `wsl --shutdown` between probe and this script's launch can drop
+# the registration on systemd distros. Idempotent: EEXIST is fine,
+# we just need the entry present before the agent's bridge_spawn
+# tries to exec sshenc-tpm-bridge.exe.
+if [ ! -f /proc/sys/fs/binfmt_misc/WSLInterop ] && [ -w /proc/sys/fs/binfmt_misc/register ]; then
+    echo ":WSLInterop:M::MZ::/init:PF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null || true
+fi
+
 # Reproduce what an interactive shell does: prefer the native
 # sshenc-agent over a stale socat+npiperelay shim; pre-warm the
 # Windows-side bridge BEFORE starting the agent so its one-shot

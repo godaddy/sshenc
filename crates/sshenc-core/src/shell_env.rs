@@ -542,7 +542,14 @@ mod tests {
         with_shell_env(Some("/usr/bin/powershell"), || {
             assert_eq!(detect_shell_from_env(), Shell::PowerShell);
         });
-        with_shell_env(Some(r"C:\Program Files\PowerShell\7\pwsh.exe"), || {
+        // Git Bash / WSL surface a PowerShell-on-Windows install via
+        // a forward-slash path with `.exe` suffix; the `.exe` trim
+        // path needs to fire there. (A literal backslash path like
+        // `C:\Program Files\...\pwsh.exe` is NOT a valid $SHELL on
+        // Unix — `Path::file_name()` would treat the whole string
+        // as a single name — so we don't test that variant; native
+        // Windows users don't go through `detect_shell_from_env`.)
+        with_shell_env(Some("/c/Program Files/PowerShell/7/pwsh.exe"), || {
             assert_eq!(detect_shell_from_env(), Shell::PowerShell)
         });
     }

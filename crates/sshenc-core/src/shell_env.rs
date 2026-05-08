@@ -162,7 +162,11 @@ fn powershell_rc_path(home: &Path) -> PathBuf {
     }
     #[cfg(not(windows))]
     {
-        let _ = (ps7, ps51);
+        // ps7 / ps51 are constructed for the probe loop above but
+        // not selected here; bind to a named placeholder so
+        // `clippy::let_underscore_drop` doesn't fire on PathBuf's
+        // destructor.
+        let _unused = (ps7, ps51);
         unix_pwsh
     }
 }

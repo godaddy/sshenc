@@ -17,11 +17,16 @@ const READY_FILE_ENV: &str = "SSHENC_AGENT_READY_FILE";
 /// `AppSigningBackend::init`, which on WSL spawns
 /// `sshenc-tpm-bridge.exe` across the WSL/Windows boundary and
 /// completes an `init_signing` handshake before binding the socket.
-/// On AlmaLinux musl that combined cost reliably exceeds 10 s; the
-/// libenclaveapp-side `ensure_daemon_ready` budget already moved to
-/// ~30 s, so the inner wait must match or the parent gives up
-/// before the outer caller does. Aligned at 30 s.
-const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// 60 s. The inner `warm_backend_identities` retry budget alone is
+/// 31.7 s (200+500+1000+2000+4000+8000+16000 ms backoffs), and
+/// each `backend.list()` attempt within that budget can itself
+/// block on cold-bridge spawn / cold-TPM warmup. 30 s left no
+/// margin — when warmup exhausted the back-off chain we'd race
+/// the parent's wait and lose, even though the child was about to
+/// signal ready. 60 s buys ~2× margin over the documented warmup
+/// budget without making real failures hang noticeably longer.
+const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Parser)]
 #[command(

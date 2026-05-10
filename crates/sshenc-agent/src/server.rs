@@ -873,6 +873,18 @@ impl std::io::Write for SocketReadWriter {
     }
 }
 
+/// Build a Touch ID `localizedReason` string by inspecting the sign-data
+/// blob. The SSHSIG format (used by git commit signing and `ssh-keygen -Y
+/// sign`) starts with the ASCII magic `SSHSIG`. Everything else is treated
+/// as an SSH connection authentication request.
+fn sign_reason(data: &[u8], label: &str) -> String {
+    if data.starts_with(b"SSHSIG") {
+        format!("sshenc: sign git commit ({label})")
+    } else {
+        format!("sshenc: SSH authentication ({label})")
+    }
+}
+
 fn handle_request(
     request: AgentRequest,
     backend: &dyn KeyBackend,
@@ -1140,8 +1152,10 @@ fn handle_request(
             // wrapping-key cache uses); macOS plumbs this into the
             // `LAContext.touchIDAuthenticationAllowableReuseDuration`
             // for `Cached` mode.
+            let reason = sign_reason(&data, label.as_str());
             let started = Instant::now();
-            let sign_result = backend.sign_with_presence(label.as_str(), &data, effective_mode, 0);
+            let sign_result =
+                backend.sign_with_presence(label.as_str(), &data, effective_mode, 0, &reason);
             crate::op_log::record(
                 "sign",
                 Some(label.as_str()),

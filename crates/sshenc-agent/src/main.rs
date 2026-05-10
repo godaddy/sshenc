@@ -88,6 +88,7 @@ fn default_pid_path() -> PathBuf {
         .join("agent.pid")
 }
 
+#[cfg(unix)]
 fn read_pid_file(pid_path: &Path) -> Option<u32> {
     std::fs::read_to_string(pid_path)
         .ok()

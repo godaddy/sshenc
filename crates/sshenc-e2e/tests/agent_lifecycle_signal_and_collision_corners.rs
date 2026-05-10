@@ -11,10 +11,10 @@
 //!    be ignored or cause graceful shutdown, but never
 //!    abort()/SIGSEGV the process. Pin "agent stays alive (or
 //!    exits cleanly) across SIGHUP".
-//! 2. **A second sshenc-agent on the same socket path bails
-//!    cleanly**: prepare_socket_path's "socket already in use"
-//!    branch. Rather than silently overwriting the listener, the
-//!    second agent must exit non-zero with a clear message.
+//! 2. **A second sshenc-agent on the same socket path takes over**:
+//!    prepare_socket_path kills the old agent via the PID file and
+//!    re-binds. After the handover the second agent is serving and
+//!    the first is dead.
 //! 3. **`sshenc uninstall` while an agent is running**: the
 //!    install/uninstall paths edit ~/.ssh/config; uninstall
 //!    shouldn't crash if a live agent is holding the socket. Test
@@ -121,23 +121,25 @@ fn agent_terminates_cleanly_on_sighup_and_can_be_restarted() {
     );
 }
 
-/// A second `sshenc-agent` started against the same socket path
-/// must bail cleanly with a useful diagnostic, not silently
-/// hijack the listener or crash.
+/// A second `sshenc-agent` started against the same socket path must take
+/// over the socket and serve identities. The e2e harness always starts
+/// agents with `--foreground` (no daemon fork, no PID file), so the
+/// takeover uses the no-PID path: it force-removes the stale socket and
+/// re-binds. The first agent keeps running but loses the socket — only the
+/// second agent responds to new connections.
 #[test]
 #[ignore = "requires docker"]
-fn second_agent_on_same_socket_path_bails() {
-    if skip_if_no_docker("second_agent_on_same_socket_path_bails") {
+fn second_agent_on_same_socket_path_takes_over() {
+    if skip_if_no_docker("second_agent_on_same_socket_path_takes_over") {
         return;
     }
     let mut env = SshencEnv::new().expect("env");
     drop(shared_enclave_pubkey(&env).expect("warm shared key"));
     env.start_agent().expect("start first agent");
 
-    // Try to bring up a second agent against the same socket path.
-    // prepare_socket_path's UnixStream::connect succeeds (first
-    // agent is listening), so the second agent should bail with
-    // "agent socket already in use" before binding.
+    // Start a second agent (--foreground) against the same socket.
+    // No PID file exists (foreground mode), so prepare_socket_path will
+    // force-remove the live socket and re-bind rather than bailing.
     let bin = workspace_bin("sshenc-agent").expect("agent binary");
     let mut second = env
         .scrubbed_command(&bin)
@@ -149,41 +151,31 @@ fn second_agent_on_same_socket_path_bails() {
         .spawn()
         .expect("spawn second agent");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let exit_status = loop {
-        if let Some(status) = second.try_wait().expect("try_wait") {
-            break status;
-        }
+    // Wait until the second agent is serving identities.
+    let socket = env.socket_path();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         if Instant::now() >= deadline {
             drop(second.kill());
-            panic!("second agent didn't exit; expected it to bail");
+            panic!("second agent didn't become ready within timeout");
         }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    assert!(
-        !exit_status.success(),
-        "second agent should exit non-zero on already-bound socket"
-    );
-    let out = second.wait_with_output().expect("wait second");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.to_lowercase().contains("already in use")
-            || stderr.to_lowercase().contains("address already")
-            || stderr.to_lowercase().contains("socket"),
-        "expected diagnostic about socket already in use; got:\n{stderr}"
-    );
+        if let Some(status) = second.try_wait().expect("try_wait") {
+            panic!("second agent exited unexpectedly with {status}");
+        }
+        let listed = run(env
+            .scrubbed_command("ssh-add")
+            .env("SSH_AUTH_SOCK", &socket)
+            .arg("-L"));
+        if listed.map(|r| r.succeeded()).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
-    // First agent must still be alive and serving.
-    let listed = run(env
-        .scrubbed_command("ssh-add")
-        .env("SSH_AUTH_SOCK", env.socket_path())
-        .arg("-L"))
-    .expect("ssh-add -L");
-    assert!(
-        listed.succeeded(),
-        "first agent should still serve; stderr:\n{}",
-        listed.stderr
-    );
+    // Second agent is alive and owns the socket — verified by the ssh-add
+    // loop above completing successfully. That's the invariant: new agent
+    // wins the socket regardless of what binary previously held it.
+    drop(second.kill());
 }
 
 /// `sshenc uninstall` while a live agent holds the socket

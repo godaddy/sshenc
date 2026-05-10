@@ -49,8 +49,12 @@ pub trait KeyBackend: Send + Sync {
     /// ([`PresenceMode::Strict`]), or skipped entirely ([`PresenceMode::None`]).
     /// `cache_ttl_secs == 0` collapses `Cached` into `Strict`.
     ///
-    /// The default impl ignores `mode` / `cache_ttl_secs` and falls
-    /// back to [`Self::sign`]. The real backend on macOS overrides
+    /// `reason` is shown verbatim in the Touch ID dialog as `localizedReason`.
+    /// Callers should include the operation type and key label, e.g.
+    /// `"sshenc: sign git commit (work-key)"`.
+    ///
+    /// The default impl ignores `mode`, `cache_ttl_secs`, and `reason` and
+    /// falls back to [`Self::sign`]. The real backend on macOS overrides
     /// this to plumb a reusable `LAContext` to CryptoKit; mocks and
     /// the agent-proxy backend keep the default.
     fn sign_with_presence(
@@ -59,8 +63,9 @@ pub trait KeyBackend: Send + Sync {
         data: &[u8],
         mode: PresenceMode,
         cache_ttl_secs: u64,
+        reason: &str,
     ) -> Result<Vec<u8>> {
-        let _ = (mode, cache_ttl_secs);
+        let _ = (mode, cache_ttl_secs, reason);
         self.sign(label, data)
     }
 

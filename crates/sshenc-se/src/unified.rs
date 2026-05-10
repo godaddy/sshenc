@@ -908,6 +908,7 @@ impl KeyBackend for SshencBackend {
         data: &[u8],
         mode: PresenceMode,
         cache_ttl_secs: u64,
+        reason: &str,
     ) -> Result<Vec<u8>> {
         drop(KeyLabel::new(label)?);
         // Prefer the caller-supplied TTL when non-zero, otherwise
@@ -920,7 +921,7 @@ impl KeyBackend for SshencBackend {
             cache_ttl_secs
         };
         self.signer()
-            .sign_with_presence(label, data, mode, effective_ttl)
+            .sign_with_presence(label, data, mode, effective_ttl, reason)
             .map_err(|e| map_err("sign_with_presence", e))
     }
 

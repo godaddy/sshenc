@@ -2312,10 +2312,11 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let pubkey_blob = requested_pub.wire_blob();
 
     let config = Config::load_default()?;
-    sshenc_agent_proto::client::ensure_agent_ready(&config.socket_path)
+    let socket_path = client_socket_path(&config.socket_path);
+    sshenc_agent_proto::client::ensure_agent_ready(&socket_path)
         .map_err(|e| anyhow!("sshenc-agent not reachable: {e}"))?;
     let ssh_sig = sshenc_agent_proto::client::try_sign_via_socket(
-        &config.socket_path,
+        &socket_path,
         &pubkey_blob,
         &signed_data,
     )

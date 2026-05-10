@@ -1056,8 +1056,28 @@ fn handle_request(
                 started.elapsed(),
                 sign_result.is_ok(),
             );
-            let der_sig = sign_result?;
-            let ssh_sig = signature::der_to_ssh_signature(&der_sig)?;
+            let der_sig = match sign_result {
+                Ok(sig) => sig,
+                Err(e) => {
+                    tracing::warn!(
+                        label = label.as_str(),
+                        error = %e,
+                        "sign_with_presence failed"
+                    );
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            let ssh_sig = match signature::der_to_ssh_signature(&der_sig) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    tracing::warn!(
+                        label = label.as_str(),
+                        error = %e,
+                        "DER-to-SSH signature conversion failed"
+                    );
+                    return Ok(AgentResponse::Failure);
+                }
+            };
 
             tracing::debug!(
                 label = label.as_str(),

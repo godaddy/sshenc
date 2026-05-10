@@ -88,6 +88,12 @@ fn default_pid_path() -> PathBuf {
         .join("agent.pid")
 }
 
+fn read_pid_file(pid_path: &Path) -> Option<u32> {
+    std::fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
 fn write_pid_file(pid_path: &Path, pid: u32) -> Result<()> {
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)
@@ -205,6 +211,12 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Read the old PID before daemonize() so the child inherits it across
+    // fork(). The parent overwrites the PID file with the new child PID, so
+    // reading after daemonize() would return the new PID instead of the old one.
+    #[cfg(unix)]
+    let old_pid = read_pid_file(&default_pid_path());
+
     // Daemonize MUST happen before any threads are spawned (e.g., tokio runtime),
     // because fork() in a multi-threaded process leads to undefined behavior.
     #[cfg(unix)]
@@ -284,6 +296,7 @@ fn main() -> Result<()> {
             config.prompt_policy,
             wrapping_key_cache_ttl,
             ready_file.as_deref(),
+            old_pid,
         ));
         if let Err(ref error) = result {
             signal_ready_error(ready_file.as_deref(), error);

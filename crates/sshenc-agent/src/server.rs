@@ -133,8 +133,9 @@ pub async fn run_agent(
     prompt_policy: PromptPolicy,
     wrapping_key_cache_ttl: std::time::Duration,
     ready_file: Option<&Path>,
+    old_pid: Option<u32>,
 ) -> Result<()> {
-    prepare_socket_path(&socket_path)?;
+    prepare_socket_path(&socket_path, old_pid)?;
 
     let backend: Arc<dyn KeyBackend> = Arc::new(
         sshenc_se::SshencBackend::with_cache_ttl(pub_dir, false, wrapping_key_cache_ttl)
@@ -209,8 +210,52 @@ pub async fn run_agent(
     Ok(())
 }
 
+/// Returns the canonical executable path for `pid`, or `None` if it cannot
+/// be determined. Used to detect whether a new agent start is an upgrade
+/// (different binary path) vs a redundant start of the same binary.
 #[cfg(unix)]
-fn prepare_socket_path(socket_path: &Path) -> Result<()> {
+#[allow(unsafe_code)]
+fn exe_path_for_pid(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|p| p.canonicalize().ok())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // proc_pidpath is a macOS libproc API; not exposed by the libc crate
+        // but reliably available on all supported macOS versions.
+        extern "C" {
+            fn proc_pidpath(
+                pid: libc::c_int,
+                buffer: *mut libc::c_void,
+                buffersize: u32,
+            ) -> libc::c_int;
+        }
+        const MAXSIZE: usize = 4096;
+        let mut buf = vec![0_u8; MAXSIZE];
+        let ret =
+            unsafe { proc_pidpath(pid as libc::c_int, buf.as_mut_ptr().cast(), MAXSIZE as u32) };
+        if ret <= 0 {
+            return None;
+        }
+        let len = ret as usize;
+        std::str::from_utf8(&buf[..len])
+            .ok()
+            .map(PathBuf::from)
+            .and_then(|p| p.canonicalize().ok())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn prepare_socket_path(socket_path: &Path, old_pid: Option<u32>) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::net::UnixStream;
 
@@ -235,7 +280,55 @@ fn prepare_socket_path(socket_path: &Path) -> Result<()> {
     }
 
     match UnixStream::connect(socket_path) {
-        Ok(_) => anyhow::bail!("agent socket already in use: {}", socket_path.display()),
+        Ok(_) => {
+            // Socket is live. Only replace the running agent if we can confirm
+            // this is an upgrade (our binary differs from the old agent's
+            // binary). Replacing a same-binary agent would kill a healthy
+            // instance with a warm key cache for no benefit.
+            if let Some(pid) = old_pid {
+                let new_exe = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.canonicalize().ok());
+                let old_exe = exe_path_for_pid(pid);
+                let is_upgrade = match (new_exe, old_exe) {
+                    (Some(new), Some(old)) => new != old,
+                    // Can't determine old path — assume upgrade to recover from
+                    // stuck cross-binary situations (e.g. test binary left running).
+                    _ => true,
+                };
+
+                if is_upgrade {
+                    tracing::info!(pid, "replacing existing sshenc-agent (upgrade)");
+                    // Safety: standard POSIX signal; pid comes from our own PID file.
+                    let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
+                    if sent {
+                        // Give the old agent up to 3 s to exit gracefully.
+                        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+                        while Instant::now() < deadline {
+                            if UnixStream::connect(socket_path).is_err() {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                    }
+                    std::fs::remove_file(socket_path)?;
+                    Ok(())
+                } else {
+                    anyhow::bail!("agent socket already in use: {}", socket_path.display())
+                }
+            } else {
+                // No PID on record — force-remove the orphaned socket so a
+                // hijacked-by-test-binary situation doesn't block every
+                // subsequent start.
+                tracing::warn!(
+                    socket = %socket_path.display(),
+                    "live agent socket found but no PID on record; \
+                     taking over (old agent will lose socket but keep running)"
+                );
+                std::fs::remove_file(socket_path)?;
+                Ok(())
+            }
+        }
         Err(error)
             if matches!(
                 error.kind(),
@@ -2136,15 +2229,14 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_prepare_socket_path_rejects_live_socket() {
+    fn test_prepare_socket_path_replaces_live_socket_without_pid() {
         let socket_path = test_socket_path("live");
         let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
 
-        let error = prepare_socket_path(&socket_path).unwrap_err();
-        assert!(error.to_string().contains("already in use"));
-        assert!(socket_path.exists());
-
-        drop(std::fs::remove_file(socket_path));
+        // No PID supplied — should still succeed by force-removing the socket.
+        prepare_socket_path(&socket_path, None).unwrap();
+        assert!(!socket_path.exists(), "socket file should be removed");
+        // The _listener is still alive (it just lost its path), which is expected.
     }
 
     #[test]
@@ -2155,7 +2247,7 @@ mod tests {
         drop(listener);
 
         assert!(socket_path.exists());
-        prepare_socket_path(&socket_path).unwrap();
+        prepare_socket_path(&socket_path, None).unwrap();
         assert!(!socket_path.exists());
     }
 
@@ -2165,7 +2257,7 @@ mod tests {
         let socket_path = test_socket_path("file");
         std::fs::write(&socket_path, "not a socket").unwrap();
 
-        let error = prepare_socket_path(&socket_path).unwrap_err();
+        let error = prepare_socket_path(&socket_path, None).unwrap_err();
         assert!(error.to_string().contains("non-socket"));
         assert!(socket_path.exists());
 

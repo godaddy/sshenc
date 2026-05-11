@@ -39,13 +39,15 @@ keys. Nothing breaks when you install sshenc.
 > from the corresponding tag's source on this repository — not on a
 > developer's laptop. Each release page links to the workflow run that
 > produced it, so you can audit the exact source commit, runner image,
-> Rust toolchain version, and build/sign/notarize steps. macOS binaries
-> are signed with the team's Developer ID Application identity inside
-> a runner-scoped temporary keychain and submitted to Apple's notary
-> service; Windows binaries are signed by the same path; the macOS
+> Rust toolchain version, and build steps. macOS binaries are signed
+> with the team's Developer ID Application identity inside a runner-scoped
+> temporary keychain and submitted to Apple's notary service; the macOS
 > `.app` bundle has its provisioning profile embedded at build time.
-> If you want to verify reproducibility, every step of the pipeline
-> is visible in the workflow logs.
+> Windows binaries are **not code-signed** — they're built by GitHub
+> Actions but shipped unsigned (Windows Defender SmartScreen may warn
+> on first run until the binaries gain reputation). If you want to
+> verify reproducibility, every step of the pipeline is visible in the
+> workflow logs.
 
 If you'd rather build from source — for any reason, including not
 trusting our CI — see [§ From source](#from-source-macos) below. Note

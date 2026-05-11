@@ -70,7 +70,16 @@ pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
     // `--socket <path>` invoke shape) without reimplementing.
     enclaveapp_core::daemon::ensure_daemon_ready("sshenc-agent", "sshenc", socket_path)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Verify the agent is actually responding to requests, not just
+    // accepting connections. The agent's socket binds and accepts
+    // connections before warm_backend_identities completes, so a
+    // cold-start connection racing the warmup can see an empty
+    // identity list or hit the agent mid-initialization. Sending a
+    // test RequestIdentities here blocks until the agent is ready
+    // to serve real traffic.
+    verify_agent_responsive(socket_path)
 }
 
 /// Windows readiness check: probe the named pipe. The agent on
@@ -83,14 +92,50 @@ pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
 /// start the agent with whatever lifecycle they prefer.
 #[cfg(windows)]
 pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
-    if PipeStream::probe(socket_path) {
-        return Ok(());
+    if !PipeStream::probe(socket_path) {
+        return Err(format!(
+            "sshenc-agent isn't answering on {}; start it with \
+             `sshenc-agent` or ensure the sshenc-agent Service is running",
+            socket_path.display()
+        ));
     }
-    Err(format!(
-        "sshenc-agent isn't answering on {}; start it with \
-         `sshenc-agent` or ensure the sshenc-agent Service is running",
-        socket_path.display()
-    ))
+
+    // Verify the agent is actually responding to requests.
+    verify_agent_responsive(socket_path)
+}
+
+/// Verify the agent is responding to requests by sending a test
+/// `RequestIdentities`. Returns `Ok(())` if the agent replies with
+/// any response (empty list is fine — we just need proof the agent
+/// is serving). Returns `Err` if the connection fails or times out.
+///
+/// This protects against the race where git/ssh-keygen connects
+/// during agent startup: the socket accepts connections before
+/// `warm_backend_identities` completes, so a cold-start client can
+/// see an agent that technically "works" but returns an empty
+/// identity list or errors because the backend isn't initialized yet.
+fn verify_agent_responsive(socket_path: &Path) -> Result<(), String> {
+    let mut stream = connect_agent(socket_path)
+        .ok_or_else(|| format!("agent not responsive at {}", socket_path.display()))?;
+
+    let payload = message::serialize_request(&AgentRequest::RequestIdentities);
+    if send_framed(&mut stream, &payload).is_none() {
+        return Err(format!(
+            "agent at {} accepted connection but failed to handle RequestIdentities",
+            socket_path.display()
+        ));
+    }
+
+    // We don't care about the response content (empty list is fine),
+    // we just need proof the agent is serving requests.
+    if recv_response(&mut stream).is_none() {
+        return Err(format!(
+            "agent at {} did not respond to RequestIdentities",
+            socket_path.display()
+        ));
+    }
+
+    Ok(())
 }
 
 // ───── Public entry points ─────

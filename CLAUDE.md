@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**IMPORTANT:** Read and follow [AGENTS.md](./AGENTS.md) for critical safety requirements about never running unsigned development builds as agents.
+
 ## Project Overview
 
 `sshenc` (SSH Secure Enclave) is a cross-platform Rust project that provides hardware-backed SSH key management. It creates, manages, and uses ECDSA P-256 keys for OpenSSH and git+ssh workflows. On macOS keys are stored in the Secure Enclave, on Windows in TPM 2.0, and on Linux as software-backed keys on disk. Licensed under MIT.

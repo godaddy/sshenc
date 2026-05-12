@@ -207,10 +207,119 @@ fn start_new_session() -> Result<()> {
     validate_setsid_result(unsafe { libc::setsid() })
 }
 
+/// Check if the current binary is properly signed (macOS only).
+/// Returns Ok(()) if signed with the correct TeamIdentifier or on non-macOS platforms.
+/// Returns Err if unsigned (adhoc signature), wrong team, or running from an untrusted location.
+#[cfg(target_os = "macos")]
+fn validate_binary_signature() -> Result<()> {
+    use std::process::Command;
+
+    // Expected TeamIdentifier for production sshenc binaries
+    const EXPECTED_TEAM_ID: &str = "7UMADG39Z9";
+
+    let current_exe = std::env::current_exe().context("failed to get current executable path")?;
+
+    // Check code signature
+    let output = Command::new("codesign")
+        .args(["-dvv", "--"])
+        .arg(&current_exe)
+        .output()
+        .context("failed to run codesign")?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exe_str = current_exe.display().to_string();
+
+    // Adhoc signatures mean the binary is unsigned (cargo build)
+    if stderr.contains("Signature=adhoc") {
+        // Check if binary is in a development location
+        let is_dev_location = exe_str.contains("/.cargo/bin/")
+            || exe_str.contains("/target/debug/")
+            || exe_str.contains("/target/release/");
+
+        if is_dev_location {
+            anyhow::bail!(
+                "UNSIGNED BINARY: sshenc-agent at {} is not code-signed.\n\
+                 \n\
+                 Running unsigned development builds as agents can poison Secure Enclave state\n\
+                 and cause authentication failures. The Secure Enclave uses the code signature\n\
+                 TeamIdentifier to identify the application - unsigned binaries create separate\n\
+                 keychain entries that conflict with production agents.\n\
+                 \n\
+                 Only run signed production binaries from:\n\
+                 - /opt/homebrew/bin/sshenc-agent (Homebrew)\n\
+                 - /usr/local/bin/sshenc-agent (manual install)\n\
+                 - ~/.local/bin/sshenc-agent (user install)\n\
+                 \n\
+                 If you're developing sshenc:\n\
+                 1. cargo build/test is fine for unit tests (they use mock backends)\n\
+                 2. For integration testing, install via 'brew upgrade sshenc' first\n\
+                 3. Never run unsigned binaries from ~/.cargo/bin or target/ as agents\n\
+                 \n\
+                 See AGENTS.md for details.",
+                exe_str
+            );
+        }
+
+        tracing::warn!(
+            exe = %current_exe.display(),
+            "sshenc-agent binary is unsigned (adhoc signature) but not in a known dev location; proceeding with caution"
+        );
+        return Ok(());
+    }
+
+    // Check TeamIdentifier matches expected value
+    if let Some(team_line) = stderr
+        .lines()
+        .find(|line| line.starts_with("TeamIdentifier="))
+    {
+        let team_id = team_line.trim_start_matches("TeamIdentifier=");
+        if team_id != EXPECTED_TEAM_ID {
+            anyhow::bail!(
+                "WRONG CODE SIGNATURE: sshenc-agent at {} is signed with TeamIdentifier={} \n\
+                 but expected {}.\n\
+                 \n\
+                 The Secure Enclave uses TeamIdentifier to identify applications. A binary\n\
+                 signed with a different team ID will create separate keychain entries and\n\
+                 cannot access keys created by the official sshenc agent.\n\
+                 \n\
+                 Only run officially signed binaries from:\n\
+                 - /opt/homebrew/bin/sshenc-agent (Homebrew)\n\
+                 - /usr/local/bin/sshenc-agent (manual install)\n\
+                 \n\
+                 If you need to build custom versions, contact the sshenc maintainers about\n\
+                 getting your TeamIdentifier added to the allowed list.",
+                exe_str,
+                team_id,
+                EXPECTED_TEAM_ID
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn validate_binary_signature() -> Result<()> {
+    // Non-macOS platforms don't have Secure Enclave, so signing is less critical
+    Ok(())
+}
+
 fn main() -> Result<()> {
     enclaveapp_core::process::harden_process();
 
     let cli = Cli::parse();
+
+    // Validate binary signature before accessing Secure Enclave, unless
+    // the allow-unsigned feature is enabled (for users building from source)
+    #[cfg(not(feature = "allow-unsigned"))]
+    if let Err(error) = validate_binary_signature() {
+        // Print to stderr before initializing tracing subscriber
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("{error:#}");
+        }
+        return Err(error);
+    }
 
     // Read the old PID before daemonize() so the child inherits it across
     // fork(). The parent overwrites the PID file with the new child PID, so

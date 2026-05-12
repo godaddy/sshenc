@@ -112,6 +112,35 @@ brew upgrade sshenc
 # NOW it's safe to test agent functionality
 ```
 
+### For Users Building From Source
+
+If you're a **user** (not an AI assistant) building sshenc from source and want to run your own unsigned binary:
+
+```bash
+# Build with allow-unsigned feature
+cargo build --release --features allow-unsigned
+
+# Install to ~/.local/bin (not ~/.cargo/bin)
+mkdir -p ~/.local/bin
+cp target/release/sshenc ~/.local/bin/
+cp target/release/sshenc-agent ~/.local/bin/
+cp target/release/sshenc-keygen ~/.local/bin/
+cp target/release/gitenc ~/.local/bin/
+
+# Run your unsigned agent
+~/.local/bin/sshenc agent
+```
+
+**Important notes for unsigned builds:**
+
+1. **Separate keychain entries** — Your unsigned agent creates separate keys from production agents. They won't conflict, but you can't use keys created by the Homebrew agent.
+
+2. **Password prompts instead of Touch ID** — The Secure Enclave uses TeamIdentifier to identify apps. Unsigned binaries don't have a TeamIdentifier, so you'll get password prompts instead of Touch ID.
+
+3. **Not recommended for production** — Use Homebrew or signed releases for production use. The `allow-unsigned` feature is for development and testing only.
+
+4. **AI assistants: DO NOT use this feature** — The allow-unsigned feature is for human users building from source, not for automated builds or AI coding assistants.
+
 ## Commit Signing
 
 **Before committing:** Ensure only the production agent is running.

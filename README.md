@@ -143,8 +143,12 @@ T2 Mac).
 ```sh
 git clone https://github.com/godaddy/sshenc.git
 cd sshenc
+# Enable allow-unsigned feature for local builds
+cargo build --workspace --release --features allow-unsigned
 make install
 ```
+
+**The `allow-unsigned` feature:** By default, `sshenc-agent` refuses to start if it detects it's an unsigned binary in a development location (protects against accidental use of test binaries that could poison Secure Enclave state). The `--features allow-unsigned` flag disables this check for users intentionally building from source.
 
 `cargo build` produces ad-hoc / linker-signed binaries that macOS accepts
 for CryptoKit Secure Enclave operations out of the box — no Apple Developer

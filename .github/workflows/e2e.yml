@@ -56,7 +56,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build workspace tests
-        run: cargo build --workspace --tests
+        run: cargo build --workspace --tests --features sshenc-agent/allow-unsigned
 
       - name: Run e2e suite (software mode, single-threaded)
         env:

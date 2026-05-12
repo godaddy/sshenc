@@ -11,6 +11,11 @@ repository.workspace = true
 default = []
 # Test-only: enables the software backend in sshenc-se.
 force-software = ["sshenc-se/force-software"]
+# Allow running unsigned binaries as agents. For users building from source
+# who understand that unsigned binaries will require passwords instead of
+# Touch ID and create separate keychain entries from production agents.
+# DO NOT use this flag in automated builds or CI.
+allow-unsigned = []
 
 [lib]
 name = "sshenc_agent"

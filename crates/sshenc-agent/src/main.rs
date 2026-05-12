@@ -307,7 +307,9 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Validate binary signature before accessing Secure Enclave
+    // Validate binary signature before accessing Secure Enclave, unless
+    // the allow-unsigned feature is enabled (for users building from source)
+    #[cfg(not(feature = "allow-unsigned"))]
     if let Err(error) = validate_binary_signature() {
         // Print to stderr before initializing tracing subscriber
         #[allow(clippy::print_stderr)]

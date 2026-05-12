@@ -77,16 +77,16 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # Build the binaries the matrix script invokes, with the
-      # `force-software` feature on the per-crate level (gitenc
-      # doesn't link sshenc-se and therefore doesn't take the
-      # feature; build it without). Release profile keeps the build
+      # `force-software` and `allow-unsigned` features on the per-crate
+      # level (gitenc doesn't link sshenc-se and therefore doesn't take
+      # the feature; build it without). Release profile keeps the build
       # cache compatible with e2e.yml's cache key.
-      - name: Build sshenc binaries (force-software)
+      - name: Build sshenc binaries (force-software + allow-unsigned)
         shell: bash
         run: |
           cargo build --release \
             -p sshenc-cli -p sshenc-agent -p sshenc-keygen-cli \
-            --features sshenc-cli/force-software,sshenc-agent/force-software,sshenc-keygen-cli/force-software
+            --features sshenc-cli/force-software,sshenc-agent/force-software,sshenc-agent/allow-unsigned,sshenc-keygen-cli/force-software
           cargo build --release -p sshenc-gitenc
 
       - name: Run Test-Sshenc-MacOS.sh (--software)

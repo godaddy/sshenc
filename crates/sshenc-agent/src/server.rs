@@ -435,8 +435,8 @@ pub async fn run_agent(
                         std::thread::spawn(move || {
                             handle_blocking_connection(
                                 conn,
-                                &*backend,
-                                Arc::new(allowed),
+                                backend,
+                                allowed,
                                 prompt_policy_for_unix,
                             );
                         });
@@ -785,8 +785,8 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
 #[cfg(windows)]
 fn handle_blocking_connection(
     conn: socket2::Socket,
-    backend: &dyn KeyBackend,
-    allowed_labels: &HashSet<String>,
+    backend: Arc<dyn KeyBackend>,
+    allowed_labels: Arc<HashSet<String>>,
     prompt_policy: PromptPolicy,
 ) {
     use std::io::{Read, Write};
@@ -794,6 +794,15 @@ fn handle_blocking_connection(
     // Wrap socket2::Socket in a helper that implements Read/Write.
     let mut stream = SocketReadWriter(conn);
     let mut blob_cache: HashMap<Vec<u8>, String> = HashMap::new();
+
+    // Create a tokio runtime for calling async handle_request
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!("failed to create tokio runtime: {e}");
+            return;
+        }
+    };
 
     loop {
         // Read 4-byte message length (big-endian)
@@ -827,15 +836,13 @@ fn handle_blocking_connection(
                 return;
             }
         };
-        let response = match handle_request(
+        let response = match rt.block_on(handle_request(
             request,
-            backend.clone(),
-            allowed_labels.clone(),
+            Arc::clone(&backend),
+            Arc::clone(&allowed_labels),
             prompt_policy,
             &mut blob_cache,
-        )
-        .await
-        {
+        )) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("unix socket request error: {e}");

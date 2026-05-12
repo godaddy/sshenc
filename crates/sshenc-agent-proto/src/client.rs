@@ -128,7 +128,10 @@ pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
 /// see an agent that technically "works" but returns an empty
 /// identity list or errors because the backend isn't initialized yet.
 fn verify_agent_responsive(socket_path: &Path) -> Result<(), String> {
-    tracing::debug!("verifying agent responsiveness at {}", socket_path.display());
+    tracing::debug!(
+        "verifying agent responsiveness at {}",
+        socket_path.display()
+    );
 
     let mut stream = connect_agent(socket_path).ok_or_else(|| {
         let err = format!(
@@ -417,7 +420,9 @@ fn request_signature<S: Read + Write>(
             None
         }
         AgentResponse::Failure => {
-            tracing::warn!("request_signature: agent returned FAILURE (no matching key or backend error)");
+            tracing::warn!(
+                "request_signature: agent returned FAILURE (no matching key or backend error)"
+            );
             None
         }
         other => {

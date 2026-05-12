@@ -1080,12 +1080,14 @@ fn handle_request(
                 tracing::debug!(label = label.as_str(), "dispatching SK sign request");
                 let started = Instant::now();
                 let sk_result = backend.sk_sign(label.as_str(), &data);
+                let error_msg = sk_result.as_ref().err().map(|e| format!("SK sign failed: {e}"));
                 crate::op_log::record(
                     "sign",
                     Some(label.as_str()),
                     None,
                     started.elapsed(),
                     sk_result.is_ok(),
+                    error_msg.as_deref(),
                 );
                 let sig_blob = match sk_result {
                     Ok(b) => b,
@@ -1164,12 +1166,17 @@ fn handle_request(
             let started = Instant::now();
             let sign_result =
                 backend.sign_with_presence(label.as_str(), &data, effective_mode, 0, &reason);
+            let error_msg = sign_result
+                .as_ref()
+                .err()
+                .map(|e| format!("sign_with_presence failed: {e}"));
             crate::op_log::record(
                 "sign",
                 Some(label.as_str()),
                 None,
                 started.elapsed(),
                 sign_result.is_ok(),
+                error_msg.as_deref(),
             );
             let der_sig = match sign_result {
                 Ok(sig) => sig,
@@ -1324,12 +1331,14 @@ fn handle_request(
 
             let started = Instant::now();
             let gen_result = backend.generate(&opts);
+            let error_msg = gen_result.as_ref().err().map(|e| format!("generate failed: {e}"));
             crate::op_log::record(
                 "generate",
                 Some(label_str),
                 None,
                 started.elapsed(),
                 gen_result.is_ok(),
+                error_msg.as_deref(),
             );
             match gen_result {
                 Ok(info) => {
@@ -1382,12 +1391,14 @@ fn handle_request(
 
             let started = Instant::now();
             let rename_result = backend.rename(old_str, new_str);
+            let error_msg = rename_result.as_ref().err().map(|e| format!("rename failed: {e}"));
             crate::op_log::record(
                 "rename",
                 Some(old_str),
                 Some(new_str),
                 started.elapsed(),
                 rename_result.is_ok(),
+                error_msg.as_deref(),
             );
             match rename_result {
                 Ok(()) => {
@@ -1437,12 +1448,14 @@ fn handle_request(
             } else {
                 backend.delete(label_str)
             };
+            let error_msg = result.as_ref().err().map(|e| format!("delete failed: {e}"));
             crate::op_log::record(
                 "delete",
                 Some(label_str),
                 None,
                 started.elapsed(),
                 result.is_ok(),
+                error_msg.as_deref(),
             );
             match result {
                 Ok(()) => {
@@ -1490,12 +1503,17 @@ fn handle_request(
             let dir = sshenc_se::sshenc_keys_dir();
             let started = Instant::now();
             let migrate_result = perform_migrate_meta(&dir, label_str);
+            let error_msg = migrate_result
+                .as_ref()
+                .err()
+                .map(|e| format!("migrate_meta failed: {e}"));
             crate::op_log::record(
                 "migrate_meta",
                 Some(label_str),
                 None,
                 started.elapsed(),
                 migrate_result.is_ok(),
+                error_msg.as_deref(),
             );
             match migrate_result {
                 Ok(()) => {

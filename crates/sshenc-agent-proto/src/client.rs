@@ -40,12 +40,20 @@ use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use crate::pipe::PipeStream;
 
-// Timeout for agent socket I/O operations. Set to 30s to allow time for
-// Touch ID / Windows Hello user-presence prompts, which can take 10-15s
-// if the user is slow to respond or retries auth. A 10s timeout caused
-// "Broken pipe" errors when the client timed out waiting for the signature
-// while the agent was still waiting for Touch ID.
-const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(30);
+// Timeout for agent socket I/O operations that don't require user interaction
+// (connection checks, identity listing). For signing operations that require
+// Touch ID or Windows Hello, we use AGENT_SIGN_TIMEOUT instead.
+const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+// Timeout for signing operations that require user presence verification.
+// Set to 1 hour because there's no reason to timeout a user-interactive
+// operation. Users should be able to take as long as they need for:
+// - Noticing the Touch ID prompt
+// - Retrying failed biometric attempts
+// - Switching to password if biometric fails
+// - Dealing with interruptions
+// If the user wants to cancel, they can Ctrl+C the git command.
+const AGENT_SIGN_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Platform-native connected stream to a running `sshenc-agent`.
 /// Unix: a `UnixStream`. Windows: a `PipeStream` wrapping a named-
@@ -187,7 +195,8 @@ pub fn try_sign_via_socket(sock_path: &Path, pubkey_blob: &[u8], data: &[u8]) ->
         "try_sign_via_socket: starting sign request"
     );
 
-    let mut stream = match connect_agent(sock_path) {
+    // Use the longer timeout for sign operations since they require user interaction
+    let mut stream = match connect_agent_with_timeout(sock_path, AGENT_SIGN_TIMEOUT) {
         Some(s) => s,
         None => {
             tracing::warn!(socket = %sock_path.display(), "try_sign_via_socket: failed to connect to agent");
@@ -311,6 +320,11 @@ fn env_agent_socket() -> Option<std::path::PathBuf> {
 
 #[cfg(unix)]
 fn connect_agent(sock_path: &Path) -> Option<AgentStream> {
+    connect_agent_with_timeout(sock_path, AGENT_IO_TIMEOUT)
+}
+
+#[cfg(unix)]
+fn connect_agent_with_timeout(sock_path: &Path, timeout: Duration) -> Option<AgentStream> {
     let stream = match UnixStream::connect(sock_path) {
         Ok(s) => s,
         Err(e) => {
@@ -318,8 +332,8 @@ fn connect_agent(sock_path: &Path) -> Option<AgentStream> {
             return None;
         }
     };
-    if stream.set_read_timeout(Some(AGENT_IO_TIMEOUT)).is_err()
-        || stream.set_write_timeout(Some(AGENT_IO_TIMEOUT)).is_err()
+    if stream.set_read_timeout(Some(timeout)).is_err()
+        || stream.set_write_timeout(Some(timeout)).is_err()
     {
         tracing::debug!("agent proxy: failed to set socket timeouts, falling back");
         return None;
@@ -329,6 +343,11 @@ fn connect_agent(sock_path: &Path) -> Option<AgentStream> {
 
 #[cfg(windows)]
 fn connect_agent(sock_path: &Path) -> Option<AgentStream> {
+    connect_agent_with_timeout(sock_path, AGENT_IO_TIMEOUT)
+}
+
+#[cfg(windows)]
+fn connect_agent_with_timeout(sock_path: &Path, timeout: Duration) -> Option<AgentStream> {
     let mut stream = match PipeStream::connect(sock_path) {
         Ok(s) => s,
         Err(e) => {
@@ -336,7 +355,7 @@ fn connect_agent(sock_path: &Path) -> Option<AgentStream> {
             return None;
         }
     };
-    if stream.set_timeouts(AGENT_IO_TIMEOUT).is_err() {
+    if stream.set_timeouts(timeout).is_err() {
         tracing::debug!("agent proxy: failed to set pipe timeouts, falling back");
         return None;
     }

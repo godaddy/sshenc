@@ -40,7 +40,12 @@ use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use crate::pipe::PipeStream;
 
-const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
+// Timeout for agent socket I/O operations. Set to 30s to allow time for
+// Touch ID / Windows Hello user-presence prompts, which can take 10-15s
+// if the user is slow to respond or retries auth. A 10s timeout caused
+// "Broken pipe" errors when the client timed out waiting for the signature
+// while the agent was still waiting for Touch ID.
+const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Platform-native connected stream to a running `sshenc-agent`.
 /// Unix: a `UnixStream`. Windows: a `PipeStream` wrapping a named-
@@ -115,27 +120,45 @@ pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
 /// see an agent that technically "works" but returns an empty
 /// identity list or errors because the backend isn't initialized yet.
 fn verify_agent_responsive(socket_path: &Path) -> Result<(), String> {
-    let mut stream = connect_agent(socket_path)
-        .ok_or_else(|| format!("agent not responsive at {}", socket_path.display()))?;
+    tracing::debug!("verifying agent responsiveness at {}", socket_path.display());
+
+    let mut stream = connect_agent(socket_path).ok_or_else(|| {
+        let err = format!(
+            "agent responsiveness check failed: could not connect to {}",
+            socket_path.display()
+        );
+        tracing::warn!("{}", err);
+        err
+    })?;
 
     let payload = message::serialize_request(&AgentRequest::RequestIdentities);
     if send_framed(&mut stream, &payload).is_none() {
-        return Err(format!(
-            "agent at {} accepted connection but failed to handle RequestIdentities",
+        let err = format!(
+            "agent responsiveness check failed: {} accepted connection but \
+             failed to handle RequestIdentities (write error)",
             socket_path.display()
-        ));
+        );
+        tracing::warn!("{}", err);
+        return Err(err);
     }
 
     // We don't care about the response content (empty list is fine),
     // we just need proof the agent is serving requests.
-    if recv_response(&mut stream).is_none() {
-        return Err(format!(
-            "agent at {} did not respond to RequestIdentities",
-            socket_path.display()
-        ));
+    match recv_response(&mut stream) {
+        Some(_) => {
+            tracing::debug!("agent responsiveness check passed");
+            Ok(())
+        }
+        None => {
+            let err = format!(
+                "agent responsiveness check failed: {} did not respond to \
+                 RequestIdentities (read timeout or parse error)",
+                socket_path.display()
+            );
+            tracing::warn!("{}", err);
+            Err(err)
+        }
     }
-
-    Ok(())
 }
 
 // ───── Public entry points ─────
@@ -157,11 +180,35 @@ pub fn try_sign_via_agent(pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub fn try_sign_via_socket(sock_path: &Path, pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
-    let mut stream = connect_agent(sock_path)?;
-    if !agent_has_identity(&mut stream, pubkey_blob)? {
-        tracing::debug!("agent proxy: no matching identity, falling back");
-        return None;
+    tracing::debug!(
+        socket = %sock_path.display(),
+        blob_len = pubkey_blob.len(),
+        data_len = data.len(),
+        "try_sign_via_socket: starting sign request"
+    );
+
+    let mut stream = match connect_agent(sock_path) {
+        Some(s) => s,
+        None => {
+            tracing::warn!(socket = %sock_path.display(), "try_sign_via_socket: failed to connect to agent");
+            return None;
+        }
+    };
+
+    match agent_has_identity(&mut stream, pubkey_blob) {
+        Some(true) => {
+            tracing::debug!("try_sign_via_socket: identity found, proceeding to sign");
+        }
+        Some(false) => {
+            tracing::warn!("try_sign_via_socket: no matching identity in agent");
+            return None;
+        }
+        None => {
+            tracing::warn!("try_sign_via_socket: failed to check identities");
+            return None;
+        }
     }
+
     request_signature(&mut stream, pubkey_blob, data)
 }
 
@@ -301,13 +348,22 @@ fn connect_agent(sock_path: &Path) -> Option<AgentStream> {
 fn agent_has_identity<S: Read + Write>(stream: &mut S, pubkey_blob: &[u8]) -> Option<bool> {
     let payload = message::serialize_request(&AgentRequest::RequestIdentities);
     debug_assert_eq!(payload[0], SSH_AGENTC_REQUEST_IDENTITIES);
-    send_framed(stream, &payload)?;
+    if send_framed(stream, &payload).is_none() {
+        tracing::warn!("agent_has_identity: failed to send RequestIdentities (write error)");
+        return None;
+    }
     match recv_response(stream)? {
         AgentResponse::IdentitiesAnswer(ids) => {
-            Some(ids.into_iter().any(|id| id.key_blob == pubkey_blob))
+            let has_key = ids.iter().any(|id| id.key_blob == pubkey_blob);
+            tracing::debug!(
+                has_key,
+                total_identities = ids.len(),
+                "agent_has_identity check complete"
+            );
+            Some(has_key)
         }
         other => {
-            tracing::debug!(?other, "agent proxy: unexpected response to identities");
+            tracing::warn!(?other, "agent_has_identity: unexpected response type");
             None
         }
     }
@@ -324,21 +380,29 @@ fn request_signature<S: Read + Write>(
         flags: 0,
     });
     debug_assert_eq!(payload[0], SSH_AGENTC_SIGN_REQUEST);
-    send_framed(stream, &payload)?;
+    if send_framed(stream, &payload).is_none() {
+        tracing::warn!(
+            blob_len = pubkey_blob.len(),
+            data_len = data.len(),
+            "request_signature: failed to send SignRequest (write error or timeout)"
+        );
+        return None;
+    }
     match recv_response(stream)? {
         AgentResponse::SignResponse { signature_blob } if !signature_blob.is_empty() => {
+            tracing::debug!(sig_len = signature_blob.len(), "request_signature: success");
             Some(signature_blob)
         }
         AgentResponse::SignResponse { .. } => {
-            tracing::debug!("agent proxy: sign returned empty blob, falling back");
+            tracing::warn!("request_signature: agent returned empty signature blob");
             None
         }
         AgentResponse::Failure => {
-            tracing::debug!("agent proxy: agent returned FAILURE, falling back");
+            tracing::warn!("request_signature: agent returned FAILURE (no matching key or backend error)");
             None
         }
         other => {
-            tracing::debug!(?other, "agent proxy: unexpected response to sign request");
+            tracing::warn!(?other, "request_signature: unexpected response type");
             None
         }
     }

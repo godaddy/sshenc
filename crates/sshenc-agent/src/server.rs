@@ -1052,7 +1052,11 @@ fn handle_request(
                 match blob_cache.get(&key_blob) {
                     Some(l) => l.clone(),
                     None => {
-                        tracing::warn!("no matching key for sign request");
+                        tracing::warn!(
+                            blob_len = key_blob.len(),
+                            cache_size = blob_cache.len(),
+                            "no matching key for sign request: requested key blob not found in cache"
+                        );
                         return Ok(AgentResponse::Failure);
                     }
                 }
@@ -1060,7 +1064,11 @@ fn handle_request(
 
             // Check allowed labels
             if !allowed_labels.is_empty() && !allowed_labels.contains(label.as_str()) {
-                tracing::warn!(label = label.as_str(), "key not in allowed list");
+                tracing::warn!(
+                    label = label.as_str(),
+                    allowed_count = allowed_labels.len(),
+                    "sign request rejected: key label not in agent's allowed list"
+                );
                 return Ok(AgentResponse::Failure);
             }
 

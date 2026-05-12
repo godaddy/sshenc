@@ -207,7 +207,14 @@ fn resolved_log_path() -> Option<PathBuf> {
 /// Errors during log write are swallowed — never propagate up to
 /// the request handler, since failing to log must not turn a
 /// successful sign into a failed sign.
-pub fn record(op: &str, label: Option<&str>, target: Option<&str>, elapsed: Duration, ok: bool) {
+pub fn record(
+    op: &str,
+    label: Option<&str>,
+    target: Option<&str>,
+    elapsed: Duration,
+    ok: bool,
+    error: Option<&str>,
+) {
     record_to(
         resolved_log_path().as_deref(),
         op,
@@ -215,6 +222,7 @@ pub fn record(op: &str, label: Option<&str>, target: Option<&str>, elapsed: Dura
         target,
         elapsed,
         ok,
+        error,
     );
 }
 
@@ -228,12 +236,13 @@ fn record_to(
     target: Option<&str>,
     elapsed: Duration,
     ok: bool,
+    error: Option<&str>,
 ) {
     let Some(path) = path else {
         return;
     };
     let prompt_inferred = elapsed >= fingerprint_threshold();
-    let line = json!({
+    let mut obj = json!({
         "ts": now_rfc3339(),
         "op": op,
         "label": label,
@@ -244,7 +253,15 @@ fn record_to(
         "pid": std::process::id(),
         "in_agent": true,
     });
-    write_line(path, &line.to_string());
+    if let Some(err) = error {
+        obj.as_object_mut()
+            .expect("json! always produces an object")
+            .insert(
+                "error".to_string(),
+                serde_json::Value::String(err.to_string()),
+            );
+    }
+    write_line(path, &obj.to_string());
 }
 
 /// Maximum size of the active log file before we rotate. 10 MiB
@@ -506,6 +523,7 @@ mod tests {
             None,
             Duration::from_millis(50),
             true,
+            None,
         );
         record_to(
             Some(&log),
@@ -514,6 +532,7 @@ mod tests {
             Some("new"),
             Duration::from_millis(20),
             true,
+            None,
         );
         record_to(
             Some(&log),
@@ -522,6 +541,7 @@ mod tests {
             None,
             Duration::from_millis(75),
             false,
+            None,
         );
 
         std::env::remove_var(THRESHOLD_ENV);
@@ -567,6 +587,7 @@ mod tests {
             None,
             Duration::from_millis(50),
             true,
+            None,
         );
         record_to(
             Some(&log),
@@ -575,6 +596,7 @@ mod tests {
             None,
             Duration::from_millis(150),
             true,
+            None,
         );
 
         std::env::remove_var(THRESHOLD_ENV);
@@ -602,6 +624,7 @@ mod tests {
             None,
             Duration::from_millis(0),
             true,
+            None,
         );
         cleanup(&dir);
     }
@@ -617,6 +640,7 @@ mod tests {
             None,
             Duration::from_millis(0),
             true,
+            None,
         );
     }
 
@@ -632,6 +656,7 @@ mod tests {
                 None,
                 Duration::from_millis(0),
                 true,
+                None,
             );
         }
         let events = read_lines(&log);
@@ -655,6 +680,7 @@ mod tests {
             None,
             Duration::from_millis(0),
             true,
+            None,
         );
         let mode = fs::metadata(&log).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "log file should be owner-only");
@@ -673,7 +699,14 @@ mod tests {
         let log = dir.join("events.log");
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(LOG_PATH_ENV, &log);
-        record("sign", Some("k"), None, Duration::from_millis(0), true);
+        record(
+            "sign",
+            Some("k"),
+            None,
+            Duration::from_millis(0),
+            true,
+            None,
+        );
         std::env::remove_var(LOG_PATH_ENV);
         drop(guard);
         assert!(
@@ -901,6 +934,7 @@ mod tests {
             None,
             Duration::from_millis(0),
             true,
+            None,
         );
 
         let after = fs::read_to_string(&log).unwrap();

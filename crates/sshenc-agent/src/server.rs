@@ -191,8 +191,7 @@ pub async fn run_agent(
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_connection(stream, &*backend, &allowed, prompt_policy).await
+                    if let Err(e) = handle_connection(stream, backend, allowed, prompt_policy).await
                     {
                         tracing::warn!("connection error: {e}");
                     }
@@ -436,8 +435,8 @@ pub async fn run_agent(
                         std::thread::spawn(move || {
                             handle_blocking_connection(
                                 conn,
-                                &*backend,
-                                &allowed,
+                                backend,
+                                allowed,
                                 prompt_policy_for_unix,
                             );
                         });
@@ -464,8 +463,7 @@ pub async fn run_agent(
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_connection(stream, &*backend, &allowed, prompt_policy).await
+                    if let Err(e) = handle_connection(stream, backend, allowed, prompt_policy).await
                     {
                         tracing::warn!("pipe connection error: {e}");
                     }
@@ -737,8 +735,8 @@ fn get_process_exe(pid: u32) -> Option<PathBuf> {
 
 async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>(
     mut stream: S,
-    backend: &dyn KeyBackend,
-    allowed_labels: &HashSet<String>,
+    backend: Arc<dyn KeyBackend>,
+    allowed_labels: Arc<HashSet<String>>,
     prompt_policy: PromptPolicy,
 ) -> Result<()> {
     tracing::debug!("new agent connection");
@@ -768,11 +766,12 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
         let request = message::parse_request(&payload)?;
         let response = handle_request(
             request,
-            backend,
-            allowed_labels,
+            backend.clone(),
+            allowed_labels.clone(),
             prompt_policy,
             &mut blob_cache,
-        )?;
+        )
+        .await?;
         let response_payload = message::serialize_response(&response);
 
         // Write response
@@ -786,8 +785,8 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
 #[cfg(windows)]
 fn handle_blocking_connection(
     conn: socket2::Socket,
-    backend: &dyn KeyBackend,
-    allowed_labels: &HashSet<String>,
+    backend: Arc<dyn KeyBackend>,
+    allowed_labels: Arc<HashSet<String>>,
     prompt_policy: PromptPolicy,
 ) {
     use std::io::{Read, Write};
@@ -795,6 +794,15 @@ fn handle_blocking_connection(
     // Wrap socket2::Socket in a helper that implements Read/Write.
     let mut stream = SocketReadWriter(conn);
     let mut blob_cache: HashMap<Vec<u8>, String> = HashMap::new();
+
+    // Create a tokio runtime for calling async handle_request
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!("failed to create tokio runtime: {e}");
+            return;
+        }
+    };
 
     loop {
         // Read 4-byte message length (big-endian)
@@ -828,13 +836,13 @@ fn handle_blocking_connection(
                 return;
             }
         };
-        let response = match handle_request(
+        let response = match rt.block_on(handle_request(
             request,
-            backend,
-            allowed_labels,
+            Arc::clone(&backend),
+            Arc::clone(&allowed_labels),
             prompt_policy,
             &mut blob_cache,
-        ) {
+        )) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("unix socket request error: {e}");
@@ -885,10 +893,10 @@ fn sign_reason(data: &[u8], label: &str) -> String {
     }
 }
 
-fn handle_request(
+async fn handle_request(
     request: AgentRequest,
-    backend: &dyn KeyBackend,
-    allowed_labels: &HashSet<String>,
+    backend: Arc<dyn KeyBackend>,
+    allowed_labels: Arc<HashSet<String>>,
     prompt_policy: PromptPolicy,
     blob_cache: &mut HashMap<Vec<u8>, String>,
 ) -> Result<AgentResponse> {
@@ -907,13 +915,18 @@ fn handle_request(
             // matrix's polling window even though the .meta file
             // was right there on disk. Graceful fallback: log and
             // continue to SK with an empty legacy list.
-            let keys = match backend.list() {
-                Ok(k) => k,
-                Err(e) => {
+            let backend_clone = backend.clone();
+            let keys = match tokio::task::spawn_blocking(move || backend_clone.list()).await {
+                Ok(Ok(k)) => k,
+                Ok(Err(e)) => {
                     tracing::warn!(
                         error = %e,
                         "legacy backend.list() failed; continuing with SK enumeration only"
                     );
+                    Vec::new()
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "spawn_blocking panicked for backend.list()");
                     Vec::new()
                 }
             };
@@ -950,15 +963,39 @@ fn handle_request(
             // wire format from `ecdsa-sha2-nistp256` and includes
             // the application string) -- the SSH client picks them
             // up from the agent transparently.
-            if let Ok(sk_labels) = backend.sk_list_labels() {
+            let backend_clone = backend.clone();
+            let sk_labels_result =
+                tokio::task::spawn_blocking(move || backend_clone.sk_list_labels()).await;
+            let sk_labels = match sk_labels_result {
+                Ok(Ok(labels)) => labels,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "sk_list_labels failed");
+                    Vec::new()
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "spawn_blocking panicked for sk_list_labels");
+                    Vec::new()
+                }
+            };
+            if !sk_labels.is_empty() {
                 for label in sk_labels {
                     if !allowed_labels.is_empty() && !allowed_labels.contains(&label) {
                         continue;
                     }
-                    let info = match backend.sk_get(&label) {
-                        Ok(i) => i,
-                        Err(e) => {
+                    let backend_clone = backend.clone();
+                    let label_clone = label.clone();
+                    let info = match tokio::task::spawn_blocking(move || {
+                        backend_clone.sk_get(&label_clone)
+                    })
+                    .await
+                    {
+                        Ok(Ok(i)) => i,
+                        Ok(Err(e)) => {
                             tracing::warn!(%label, error = %e, "skipping SK key in identity list");
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!(%label, error = %e, "spawn_blocking panicked for sk_get");
                             continue;
                         }
                     };
@@ -1012,14 +1049,22 @@ fn handle_request(
                 // Same graceful fallback as RequestIdentities: a cold
                 // bridge that errors legacy list() must NOT block SK
                 // sign for keys whose enumeration is local-only.
-                let keys = backend.list().unwrap_or_else(|e| {
-                    tracing::warn!(
-                        error = %e,
-                        "legacy backend.list() failed during sign blob lookup; \
-                         continuing with SK enumeration only"
-                    );
-                    Vec::new()
-                });
+                let backend_clone = backend.clone();
+                let keys = match tokio::task::spawn_blocking(move || backend_clone.list()).await {
+                    Ok(Ok(k)) => k,
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            error = %e,
+                            "legacy backend.list() failed during sign blob lookup; \
+                             continuing with SK enumeration only"
+                        );
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "spawn_blocking panicked for backend.list()");
+                        Vec::new()
+                    }
+                };
                 blob_cache.clear();
                 for k in &keys {
                     if let Ok(pubkey) = SshPublicKey::from_sec1_bytes(&k.public_key_bytes, None) {
@@ -1032,9 +1077,25 @@ fn handle_request(
                 // Also rebuild SK entries -- they aren't in legacy
                 // list() output. Skip silently if sk_list_labels
                 // returns Err (backend without SK support).
-                if let Ok(sk_labels) = backend.sk_list_labels() {
+                let backend_clone = backend.clone();
+                let sk_labels_result =
+                    tokio::task::spawn_blocking(move || backend_clone.sk_list_labels()).await;
+                let sk_labels = match sk_labels_result {
+                    Ok(Ok(labels)) => labels,
+                    Ok(Err(_)) => Vec::new(),
+                    Err(e) => {
+                        tracing::error!(error = %e, "spawn_blocking panicked for sk_list_labels");
+                        Vec::new()
+                    }
+                };
+                if !sk_labels.is_empty() {
                     for label in sk_labels {
-                        if let Ok(info) = backend.sk_get(&label) {
+                        let backend_clone = backend.clone();
+                        let label_clone = label.clone();
+                        let info_result =
+                            tokio::task::spawn_blocking(move || backend_clone.sk_get(&label_clone))
+                                .await;
+                        if let Ok(Ok(info)) = info_result {
                             if let Some(rp) = info.metadata.rp_id.clone() {
                                 if let Ok(sk_pub) =
                                     sshenc_core::pubkey::SshSkPublicKey::from_sec1_bytes(
@@ -1076,16 +1137,47 @@ fn handle_request(
             // GetAssertion; the resulting blob is already a full SK
             // signature (algorithm + r/s + flags + counter), unlike
             // legacy ECDSA where we have to wrap a DER signature.
-            if backend.is_sk_label(label.as_str()) {
+            let backend_clone = backend.clone();
+            let label_clone = label.clone();
+            let is_sk = match tokio::task::spawn_blocking(move || {
+                backend_clone.is_sk_label(&label_clone)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(label = label.as_str(), error = %e, "spawn_blocking panicked for is_sk_label");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            if is_sk {
                 tracing::debug!(label = label.as_str(), "dispatching SK sign request");
                 let started = Instant::now();
-                let sk_result = backend.sk_sign(label.as_str(), &data);
+                let backend_clone = backend.clone();
+                let label_clone = label.clone();
+                let data_clone = data.clone();
+                let sk_result = tokio::task::spawn_blocking(move || {
+                    backend_clone.sk_sign(&label_clone, &data_clone)
+                })
+                .await;
+                let sk_result = match sk_result {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(label = label.as_str(), error = %e, "spawn_blocking panicked for sk_sign");
+                        return Ok(AgentResponse::Failure);
+                    }
+                };
+                let error_msg = sk_result
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("SK sign failed: {e}"));
                 crate::op_log::record(
                     "sign",
                     Some(label.as_str()),
                     None,
                     started.elapsed(),
                     sk_result.is_ok(),
+                    error_msg.as_deref(),
                 );
                 let sig_blob = match sk_result {
                     Ok(b) => b,
@@ -1110,13 +1202,22 @@ fn handle_request(
 
             // Fetch key metadata for presence mode. Uses a targeted single-key
             // lookup instead of a full list() when the cache is warm.
-            let key = match backend.get(label.as_str()) {
-                Ok(k) => k,
-                Err(_) => {
+            let backend_clone = backend.clone();
+            let label_clone = label.clone();
+            let key = match tokio::task::spawn_blocking(move || backend_clone.get(&label_clone))
+                .await
+            {
+                Ok(Ok(k)) => k,
+                Ok(Err(_)) => {
                     tracing::warn!(
                         label = label.as_str(),
                         "key lookup failed; evicting from cache"
                     );
+                    blob_cache.remove(&key_blob);
+                    return Ok(AgentResponse::Failure);
+                }
+                Err(e) => {
+                    tracing::error!(label = label.as_str(), error = %e, "spawn_blocking panicked for backend.get");
                     blob_cache.remove(&key_blob);
                     return Ok(AgentResponse::Failure);
                 }
@@ -1162,14 +1263,38 @@ fn handle_request(
             // for `Cached` mode.
             let reason = sign_reason(&data, label.as_str());
             let started = Instant::now();
-            let sign_result =
-                backend.sign_with_presence(label.as_str(), &data, effective_mode, 0, &reason);
+            let backend_clone = backend.clone();
+            let label_clone = label.clone();
+            let data_clone = data.clone();
+            let reason_clone = reason.clone();
+            let sign_result = tokio::task::spawn_blocking(move || {
+                backend_clone.sign_with_presence(
+                    &label_clone,
+                    &data_clone,
+                    effective_mode,
+                    0,
+                    &reason_clone,
+                )
+            })
+            .await;
+            let sign_result = match sign_result {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(label = label.as_str(), error = %e, "spawn_blocking panicked");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            let error_msg = sign_result
+                .as_ref()
+                .err()
+                .map(|e| format!("sign_with_presence failed: {e}"));
             crate::op_log::record(
                 "sign",
                 Some(label.as_str()),
                 None,
                 started.elapsed(),
                 sign_result.is_ok(),
+                error_msg.as_deref(),
             );
             let der_sig = match sign_result {
                 Ok(sig) => sig,
@@ -1323,13 +1448,27 @@ fn handle_request(
             };
 
             let started = Instant::now();
-            let gen_result = backend.generate(&opts);
+            let backend_clone = backend.clone();
+            let gen_result =
+                tokio::task::spawn_blocking(move || backend_clone.generate(&opts)).await;
+            let gen_result = match gen_result {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(label = label_str, error = %e, "spawn_blocking panicked for generate");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            let error_msg = gen_result
+                .as_ref()
+                .err()
+                .map(|e| format!("generate failed: {e}"));
             crate::op_log::record(
                 "generate",
                 Some(label_str),
                 None,
                 started.elapsed(),
                 gen_result.is_ok(),
+                error_msg.as_deref(),
             );
             match gen_result {
                 Ok(info) => {
@@ -1381,13 +1520,30 @@ fn handle_request(
             }
 
             let started = Instant::now();
-            let rename_result = backend.rename(old_str, new_str);
+            let backend_clone = backend.clone();
+            let old_owned = old_str.to_string();
+            let new_owned = new_str.to_string();
+            let rename_result =
+                tokio::task::spawn_blocking(move || backend_clone.rename(&old_owned, &new_owned))
+                    .await;
+            let rename_result = match rename_result {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(old = old_str, new = new_str, error = %e, "spawn_blocking panicked for rename");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            let error_msg = rename_result
+                .as_ref()
+                .err()
+                .map(|e| format!("rename failed: {e}"));
             crate::op_log::record(
                 "rename",
                 Some(old_str),
                 Some(new_str),
                 started.elapsed(),
                 rename_result.is_ok(),
+                error_msg.as_deref(),
             );
             match rename_result {
                 Ok(()) => {
@@ -1431,18 +1587,42 @@ fn handle_request(
             // accumulates orphaned passkey entries every time the
             // matrix test churns through fresh SK labels.
             let started = Instant::now();
-            let result = if backend.is_sk_label(label_str) {
-                tracing::debug!(label = label_str, "dispatching SK delete");
-                backend.sk_delete(label_str)
-            } else {
-                backend.delete(label_str)
+            let backend_clone = backend.clone();
+            let label_owned = label_str.to_string();
+            let is_sk = match tokio::task::spawn_blocking(move || {
+                backend_clone.is_sk_label(&label_owned)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(label = label_str, error = %e, "spawn_blocking panicked for is_sk_label");
+                    return Ok(AgentResponse::Failure);
+                }
             };
+            let backend_clone = backend.clone();
+            let label_owned = label_str.to_string();
+            let result = if is_sk {
+                tracing::debug!(label = label_str, "dispatching SK delete");
+                tokio::task::spawn_blocking(move || backend_clone.sk_delete(&label_owned)).await
+            } else {
+                tokio::task::spawn_blocking(move || backend_clone.delete(&label_owned)).await
+            };
+            let result = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(label = label_str, error = %e, "spawn_blocking panicked for delete");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            let error_msg = result.as_ref().err().map(|e| format!("delete failed: {e}"));
             crate::op_log::record(
                 "delete",
                 Some(label_str),
                 None,
                 started.elapsed(),
                 result.is_ok(),
+                error_msg.as_deref(),
             );
             match result {
                 Ok(()) => {
@@ -1490,12 +1670,17 @@ fn handle_request(
             let dir = sshenc_se::sshenc_keys_dir();
             let started = Instant::now();
             let migrate_result = perform_migrate_meta(&dir, label_str);
+            let error_msg = migrate_result
+                .as_ref()
+                .err()
+                .map(|e| format!("migrate_meta failed: {e}"));
             crate::op_log::record(
                 "migrate_meta",
                 Some(label_str),
                 None,
                 started.elapsed(),
                 migrate_result.is_ok(),
+                error_msg.as_deref(),
             );
             match migrate_result {
                 Ok(()) => {
@@ -1844,8 +2029,8 @@ mod tests {
         dir.join("a.sock")
     }
 
-    fn setup_backend() -> MockKeyBackend {
-        let backend = MockKeyBackend::new();
+    fn setup_backend() -> Arc<MockKeyBackend> {
+        let backend = Arc::new(MockKeyBackend::new());
         let opts = KeyGenOptions {
             label: KeyLabel::new("test-key").unwrap(),
             comment: Some("test".into()),
@@ -1858,23 +2043,24 @@ mod tests {
         backend
     }
 
-    fn get_key_blob(backend: &MockKeyBackend) -> Vec<u8> {
+    fn get_key_blob(backend: &Arc<MockKeyBackend>) -> Vec<u8> {
         let keys = backend.list().unwrap();
         let key = &keys[0];
         let pubkey = SshPublicKey::from_sec1_bytes(&key.public_key_bytes, None).unwrap();
         pubkey.to_wire_format()
     }
 
-    #[test]
-    fn test_request_identities_returns_keys() {
+    #[tokio::test]
+    async fn test_request_identities_returns_keys() {
         let backend = setup_backend();
         let resp = handle_request(
             AgentRequest::RequestIdentities,
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => {
@@ -1885,16 +2071,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_request_identities_empty_backend() {
-        let backend = MockKeyBackend::new();
+    #[tokio::test]
+    async fn test_request_identities_empty_backend() {
+        let backend = Arc::new(MockKeyBackend::new());
         let resp = handle_request(
             AgentRequest::RequestIdentities,
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => assert!(ids.is_empty()),
@@ -1902,9 +2089,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_request_identities_filtered_by_labels() {
-        let backend = MockKeyBackend::new();
+    #[tokio::test]
+    async fn test_request_identities_filtered_by_labels() {
+        let backend = Arc::new(MockKeyBackend::new());
         backend
             .generate(&KeyGenOptions {
                 label: KeyLabel::new("allowed").unwrap(),
@@ -1929,11 +2116,12 @@ mod tests {
         let allowed: HashSet<String> = ["allowed".to_string()].into_iter().collect();
         let resp = handle_request(
             AgentRequest::RequestIdentities,
-            &backend,
-            &allowed,
+            backend.clone(),
+            Arc::new(allowed),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => assert_eq!(ids.len(), 1),
@@ -1941,8 +2129,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_sign_request_valid_key() {
+    #[tokio::test]
+    async fn test_sign_request_valid_key() {
         let backend = setup_backend();
         let key_blob = get_key_blob(&backend);
 
@@ -1952,11 +2140,12 @@ mod tests {
                 data: b"test data".to_vec(),
                 flags: 0,
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         match resp {
             AgentResponse::SignResponse { signature_blob } => {
@@ -1966,8 +2155,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_sign_request_unknown_key() {
+    #[tokio::test]
+    async fn test_sign_request_unknown_key() {
         let backend = setup_backend();
         let resp = handle_request(
             AgentRequest::SignRequest {
@@ -1975,17 +2164,18 @@ mod tests {
                 data: b"test data".to_vec(),
                 flags: 0,
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
     }
 
-    #[test]
-    fn test_sign_request_blocked_by_label_filter() {
+    #[tokio::test]
+    async fn test_sign_request_blocked_by_label_filter() {
         let backend = setup_backend();
         let key_blob = get_key_blob(&backend);
 
@@ -1996,31 +2186,33 @@ mod tests {
                 data: b"test data".to_vec(),
                 flags: 0,
             },
-            &backend,
-            &allowed,
+            backend.clone(),
+            Arc::new(allowed),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
     }
 
-    #[test]
-    fn test_unknown_message_type() {
+    #[tokio::test]
+    async fn test_unknown_message_type() {
         let backend = setup_backend();
         let resp = handle_request(
             AgentRequest::Unknown(255),
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
     }
 
-    #[test]
-    fn test_delete_key_succeeds_for_existing_label() {
+    #[tokio::test]
+    async fn test_delete_key_succeeds_for_existing_label() {
         let backend = setup_backend();
         assert_eq!(backend.list().unwrap().len(), 1);
 
@@ -2028,11 +2220,12 @@ mod tests {
             AgentRequest::DeleteKey {
                 label: b"test-key".to_vec(),
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Success));
         assert_eq!(
@@ -2042,19 +2235,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_delete_key_fails_for_missing_label() {
+    #[tokio::test]
+    async fn test_delete_key_fails_for_missing_label() {
         let backend = setup_backend();
 
         let resp = handle_request(
             AgentRequest::DeleteKey {
                 label: b"no-such-label".to_vec(),
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
         assert_eq!(
@@ -2064,8 +2258,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_delete_key_blocked_by_label_filter() {
+    #[tokio::test]
+    async fn test_delete_key_blocked_by_label_filter() {
         let backend = setup_backend();
         let allowed: HashSet<String> = ["other-key".to_string()].into_iter().collect();
 
@@ -2073,11 +2267,12 @@ mod tests {
             AgentRequest::DeleteKey {
                 label: b"test-key".to_vec(),
             },
-            &backend,
-            &allowed,
+            backend.clone(),
+            Arc::new(allowed),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
         assert_eq!(
@@ -2087,8 +2282,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_generate_key_succeeds_and_returns_public_key() {
+    #[tokio::test]
+    async fn test_generate_key_succeeds_and_returns_public_key() {
         let backend = setup_backend();
         assert_eq!(backend.list().unwrap().len(), 1);
 
@@ -2100,11 +2295,12 @@ mod tests {
                 presence_mode: None,
                 pub_file_path: None,
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         match resp {
             AgentResponse::GenerateResponse { public_key } => {
@@ -2120,8 +2316,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_generate_key_rejects_invalid_access_policy() {
+    #[tokio::test]
+    async fn test_generate_key_rejects_invalid_access_policy() {
         let backend = setup_backend();
         let resp = handle_request(
             AgentRequest::GenerateKey {
@@ -2131,18 +2327,19 @@ mod tests {
                 presence_mode: None,
                 pub_file_path: None,
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
         assert_eq!(backend.list().unwrap().len(), 1, "backend untouched");
     }
 
-    #[test]
-    fn test_generate_key_blocked_by_label_filter() {
+    #[tokio::test]
+    async fn test_generate_key_blocked_by_label_filter() {
         let backend = setup_backend();
         let allowed: HashSet<String> = ["other-key".to_string()].into_iter().collect();
 
@@ -2154,18 +2351,19 @@ mod tests {
                 presence_mode: None,
                 pub_file_path: None,
             },
-            &backend,
-            &allowed,
+            backend.clone(),
+            Arc::new(allowed),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
         assert_eq!(backend.list().unwrap().len(), 1);
     }
 
-    #[test]
-    fn test_generate_key_rejects_non_utf8_label() {
+    #[tokio::test]
+    async fn test_generate_key_rejects_non_utf8_label() {
         let backend = setup_backend();
         let resp = handle_request(
             AgentRequest::GenerateKey {
@@ -2175,17 +2373,18 @@ mod tests {
                 presence_mode: None,
                 pub_file_path: None,
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
     }
 
-    #[test]
-    fn test_generate_key_empty_comment_is_accepted() {
+    #[tokio::test]
+    async fn test_generate_key_empty_comment_is_accepted() {
         let backend = setup_backend();
         let resp = handle_request(
             AgentRequest::GenerateKey {
@@ -2195,35 +2394,37 @@ mod tests {
                 presence_mode: None,
                 pub_file_path: None,
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::GenerateResponse { .. }));
     }
 
-    #[test]
-    fn test_delete_key_rejects_non_utf8_label() {
+    #[tokio::test]
+    async fn test_delete_key_rejects_non_utf8_label() {
         let backend = setup_backend();
         // 0xFF is never valid UTF-8 start byte.
         let resp = handle_request(
             AgentRequest::DeleteKey {
                 label: vec![0xFF, 0xFE, 0xFD],
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         assert!(matches!(resp, AgentResponse::Failure));
         assert_eq!(backend.list().unwrap().len(), 1);
     }
 
-    #[test]
-    fn test_sign_produces_valid_ssh_signature() {
+    #[tokio::test]
+    async fn test_sign_produces_valid_ssh_signature() {
         let backend = setup_backend();
         let key_blob = get_key_blob(&backend);
 
@@ -2233,11 +2434,12 @@ mod tests {
                 data: b"challenge data".to_vec(),
                 flags: 0,
             },
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
 
         if let AgentResponse::SignResponse { signature_blob } = resp {
@@ -2249,9 +2451,9 @@ mod tests {
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(unix)]
-    fn test_prepare_socket_path_replaces_live_socket_without_pid() {
+    async fn test_prepare_socket_path_replaces_live_socket_without_pid() {
         let socket_path = test_socket_path("live");
         let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
 
@@ -2261,9 +2463,9 @@ mod tests {
         // The _listener is still alive (it just lost its path), which is expected.
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(unix)]
-    fn test_prepare_socket_path_removes_stale_socket() {
+    async fn test_prepare_socket_path_removes_stale_socket() {
         let socket_path = test_socket_path("stale");
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         drop(listener);
@@ -2273,9 +2475,9 @@ mod tests {
         assert!(!socket_path.exists());
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(unix)]
-    fn test_prepare_socket_path_rejects_regular_file() {
+    async fn test_prepare_socket_path_rejects_regular_file() {
         let socket_path = test_socket_path("file");
         std::fs::write(&socket_path, "not a socket").unwrap();
 
@@ -2286,9 +2488,9 @@ mod tests {
         drop(std::fs::remove_file(socket_path));
     }
 
-    #[test]
-    fn test_request_identities_default_key_sorted_first() {
-        let backend = MockKeyBackend::new();
+    #[tokio::test]
+    async fn test_request_identities_default_key_sorted_first() {
+        let backend = Arc::new(MockKeyBackend::new());
         // Generate a non-default key first
         backend
             .generate(&KeyGenOptions {
@@ -2314,11 +2516,12 @@ mod tests {
 
         let resp = handle_request(
             AgentRequest::RequestIdentities,
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => {
@@ -2330,9 +2533,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_request_identities_comment_fallback_to_label() {
-        let backend = MockKeyBackend::new();
+    #[tokio::test]
+    async fn test_request_identities_comment_fallback_to_label() {
+        let backend = Arc::new(MockKeyBackend::new());
         backend
             .generate(&KeyGenOptions {
                 label: KeyLabel::new("no-comment").unwrap(),
@@ -2346,11 +2549,12 @@ mod tests {
 
         let resp = handle_request(
             AgentRequest::RequestIdentities,
-            &backend,
-            &empty_labels(),
+            backend.clone(),
+            Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
         )
+        .await
         .unwrap();
         match resp {
             AgentResponse::IdentitiesAnswer(ids) => {
@@ -2387,8 +2591,13 @@ mod tests {
 
         // Run handle_connection with the server side
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result =
-            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
+        let conn_result = handle_connection(
+            server_stream,
+            backend.clone(),
+            Arc::new(allowed),
+            PromptPolicy::KeyDefault,
+        )
+        .await;
         assert!(conn_result.is_ok());
 
         writer.await.unwrap();
@@ -2441,8 +2650,13 @@ mod tests {
         });
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result =
-            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
+        let conn_result = handle_connection(
+            server_stream,
+            backend.clone(),
+            Arc::new(allowed),
+            PromptPolicy::KeyDefault,
+        )
+        .await;
         assert!(conn_result.is_ok());
 
         writer.await.unwrap();
@@ -2469,8 +2683,13 @@ mod tests {
         drop(client);
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result =
-            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
+        let conn_result = handle_connection(
+            server_stream,
+            backend.clone(),
+            Arc::new(allowed),
+            PromptPolicy::KeyDefault,
+        )
+        .await;
         // Should return Ok(()) on client disconnect (UnexpectedEof)
         assert!(conn_result.is_ok());
     }
@@ -2496,8 +2715,13 @@ mod tests {
         });
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result =
-            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
+        let conn_result = handle_connection(
+            server_stream,
+            backend.clone(),
+            Arc::new(allowed),
+            PromptPolicy::KeyDefault,
+        )
+        .await;
         // Zero length should cause early return with Ok(())
         assert!(conn_result.is_ok());
 
@@ -2525,8 +2749,13 @@ mod tests {
         });
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result =
-            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
+        let conn_result = handle_connection(
+            server_stream,
+            backend.clone(),
+            Arc::new(allowed),
+            PromptPolicy::KeyDefault,
+        )
+        .await;
         // Oversized length should cause early return with Ok(())
         assert!(conn_result.is_ok());
 
@@ -2540,8 +2769,8 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn signal_ready_creates_file() {
+    #[tokio::test]
+    async fn signal_ready_creates_file() {
         let path = signal_ready_test_path("creates-file");
         let _unused = std::fs::remove_file(&path);
 
@@ -2553,14 +2782,14 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    #[test]
-    fn signal_ready_none_is_noop() {
+    #[tokio::test]
+    async fn signal_ready_none_is_noop() {
         assert!(signal_ready(None).is_ok());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn signal_ready_sets_restricted_permissions() {
+    #[tokio::test]
+    async fn signal_ready_sets_restricted_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let path = signal_ready_test_path("permissions");
@@ -2578,8 +2807,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn signal_ready_refuses_preplanted_symlink() {
+    #[tokio::test]
+    async fn signal_ready_refuses_preplanted_symlink() {
         use std::os::unix::fs::symlink;
 
         let path = signal_ready_test_path("symlink-refused");
@@ -2614,8 +2843,8 @@ mod tests {
         let _unused = std::fs::remove_file(&decoy);
     }
 
-    #[test]
-    fn signal_ready_creates_parent_dirs() {
+    #[tokio::test]
+    async fn signal_ready_creates_parent_dirs() {
         let base = signal_ready_test_path("nested-parent");
         let _unused = std::fs::remove_dir_all(&base);
         let path = base.join("nested").join("deep").join("ready");
@@ -2653,8 +2882,13 @@ mod tests {
         });
 
         let server_stream = tokio::io::join(server_read, server_write);
-        let conn_result =
-            handle_connection(server_stream, &backend, &allowed, PromptPolicy::KeyDefault).await;
+        let conn_result = handle_connection(
+            server_stream,
+            backend.clone(),
+            Arc::new(allowed),
+            PromptPolicy::KeyDefault,
+        )
+        .await;
         assert!(conn_result.is_ok());
 
         writer.await.unwrap();
@@ -2674,8 +2908,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_rate_limiter_allows_within_limit() {
+    #[tokio::test]
+    async fn test_rate_limiter_allows_within_limit() {
         let mut rl = RateLimiter::new(5);
         for _ in 0..5 {
             assert!(rl.check());
@@ -2683,8 +2917,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_rate_limiter_rejects_over_limit() {
+    #[tokio::test]
+    async fn test_rate_limiter_rejects_over_limit() {
         let mut rl = RateLimiter::new(3);
         assert!(rl.check());
         assert!(rl.check());
@@ -2694,8 +2928,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_rate_limiter_allows_after_window_expires() {
+    #[tokio::test]
+    async fn test_rate_limiter_allows_after_window_expires() {
         let mut rl = RateLimiter::new(2);
         assert!(rl.check());
         assert!(rl.check());
@@ -2712,8 +2946,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_rate_limiter_zero_max_rejects_all() {
+    #[tokio::test]
+    async fn test_rate_limiter_zero_max_rejects_all() {
         let mut rl = RateLimiter::new(0);
         assert!(!rl.check());
     }
@@ -2738,8 +2972,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn known_ssh_binaries_are_recognized() {
+    #[tokio::test]
+    async fn known_ssh_binaries_are_recognized() {
         let expected = ["ssh", "git", "scp", "sshenc", "gitenc", "ssh-add"];
         for name in &expected {
             assert!(
@@ -2750,8 +2984,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn allowed_peer_binaries_contains_no_duplicates() {
+    #[tokio::test]
+    async fn allowed_peer_binaries_contains_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
         for name in ALLOWED_PEER_BINARIES {
             assert!(
@@ -2762,8 +2996,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn get_process_exe_returns_path_for_current_process() {
+    #[tokio::test]
+    async fn get_process_exe_returns_path_for_current_process() {
         let pid = std::process::id();
         let exe = get_process_exe(pid);
         assert!(exe.is_some(), "should be able to read own binary path");
@@ -2776,8 +3010,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn get_process_exe_returns_none_for_invalid_pid() {
+    #[tokio::test]
+    async fn get_process_exe_returns_none_for_invalid_pid() {
         // PID 0 is the kernel / swapper — we shouldn't be able to read its exe
         // Use a very high PID that's unlikely to exist
         let result = get_process_exe(u32::MAX);

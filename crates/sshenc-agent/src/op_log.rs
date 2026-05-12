@@ -256,7 +256,10 @@ fn record_to(
     if let Some(err) = error {
         obj.as_object_mut()
             .expect("json! always produces an object")
-            .insert("error".to_string(), serde_json::Value::String(err.to_string()));
+            .insert(
+                "error".to_string(),
+                serde_json::Value::String(err.to_string()),
+            );
     }
     write_line(path, &obj.to_string());
 }
@@ -696,7 +699,14 @@ mod tests {
         let log = dir.join("events.log");
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(LOG_PATH_ENV, &log);
-        record("sign", Some("k"), None, Duration::from_millis(0), true, None);
+        record(
+            "sign",
+            Some("k"),
+            None,
+            Duration::from_millis(0),
+            true,
+            None,
+        );
         std::env::remove_var(LOG_PATH_ENV);
         drop(guard);
         assert!(

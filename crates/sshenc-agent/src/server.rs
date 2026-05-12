@@ -1080,7 +1080,10 @@ fn handle_request(
                 tracing::debug!(label = label.as_str(), "dispatching SK sign request");
                 let started = Instant::now();
                 let sk_result = backend.sk_sign(label.as_str(), &data);
-                let error_msg = sk_result.as_ref().err().map(|e| format!("SK sign failed: {e}"));
+                let error_msg = sk_result
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("SK sign failed: {e}"));
                 crate::op_log::record(
                     "sign",
                     Some(label.as_str()),
@@ -1331,7 +1334,10 @@ fn handle_request(
 
             let started = Instant::now();
             let gen_result = backend.generate(&opts);
-            let error_msg = gen_result.as_ref().err().map(|e| format!("generate failed: {e}"));
+            let error_msg = gen_result
+                .as_ref()
+                .err()
+                .map(|e| format!("generate failed: {e}"));
             crate::op_log::record(
                 "generate",
                 Some(label_str),
@@ -1391,7 +1397,10 @@ fn handle_request(
 
             let started = Instant::now();
             let rename_result = backend.rename(old_str, new_str);
-            let error_msg = rename_result.as_ref().err().map(|e| format!("rename failed: {e}"));
+            let error_msg = rename_result
+                .as_ref()
+                .err()
+                .map(|e| format!("rename failed: {e}"));
             crate::op_log::record(
                 "rename",
                 Some(old_str),

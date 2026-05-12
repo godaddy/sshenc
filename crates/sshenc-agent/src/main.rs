@@ -217,8 +217,7 @@ fn validate_binary_signature() -> Result<()> {
     // Expected TeamIdentifier for production sshenc binaries
     const EXPECTED_TEAM_ID: &str = "7UMADG39Z9";
 
-    let current_exe = std::env::current_exe()
-        .context("failed to get current executable path")?;
+    let current_exe = std::env::current_exe().context("failed to get current executable path")?;
 
     // Check code signature
     let output = Command::new("codesign")
@@ -269,7 +268,10 @@ fn validate_binary_signature() -> Result<()> {
     }
 
     // Check TeamIdentifier matches expected value
-    if let Some(team_line) = stderr.lines().find(|line| line.starts_with("TeamIdentifier=")) {
+    if let Some(team_line) = stderr
+        .lines()
+        .find(|line| line.starts_with("TeamIdentifier="))
+    {
         let team_id = team_line.trim_start_matches("TeamIdentifier=");
         if team_id != EXPECTED_TEAM_ID {
             anyhow::bail!(

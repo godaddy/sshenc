@@ -199,6 +199,7 @@ pub fn record(
     elapsed: Duration,
     ok: bool,
     error: Option<&str>,
+    reason: Option<&str>,
 ) {
     record_to(
         resolved_log_path().as_deref(),
@@ -208,6 +209,7 @@ pub fn record(
         elapsed,
         ok,
         error,
+        reason,
     );
 }
 
@@ -220,6 +222,7 @@ pub fn log_path() -> Option<PathBuf> {
 /// Lower-level form: write to an explicit path (or no-op if `path`
 /// is `None`). Used by tests that need to drive the writer without
 /// touching process-global env vars.
+#[allow(clippy::too_many_arguments)]
 fn record_to(
     path: Option<&std::path::Path>,
     op: &str,
@@ -228,6 +231,7 @@ fn record_to(
     elapsed: Duration,
     ok: bool,
     error: Option<&str>,
+    reason: Option<&str>,
 ) {
     let Some(path) = path else {
         return;
@@ -243,6 +247,7 @@ fn record_to(
         "ok": ok,
         "pid": std::process::id(),
         "in_agent": true,
+        "reason": reason,
     });
     if let Some(err) = error {
         obj.as_object_mut()
@@ -632,6 +637,7 @@ mod tests {
             Duration::from_millis(50),
             true,
             None,
+            None,
         );
         record_to(
             Some(&log),
@@ -641,6 +647,7 @@ mod tests {
             Duration::from_millis(20),
             true,
             None,
+            None,
         );
         record_to(
             Some(&log),
@@ -649,6 +656,7 @@ mod tests {
             None,
             Duration::from_millis(75),
             false,
+            None,
             None,
         );
 
@@ -696,6 +704,7 @@ mod tests {
             Duration::from_millis(50),
             true,
             None,
+            None,
         );
         record_to(
             Some(&log),
@@ -704,6 +713,7 @@ mod tests {
             None,
             Duration::from_millis(150),
             true,
+            None,
             None,
         );
 
@@ -733,6 +743,7 @@ mod tests {
             Duration::from_millis(0),
             true,
             None,
+            None,
         );
         cleanup(&dir);
     }
@@ -749,6 +760,7 @@ mod tests {
             Duration::from_millis(0),
             true,
             None,
+            None,
         );
     }
 
@@ -764,6 +776,7 @@ mod tests {
                 None,
                 Duration::from_millis(0),
                 true,
+                None,
                 None,
             );
         }
@@ -789,6 +802,7 @@ mod tests {
             Duration::from_millis(0),
             true,
             None,
+            None,
         );
         let mode = fs::metadata(&log).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "log file should be owner-only");
@@ -813,6 +827,7 @@ mod tests {
             None,
             Duration::from_millis(0),
             true,
+            None,
             None,
         );
         std::env::remove_var(LOG_PATH_ENV);
@@ -1042,6 +1057,7 @@ mod tests {
             None,
             Duration::from_millis(0),
             true,
+            None,
             None,
         );
 

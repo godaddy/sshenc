@@ -8,7 +8,10 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sshenc_agent::server;
+use sshenc_agent::{op_log, server};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 const READY_FILE_ENV: &str = "SSHENC_AGENT_READY_FILE";
 /// Time the daemonized parent waits for the child to write its ready
@@ -359,11 +362,14 @@ fn main() -> Result<()> {
     } else {
         config.log_level.as_tracing_str()
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
+            ),
         )
+        .with(op_log::WarnErrorFileLayer::new(op_log::log_path()))
         .init();
 
     let allowed_labels = if cli.labels.is_empty() {

@@ -1133,6 +1133,8 @@ async fn handle_request(
                 return Ok(AgentResponse::Failure);
             }
 
+            let reason = sign_reason(&data, label.as_str());
+
             // Branch on key type. SK keys go through WebAuthn
             // GetAssertion; the resulting blob is already a full SK
             // signature (algorithm + r/s + flags + counter), unlike
@@ -1178,6 +1180,7 @@ async fn handle_request(
                     started.elapsed(),
                     sk_result.is_ok(),
                     error_msg.as_deref(),
+                    Some(reason.as_str()),
                 );
                 let sig_blob = match sk_result {
                     Ok(b) => b,
@@ -1261,7 +1264,6 @@ async fn handle_request(
             // wrapping-key cache uses); macOS plumbs this into the
             // `LAContext.touchIDAuthenticationAllowableReuseDuration`
             // for `Cached` mode.
-            let reason = sign_reason(&data, label.as_str());
             let started = Instant::now();
             let backend_clone = backend.clone();
             let label_clone = label.clone();
@@ -1295,6 +1297,7 @@ async fn handle_request(
                 started.elapsed(),
                 sign_result.is_ok(),
                 error_msg.as_deref(),
+                Some(reason.as_str()),
             );
             let der_sig = match sign_result {
                 Ok(sig) => sig,
@@ -1469,6 +1472,7 @@ async fn handle_request(
                 started.elapsed(),
                 gen_result.is_ok(),
                 error_msg.as_deref(),
+                None,
             );
             match gen_result {
                 Ok(info) => {
@@ -1544,6 +1548,7 @@ async fn handle_request(
                 started.elapsed(),
                 rename_result.is_ok(),
                 error_msg.as_deref(),
+                None,
             );
             match rename_result {
                 Ok(()) => {
@@ -1623,6 +1628,7 @@ async fn handle_request(
                 started.elapsed(),
                 result.is_ok(),
                 error_msg.as_deref(),
+                None,
             );
             match result {
                 Ok(()) => {
@@ -1681,6 +1687,7 @@ async fn handle_request(
                 started.elapsed(),
                 migrate_result.is_ok(),
                 error_msg.as_deref(),
+                None,
             );
             match migrate_result {
                 Ok(()) => {

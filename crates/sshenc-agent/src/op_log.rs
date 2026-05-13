@@ -321,13 +321,17 @@ impl Visit for FieldCollector {
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.extra
-            .insert(field.name().to_string(), serde_json::Value::Number(value.into()));
+        self.extra.insert(
+            field.name().to_string(),
+            serde_json::Value::Number(value.into()),
+        );
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.extra
-            .insert(field.name().to_string(), serde_json::Value::Number(value.into()));
+        self.extra.insert(
+            field.name().to_string(),
+            serde_json::Value::Number(value.into()),
+        );
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
@@ -356,7 +360,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnErrorFileLayer
             "level": event.metadata().level().as_str(),
             "target": event.metadata().target(),
         });
-        let map = obj.as_object_mut().expect("json! always produces an object");
+        let map = obj
+            .as_object_mut()
+            .expect("json! always produces an object");
         if let Some(msg) = collector.message {
             map.insert("message".to_string(), serde_json::Value::String(msg));
         }

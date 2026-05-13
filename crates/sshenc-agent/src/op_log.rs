@@ -1,50 +1,35 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Structured per-operation event log for the sshenc agent.
+//! Unified agent log: HSM operation events and warn/error diagnostics.
 //!
-//! Every HSM-touching request handler in [`crate::server`] (sign,
-//! generate, delete, rename, migrate-meta) records one JSONL line
-//! to a user-private log file so we can audit:
+//! Two record types share one append-only JSONL file (`~/.sshenc/sshenc.log`):
 //!
-//! - **What** the user actually triggers (op + label).
-//! - **When** it happened (RFC3339 UTC timestamp).
-//! - **How long** it took (`duration_ms`).
-//! - **Whether a hardware prompt fired** (`prompt_inferred`):
-//!   anything past `SSHENC_FINGERPRINT_THRESHOLD_MS` (default 250ms)
-//!   is assumed to have triggered a Touch ID / Hello / device
-//!   password prompt. This is a heuristic — slow disk or swap
-//!   pressure can produce false positives — but we've found it
-//!   accurate enough in practice to reason about user-visible
-//!   behaviour without surfacing every backend prompt event
-//!   explicitly.
-//! - **Whether it succeeded** (`ok`).
-//!
-//! The log is **never** allowed to make a request fail: every write
-//! is best-effort and logged-at-debug if it errors. Sensitive
-//! material (private bytes, signature bytes, public-key bytes,
-//! comments) is never recorded — labels and operation verbs only.
-//!
-//! Schema (one JSON object per line):
+//! **Operation records** — written by [`record`] after every HSM-touching
+//! request (sign, generate, delete, rename, migrate-meta):
 //!
 //! ```json
 //! {"ts":"2026-05-08T15:02:10.123Z","op":"sign","label":"work","target":null,"duration_ms":312,"prompt_inferred":true,"ok":true,"pid":12345,"in_agent":true}
 //! ```
 //!
-//! `target` is only populated for `rename` (the new label); other
-//! operations leave it `null`. `in_agent` is always `true` here — we
-//! keep the field for cross-app log parity with other enclave apps
-//! that record events from both their agent and CLI sides.
+//! **Diagnostic records** — written by [`WarnErrorFileLayer`] for every
+//! `warn!` / `error!` tracing event:
 //!
-//! The event log is **not** a replacement for `tracing`. `tracing`
-//! still emits structured per-event records on stderr / journald;
-//! the JSONL log is the durable, parseable, user-visible record.
+//! ```json
+//! {"ts":"2026-05-08T15:02:10.456Z","level":"WARN","target":"sshenc_agent::server","message":"unix socket read error","error":"connection reset by peer"}
+//! ```
+//!
+//! Both record types are best-effort: write failures are never propagated
+//! to the caller. Sensitive material (private bytes, signatures, comments)
+//! is never recorded.
 
 use serde_json::json;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::Context;
 
 /// Default threshold above which we assume an HSM prompt fired.
 /// 250ms is well above filesystem/RPC noise on a healthy host but
@@ -77,7 +62,7 @@ const THRESHOLD_ENV: &str = "SSHENC_FINGERPRINT_THRESHOLD_MS";
 /// symlink (defense against
 /// `mkdir /tmp/sneaky && ln -s /var/log /tmp/sneaky/parent`).
 /// Otherwise we fall back to the `~/.sshenc/` default with a warn.
-const LOG_PATH_ENV: &str = "SSHENC_OP_LOG";
+const LOG_PATH_ENV: &str = "SSHENC_LOG";
 
 fn fingerprint_threshold() -> Duration {
     let raw = match std::env::var(THRESHOLD_ENV) {
@@ -109,25 +94,25 @@ fn fingerprint_threshold() -> Duration {
 
 #[cfg(not(test))]
 fn default_log_path() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".sshenc").join("enclave-events.log"))
+    Some(dirs::home_dir()?.join(".sshenc").join("sshenc.log"))
 }
 
 /// In `cfg(test)` builds, `record()` writes nowhere by default —
-/// neither the env override (`SSHENC_OP_LOG`) nor `~/.sshenc/` is
+/// neither the env override (`SSHENC_LOG`) nor `~/.sshenc/` is
 /// honored. Two reasons:
 ///
 /// 1. Server-handler unit tests that drive `process_request` through
 ///    the dispatcher would otherwise scribble events into the
-///    developer's real audit log on every `cargo test`.
+///    developer's real log on every `cargo test`.
 /// 2. Tests that legitimately exercise the writer set
-///    `SSHENC_OP_LOG` to a tempdir; if a parallel server-handler
+///    `SSHENC_LOG` to a tempdir; if a parallel server-handler
 ///    test happens to call `record()` while that env var is set, it
 ///    would race on the same file (concurrent JSONL writes interleave
 ///    bytes mid-line and the reader sees malformed JSON).
 ///
 /// Tests that exercise the writer call `record_to` directly with
 /// an explicit path. Production binaries (where `cfg(test)` is not
-/// active) honor `SSHENC_OP_LOG` and the `~/.sshenc/` default.
+/// active) honor `SSHENC_LOG` and the `~/.sshenc/` default.
 #[cfg(not(test))]
 fn resolved_log_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var(LOG_PATH_ENV) {
@@ -137,7 +122,7 @@ fn resolved_log_path() -> Option<PathBuf> {
                 Err(reason) => {
                     tracing::warn!(
                         reason,
-                        "op_log: SSHENC_OP_LOG override rejected; using default"
+                        "op_log: SSHENC_LOG override rejected; using default"
                     );
                 }
             }
@@ -146,7 +131,7 @@ fn resolved_log_path() -> Option<PathBuf> {
     default_log_path()
 }
 
-/// Validate an `SSHENC_OP_LOG` override before honoring it.
+/// Validate a `SSHENC_LOG` override before honoring it.
 ///
 /// Rules — same intent as OpenSSH's `IdentityFile` validation in
 /// principle: don't let an env var trick the agent into writing
@@ -155,7 +140,7 @@ fn resolved_log_path() -> Option<PathBuf> {
 /// 1. **Absolute path**: relative paths are interpreted relative
 ///    to the agent's CWD which is whatever directory the user
 ///    happened to launch the agent from — basically random. An
-///    audit log at `enclave-events.log` is worse than no override.
+///    a log at `sshenc.log` relative to a random CWD is worse than no override.
 /// 2. **Parent directory exists**: don't auto-create deep paths
 ///    that might land in attacker-controlled prefixes. If the
 ///    operator wants to put the log elsewhere, they create the
@@ -226,6 +211,12 @@ pub fn record(
     );
 }
 
+/// Returns the resolved log path for this process. `None` in `cfg(test)` builds
+/// and when `dirs::home_dir()` is unavailable.
+pub fn log_path() -> Option<PathBuf> {
+    resolved_log_path()
+}
+
 /// Lower-level form: write to an explicit path (or no-op if `path`
 /// is `None`). Used by tests that need to drive the writer without
 /// touching process-global env vars.
@@ -264,15 +255,132 @@ fn record_to(
     write_line(path, &obj.to_string());
 }
 
+/// Tracing [`Layer`] that appends `warn!` and `error!` events to the unified
+/// log file as JSONL, sharing rotation and file-write infrastructure with
+/// [`record`].
+///
+/// Install via `tracing_subscriber::registry().with(WarnErrorFileLayer::new(log_path()))`.
+/// When `path` is `None` (test builds, missing home dir) the layer is a no-op.
+#[derive(Debug)]
+pub struct WarnErrorFileLayer {
+    path: Option<PathBuf>,
+}
+
+impl WarnErrorFileLayer {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self { path }
+    }
+}
+
+struct FieldCollector {
+    message: Option<String>,
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl FieldCollector {
+    fn new() -> Self {
+        Self {
+            message: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+}
+
+impl Visit for FieldCollector {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let s = format!("{value:?}");
+        if field.name() == "message" {
+            self.message = Some(s);
+        } else {
+            self.extra
+                .insert(field.name().to_string(), serde_json::Value::String(s));
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(value.to_string());
+        } else {
+            self.extra.insert(
+                field.name().to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+    }
+
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.extra.insert(
+            field.name().to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.extra
+            .insert(field.name().to_string(), serde_json::Value::Bool(value));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.extra.insert(
+            field.name().to_string(),
+            serde_json::Value::Number(value.into()),
+        );
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.extra.insert(
+            field.name().to_string(),
+            serde_json::Value::Number(value.into()),
+        );
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.extra.insert(
+            field.name().to_string(),
+            serde_json::Number::from_f64(value)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(value.to_string())),
+        );
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnErrorFileLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        // Only capture WARN and ERROR; INFO/DEBUG/TRACE stay stderr-only.
+        if *event.metadata().level() > tracing::Level::WARN {
+            return;
+        }
+        let Some(path) = &self.path else { return };
+
+        let mut collector = FieldCollector::new();
+        event.record(&mut collector);
+
+        let mut obj = json!({
+            "ts": now_rfc3339(),
+            "level": event.metadata().level().as_str(),
+            "target": event.metadata().target(),
+        });
+        let map = obj
+            .as_object_mut()
+            .expect("json! always produces an object");
+        if let Some(msg) = collector.message {
+            map.insert("message".to_string(), serde_json::Value::String(msg));
+        }
+        for (k, v) in collector.extra {
+            map.insert(k, v);
+        }
+
+        write_line(path, &obj.to_string());
+    }
+}
+
 /// Maximum size of the active log file before we rotate. 10 MiB
-/// is generous for a single-user audit log — at typical agent
-/// volume that's months of events per rotation.
+/// is generous for a single-user log — at typical agent volume
+/// that's months of events per rotation.
 const ROTATE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Number of historical rotations to retain. With ROTATE_MAX_BYTES
-/// = 10MiB and ROTATE_KEEP = 5, the audit log occupies at most
-/// ~60MiB total (active + 5 rotations). The oldest rotation is
-/// dropped when a new one is created.
+/// Number of historical rotations to retain. With ROTATE_MAX_BYTES = 10MiB
+/// and ROTATE_KEEP = 5, the log occupies at most ~60MiB (active + 5 rotations).
 const ROTATE_KEEP: u32 = 5;
 
 fn write_line(path: &std::path::Path, line: &str) {
@@ -690,7 +798,7 @@ mod tests {
     #[test]
     fn cfg_test_record_writes_nowhere_by_default() {
         // The `pub fn record(...)` API must be a no-op in cfg(test)
-        // builds even when SSHENC_OP_LOG is set, so server-handler
+        // builds even when SSHENC_LOG is set, so server-handler
         // unit tests don't accidentally race on a sibling op_log
         // test's tempdir. (Production paths exercise the env path
         // via `#[cfg(not(test))]`, covered by the integration suite

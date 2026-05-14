@@ -2,9 +2,26 @@
 
 Instructions for AI agents (Claude Code, Copilot, Cursor, etc.) working with sshenc.
 
-## CRITICAL: Never Run Unsigned Binaries
+## Platform Scope of the Signing Rules
 
-**DO NOT** run binaries from development builds (`cargo build`, `cargo run`, `~/.cargo/bin/*`) in production contexts or when they could access hardware security modules (Secure Enclave, TPM).
+The "never run unsigned binaries against real secure storage" rule below is
+**macOS-specific in practice.** On macOS, the Secure Enclave keychain ACL is
+bound to the binary's code signature, so an ad-hoc `cargo build` collides with
+the signed Homebrew agent's ACL and creates confusing prompts. On Windows,
+sshenc binaries are deliberately **not Authenticode-signed** (and never will
+be — that decision is firm), so there is no signature-bound ACL hazard
+equivalent to macOS's; running locally-built `target/debug/sshenc.exe` etc.
+against real TPM storage is acceptable when the task requires it. On Linux
+the software-keyring backend has no signature coupling either; the same
+practical leniency applies.
+
+Use your judgement on Windows/Linux: prefer the installed binary when one
+exists for parity reasons, but locally-built binaries are not a footgun on
+those platforms the way they are on macOS.
+
+## CRITICAL: Never Run Unsigned Binaries (macOS)
+
+**DO NOT** run binaries from development builds (`cargo build`, `cargo run`, `~/.cargo/bin/*`) **on macOS** in production contexts or when they could access the Secure Enclave. (See the Platform Scope section above for Windows/Linux scoping.)
 
 ### Why This Matters
 

@@ -195,6 +195,11 @@ impl SshencBackend {
             // why CLI distribution can't reach the DP keychain
             // without the .app-bundle pattern.
             keychain_access_group: Some("7UMADG39Z9.com.godaddy.sshenc".into()),
+            // sshenc doesn't use libenclaveapp's Windows encryption path —
+            // its Hello UX on Windows comes from the SK/WebAuthn signing
+            // path. Keep the soft-Hello-UX opt-in off for the signing
+            // backend; it's a no-op on macOS/Linux regardless.
+            prefer_windows_hello_ux: false,
         })?;
 
         Ok(Self {
@@ -989,6 +994,7 @@ mod tests {
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
+            prefer_windows_hello_ux: false,
         })
         .ok()?;
         Some(SshencBackend {

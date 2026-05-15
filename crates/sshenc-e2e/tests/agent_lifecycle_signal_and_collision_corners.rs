@@ -197,7 +197,13 @@ fn sshenc_uninstall_while_agent_running() {
         run(env.sshenc_cmd().expect("sshenc cmd").arg("install")).expect("sshenc install");
     assert!(install.succeeded(), "install: {}", install.stderr);
 
-    // Confirm the live agent's socket is still bound.
+    // On macOS, install transitions to LaunchAgent management: it kills the
+    // shell-spawned agent and bootstraps launchd. Wait for the socket to
+    // reappear (launchd starts the new agent asynchronously).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !env.socket_path().exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(env.socket_path().exists(), "agent socket should exist");
 
     // Uninstall — must succeed despite the agent holding the socket.

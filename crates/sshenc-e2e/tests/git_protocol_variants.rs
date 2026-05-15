@@ -1,8 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Two git protocol-shape variants the gitenc test files don't
-//! cover:
+//! Git protocol-shape variants the gitenc test files don't cover:
 //!
 //! 1. `git clone --depth N` (shallow clone) over an sshenc-mediated
 //!    SSH remote. Shallow clone uses a different ref-negotiation
@@ -14,6 +13,13 @@
 //! 2. `git fsck` after a series of agent-backed signed commits is
 //!    clean. Pins that the pack format and ref structure remain
 //!    valid — a corrupt object would surface as an fsck error.
+//! 3. `git clone --depth 1` followed by a signed commit in the
+//!    shallow clone. Pins that gitenc signing works in a shallow
+//!    repo where the full history is absent.
+//! 4. `git sparse-checkout set` followed by a signed commit. Pins
+//!    that the sparse working-directory state doesn't confuse the
+//!    signing path (git signs the index, not the working tree, but
+//!    a regression in sshenc's agent forwarding could surface here).
 
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
 
@@ -274,4 +280,324 @@ fn git_fsck_clean_after_signed_commits() {
             fsck.stderr
         );
     }
+}
+
+/// After a `git clone --depth 1`, make a signed commit in the shallow
+/// clone and verify it with `git verify-commit`. Pins that gitenc
+/// signing works inside a shallow repo where the full history is absent.
+#[test]
+#[ignore = "requires docker"]
+fn git_shallow_clone_then_signed_commit_is_verifiable() {
+    if skip_if_no_docker("git_shallow_clone_then_signed_commit_is_verifiable") {
+        return;
+    }
+    let mut env = SshencEnv::new().expect("env");
+    let enclave = shared_enclave_pubkey(&env).expect("enclave");
+    env.start_agent().expect("start agent");
+    plant_meta(
+        &env,
+        SHARED_ENCLAVE_LABEL,
+        "shallow signer",
+        "shallow-sign@e2e.test",
+    );
+    let pub_path = env.ssh_dir().join(format!("{SHARED_ENCLAVE_LABEL}.pub"));
+    std::fs::create_dir_all(env.ssh_dir()).expect("mkdir ssh dir");
+    std::fs::write(&pub_path, format!("{enclave}\n")).expect("write pub");
+
+    let container = SshdContainer::start(&[&enclave]).expect("sshd");
+    let remote_url = init_bare_repo(&env, &container, "shallow-sign-target.git");
+    let extra = ssh_extra_args(&env);
+
+    // Seed the bare repo with an initial commit via a temporary local repo.
+    let seeder = env.home().join("shallow-sign-seeder");
+    std::fs::create_dir_all(&seeder).expect("mkdir seeder");
+    assert!(env
+        .git_cmd()
+        .current_dir(&seeder)
+        .args(["init", "-q", "-b", "main"])
+        .status()
+        .expect("git init")
+        .success());
+    let cfg = run(env
+        .gitenc_cmd()
+        .expect("gitenc cmd")
+        .current_dir(&seeder)
+        .args(["--config", SHARED_ENCLAVE_LABEL]))
+    .expect("gitenc --config seeder");
+    assert!(cfg.succeeded(), "gitenc --config seeder: {}", cfg.stderr);
+    let add_remote =
+        run(env
+            .git_cmd()
+            .current_dir(&seeder)
+            .args(["remote", "add", "origin", &remote_url]))
+        .expect("remote add");
+    assert!(add_remote.succeeded(), "remote add: {}", add_remote.stderr);
+    std::fs::write(seeder.join("seed.txt"), b"seed commit\n").expect("write seed");
+    let add =
+        run(env.git_cmd().current_dir(&seeder).args(["add", "seed.txt"])).expect("git add seed");
+    assert!(add.succeeded(), "git add: {}", add.stderr);
+    let commit =
+        run(env
+            .git_cmd()
+            .current_dir(&seeder)
+            .args(["commit", "-q", "-m", "initial seed"]))
+        .expect("git commit seed");
+    assert!(commit.succeeded(), "git commit seed: {}", commit.stderr);
+    let push = run(env
+        .git_cmd()
+        .env("SSHENC_SSH_EXTRA_ARGS", &extra)
+        .current_dir(&seeder)
+        .args(["push", "-q", "-u", "origin", "main"]))
+    .expect("seed push");
+    assert!(push.succeeded(), "seed push: {}", push.stderr);
+
+    // Shallow-clone the seeded bare repo.
+    let git_ssh = format!(
+        "sshenc ssh -F /dev/null \
+         -o StrictHostKeyChecking=accept-new \
+         -o UserKnownHostsFile={known} \
+         -o ConnectTimeout=10 \
+         -o NumberOfPasswordPrompts=0 \
+         -o PreferredAuthentications=publickey",
+        known = env.known_hosts().display()
+    );
+    let cloned = env.home().join("shallow-sign-clone");
+    let clone = run(env
+        .git_cmd()
+        .env("SSHENC_SSH_EXTRA_ARGS", &extra)
+        .env("GIT_SSH_COMMAND", &git_ssh)
+        .args(["clone", "--depth", "1", "-q", &remote_url])
+        .arg(&cloned))
+    .expect("git clone --depth 1");
+    assert!(
+        clone.succeeded(),
+        "git clone --depth 1 failed; stderr:\n{}",
+        clone.stderr
+    );
+
+    // Configure gitenc in the shallow clone for signing.
+    let cfg2 = run(env
+        .gitenc_cmd()
+        .expect("gitenc cmd")
+        .current_dir(&cloned)
+        .args(["--config", SHARED_ENCLAVE_LABEL]))
+    .expect("gitenc --config clone");
+    assert!(cfg2.succeeded(), "gitenc --config clone: {}", cfg2.stderr);
+
+    // Make a new signed commit in the shallow clone.
+    std::fs::write(cloned.join("shallow-new.txt"), b"added in shallow clone\n").expect("write");
+    let add2 = run(env
+        .git_cmd()
+        .current_dir(&cloned)
+        .args(["add", "shallow-new.txt"]))
+    .expect("git add");
+    assert!(add2.succeeded(), "git add: {}", add2.stderr);
+    let commit2 = run(env.git_cmd().current_dir(&cloned).args([
+        "commit",
+        "-q",
+        "-m",
+        "signed in shallow clone",
+    ]))
+    .expect("git commit in shallow clone");
+    assert!(
+        commit2.succeeded(),
+        "git commit in shallow clone failed; stderr:\n{}",
+        commit2.stderr
+    );
+
+    // Verify the new commit's signature.
+    let verify = run(env
+        .git_cmd()
+        .current_dir(&cloned)
+        .args(["verify-commit", "HEAD"]))
+    .expect("git verify-commit");
+    assert!(
+        verify.succeeded(),
+        "git verify-commit failed in shallow clone; stdout:\n{}\nstderr:\n{}",
+        verify.stdout,
+        verify.stderr
+    );
+    let combined = format!("{}\n{}", verify.stdout, verify.stderr);
+    assert!(
+        combined.contains("Good") || combined.contains("good"),
+        "git verify-commit should report Good signature; got:\n{combined}"
+    );
+}
+
+/// `git sparse-checkout set` followed by a signed commit.
+/// Pins that the sparse working-directory state (some files absent
+/// from the working tree) doesn't interfere with commit signing.
+#[test]
+#[ignore = "requires docker"]
+fn git_sparse_checkout_then_signed_commit_is_verifiable() {
+    if skip_if_no_docker("git_sparse_checkout_then_signed_commit_is_verifiable") {
+        return;
+    }
+    let mut env = SshencEnv::new().expect("env");
+    let enclave = shared_enclave_pubkey(&env).expect("enclave");
+    env.start_agent().expect("start agent");
+    plant_meta(
+        &env,
+        SHARED_ENCLAVE_LABEL,
+        "sparse signer",
+        "sparse@e2e.test",
+    );
+    let pub_path = env.ssh_dir().join(format!("{SHARED_ENCLAVE_LABEL}.pub"));
+    std::fs::create_dir_all(env.ssh_dir()).expect("mkdir ssh dir");
+    std::fs::write(&pub_path, format!("{enclave}\n")).expect("write pub");
+
+    let container = SshdContainer::start(&[&enclave]).expect("sshd");
+    let remote_url = init_bare_repo(&env, &container, "sparse-sign-target.git");
+    let extra = ssh_extra_args(&env);
+
+    // Seed the bare repo with a two-directory tree.
+    let seeder = env.home().join("sparse-sign-seeder");
+    std::fs::create_dir_all(seeder.join("dirA")).expect("mkdir dirA");
+    std::fs::create_dir_all(seeder.join("dirB")).expect("mkdir dirB");
+    assert!(env
+        .git_cmd()
+        .current_dir(&seeder)
+        .args(["init", "-q", "-b", "main"])
+        .status()
+        .expect("git init")
+        .success());
+    let cfg = run(env
+        .gitenc_cmd()
+        .expect("gitenc cmd")
+        .current_dir(&seeder)
+        .args(["--config", SHARED_ENCLAVE_LABEL]))
+    .expect("gitenc --config seeder");
+    assert!(cfg.succeeded(), "gitenc --config: {}", cfg.stderr);
+    let add_remote =
+        run(env
+            .git_cmd()
+            .current_dir(&seeder)
+            .args(["remote", "add", "origin", &remote_url]))
+        .expect("remote add");
+    assert!(add_remote.succeeded());
+    std::fs::write(seeder.join("dirA").join("a.txt"), b"file in A\n").expect("write a.txt");
+    std::fs::write(seeder.join("dirB").join("b.txt"), b"file in B\n").expect("write b.txt");
+    let add = run(env.git_cmd().current_dir(&seeder).args(["add", "."])).expect("git add");
+    assert!(add.succeeded(), "git add: {}", add.stderr);
+    let commit = run(env.git_cmd().current_dir(&seeder).args([
+        "commit",
+        "-q",
+        "-m",
+        "seed with dirA and dirB",
+    ]))
+    .expect("git commit seed");
+    assert!(commit.succeeded(), "seed commit: {}", commit.stderr);
+    let push = run(env
+        .git_cmd()
+        .env("SSHENC_SSH_EXTRA_ARGS", &extra)
+        .current_dir(&seeder)
+        .args(["push", "-q", "-u", "origin", "main"]))
+    .expect("seed push");
+    assert!(push.succeeded(), "seed push: {}", push.stderr);
+
+    // Clone the repo.
+    let git_ssh = format!(
+        "sshenc ssh -F /dev/null \
+         -o StrictHostKeyChecking=accept-new \
+         -o UserKnownHostsFile={known} \
+         -o ConnectTimeout=10 \
+         -o NumberOfPasswordPrompts=0 \
+         -o PreferredAuthentications=publickey",
+        known = env.known_hosts().display()
+    );
+    let cloned = env.home().join("sparse-sign-clone");
+    let clone = run(env
+        .git_cmd()
+        .env("SSHENC_SSH_EXTRA_ARGS", &extra)
+        .env("GIT_SSH_COMMAND", &git_ssh)
+        .args(["clone", "-q", &remote_url])
+        .arg(&cloned))
+    .expect("git clone");
+    assert!(clone.succeeded(), "git clone: {}", clone.stderr);
+
+    // Set up sparse checkout: only check out dirA, leave dirB absent.
+    let sparse_init =
+        run(env
+            .git_cmd()
+            .current_dir(&cloned)
+            .args(["sparse-checkout", "init", "--cone"]))
+        .expect("sparse-checkout init");
+    assert!(
+        sparse_init.succeeded(),
+        "sparse-checkout init: {}",
+        sparse_init.stderr
+    );
+    let sparse_set =
+        run(env
+            .git_cmd()
+            .current_dir(&cloned)
+            .args(["sparse-checkout", "set", "dirA"]))
+        .expect("sparse-checkout set");
+    assert!(
+        sparse_set.succeeded(),
+        "sparse-checkout set: {}",
+        sparse_set.stderr
+    );
+    // dirB should be absent from the working tree.
+    assert!(
+        !cloned.join("dirB").exists(),
+        "dirB should be absent from sparse checkout"
+    );
+
+    // Configure gitenc for signing in the sparse clone.
+    let cfg2 = run(env
+        .gitenc_cmd()
+        .expect("gitenc cmd")
+        .current_dir(&cloned)
+        .args(["--config", SHARED_ENCLAVE_LABEL]))
+    .expect("gitenc --config");
+    assert!(cfg2.succeeded(), "gitenc --config: {}", cfg2.stderr);
+
+    // Add a file and make a signed commit.
+    std::fs::write(
+        cloned.join("dirA").join("new.txt"),
+        b"added in sparse clone\n",
+    )
+    .expect("write new.txt");
+    let add2 = run(env
+        .git_cmd()
+        .current_dir(&cloned)
+        .args(["add", "dirA/new.txt"]))
+    .expect("git add");
+    assert!(add2.succeeded(), "git add: {}", add2.stderr);
+    let commit2 = run(env.git_cmd().current_dir(&cloned).args([
+        "commit",
+        "-q",
+        "-m",
+        "signed in sparse checkout",
+    ]))
+    .expect("git commit sparse");
+    assert!(
+        commit2.succeeded(),
+        "git commit in sparse checkout failed; stderr:\n{}",
+        commit2.stderr
+    );
+
+    // Verify the signed commit.
+    let verify = run(env
+        .git_cmd()
+        .current_dir(&cloned)
+        .args(["verify-commit", "HEAD"]))
+    .expect("git verify-commit");
+    assert!(
+        verify.succeeded(),
+        "git verify-commit failed in sparse checkout; stdout:\n{}\nstderr:\n{}",
+        verify.stdout,
+        verify.stderr
+    );
+    let combined = format!("{}\n{}", verify.stdout, verify.stderr);
+    assert!(
+        combined.contains("Good") || combined.contains("good"),
+        "git verify-commit should report Good signature; got:\n{combined}"
+    );
+    // Make sure there's no "error" in the verify output.
+    assert!(
+        !combined.to_lowercase().contains("error"),
+        "git verify-commit contained 'error'; got:\n{combined}"
+    );
 }

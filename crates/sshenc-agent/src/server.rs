@@ -120,8 +120,10 @@ impl RateLimiter {
 }
 
 /// Default maximum connections per second before rate limiting kicks in.
+/// Set to 200 to accommodate concurrent test scenarios (30 workers × 3
+/// connections each = 90 burst) while still protecting against abuse.
 #[cfg(unix)]
-const DEFAULT_MAX_CONNECTIONS_PER_SECOND: usize = 50;
+const DEFAULT_MAX_CONNECTIONS_PER_SECOND: usize = 200;
 
 /// Run the SSH agent server on a Unix socket.
 #[cfg(unix)]

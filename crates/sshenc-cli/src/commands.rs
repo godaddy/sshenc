@@ -2364,14 +2364,28 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     let socket_path = client_socket_path(&config.socket_path);
     sshenc_agent_proto::client::ensure_agent_ready(&socket_path)
         .map_err(|e| anyhow!("sshenc-agent not reachable: {e}"))?;
-    let ssh_sig =
-        sshenc_agent_proto::client::try_sign_via_socket(&socket_path, &pubkey_blob, &signed_data)
-            .ok_or_else(|| {
-            anyhow!(
-                "sshenc-agent refused sign request (no matching identity, \
-             allowed_labels filter, or backend error); check agent logs"
-            )
-        })?;
+    let ssh_sig = sshenc_agent_proto::client::try_sign_via_socket_result(
+        &socket_path,
+        &pubkey_blob,
+        &signed_data,
+    )
+    .map_err(|e| match e {
+        sshenc_agent_proto::client::SignAttemptError::IdentityNotFound => anyhow!(
+            "sshenc-agent has no identity matching {}; verify the key is listed \
+             by `sshenc list` and that allowed_labels in the agent config includes it",
+            sign_args.key_file.display()
+        ),
+        sshenc_agent_proto::client::SignAttemptError::SignRefused => anyhow!(
+            "sshenc-agent refused the sign request; check sshenc.log for details \
+             (common causes: keychain access denied, biometric cancelled, or \
+             backend error — if denied, open Keychain Access and set 'Always Allow' \
+             for sshenc-agent)"
+        ),
+        sshenc_agent_proto::client::SignAttemptError::AgentUnreachable => anyhow!(
+            "could not reach sshenc-agent at {}; is it running?",
+            socket_path.display()
+        ),
+    })?;
     tracing::debug!("ssh_sign: signed via agent proxy");
     let sig_blob = build_ssh_signature_from_ssh_sig(&pubkey_blob, &sign_args.namespace, &ssh_sig);
     write_sshsig_pem_file(&sig_blob, &sign_args.data_file)

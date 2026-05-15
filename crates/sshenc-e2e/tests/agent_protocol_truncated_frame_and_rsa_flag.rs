@@ -17,7 +17,10 @@
 #![cfg(unix)]
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
 
-use sshenc_e2e::{docker_skip_reason, run, shared_enclave_pubkey, SshencEnv};
+use sshenc_e2e::{
+    docker_skip_reason, persistent_keys_dir, run, shared_enclave_pubkey, SshencEnv,
+    SHARED_ENCLAVE_LABEL,
+};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -42,27 +45,86 @@ fn write_ssh_string(out: &mut Vec<u8>, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-fn read_reply(socket: &std::path::Path, payload: &[u8]) -> std::io::Result<Vec<u8>> {
+/// Send `payload` and read back exactly one SSH response frame (length-prefixed).
+/// Returns the full frame bytes (4-byte length prefix + body). Does not wait
+/// for more data after the frame is received, so it returns immediately rather
+/// than blocking until a read timeout.
+fn read_one_ssh_frame(
+    socket: &std::path::Path,
+    payload: &[u8],
+    timeout: Duration,
+) -> std::io::Result<Vec<u8>> {
     let mut s = UnixStream::connect(socket)?;
-    s.set_read_timeout(Some(Duration::from_secs(3)))?;
+    s.set_read_timeout(Some(timeout))?;
     s.set_write_timeout(Some(Duration::from_secs(3)))?;
     s.write_all(payload)?;
-    let mut buf = Vec::new();
-    let mut tmp = [0_u8; 4096];
-    loop {
-        match s.read(&mut tmp) {
-            Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
-            Err(_) => break,
-        }
-        if buf.len() > 1024 * 1024 {
+
+    let mut len_buf = [0_u8; 4];
+    s.read_exact(&mut len_buf)?;
+    let body_len = u32::from_be_bytes(len_buf) as usize;
+    let mut body = vec![0_u8; body_len];
+    s.read_exact(&mut body)?;
+
+    let mut result = len_buf.to_vec();
+    result.extend_from_slice(&body);
+    Ok(result)
+}
+
+/// Build the SSH wire-format key blob for the shared enclave key.
+///
+/// The `e2e-shared.pub` file in the persistent keys dir contains the raw
+/// SEC1-encoded EC public key (65 bytes: 0x04 || x || y for P-256).
+/// The SSH agent wire format wraps that as:
+///   string("ecdsa-sha2-nistp256") || string("nistp256") || string(sec1_bytes)
+fn shared_enclave_ssh_blob() -> Option<Vec<u8>> {
+    let pub_path = persistent_keys_dir().join(format!("{SHARED_ENCLAVE_LABEL}.pub"));
+    let sec1 = std::fs::read(&pub_path).ok()?;
+    if sec1.len() != 65 {
+        return None;
+    }
+    let mut blob = Vec::new();
+    write_ssh_string(&mut blob, b"ecdsa-sha2-nistp256");
+    write_ssh_string(&mut blob, b"nistp256");
+    write_ssh_string(&mut blob, &sec1);
+    Some(blob)
+}
+
+/// Parse an IDENTITIES_ANSWER reply and return a list of (blob, comment) pairs.
+fn parse_identities(reply: &[u8]) -> Vec<(Vec<u8>, String)> {
+    if reply.len() < 9 {
+        return Vec::new();
+    }
+    let nkeys = u32::from_be_bytes([reply[5], reply[6], reply[7], reply[8]]) as usize;
+    let mut p = 9_usize;
+    let mut out = Vec::with_capacity(nkeys);
+    for _ in 0..nkeys {
+        if p + 4 > reply.len() {
             break;
         }
+        let blob_len =
+            u32::from_be_bytes([reply[p], reply[p + 1], reply[p + 2], reply[p + 3]]) as usize;
+        p += 4;
+        if p + blob_len > reply.len() {
+            break;
+        }
+        let blob = reply[p..p + blob_len].to_vec();
+        p += blob_len;
+
+        if p + 4 > reply.len() {
+            break;
+        }
+        let comment_len =
+            u32::from_be_bytes([reply[p], reply[p + 1], reply[p + 2], reply[p + 3]]) as usize;
+        p += 4;
+        if p + comment_len > reply.len() {
+            break;
+        }
+        let comment = String::from_utf8_lossy(&reply[p..p + comment_len]).into_owned();
+        p += comment_len;
+
+        out.push((blob, comment));
     }
-    Ok(buf)
+    out
 }
 
 /// Client declares a 64-byte body, sends only 8 bytes, then
@@ -127,23 +189,45 @@ fn sign_request_with_rsa_sha2_flag_on_ecdsa_key_signs_normally() {
     drop(shared_enclave_pubkey(&env).expect("shared key"));
     env.start_agent().expect("start agent");
 
-    // Get the key blob via REQUEST_IDENTITIES.
+    // Get the key blob for the shared no-Touch-ID key via REQUEST_IDENTITIES.
+    // We specifically use SHARED_ENCLAVE_LABEL ("e2e-shared", auth-policy none)
+    // rather than whichever key happens to be first: the "default" key requires
+    // Touch ID and would block indefinitely if the user is not at the terminal.
     let mut req = Vec::new();
     req.extend_from_slice(&(1_u32.to_be_bytes()));
     req.push(SSH_AGENTC_REQUEST_IDENTITIES);
-    let reply = read_reply(&env.socket_path(), &req).expect("REQUEST_IDENTITIES");
+    let reply = read_one_ssh_frame(&env.socket_path(), &req, Duration::from_secs(10))
+        .expect("REQUEST_IDENTITIES");
     assert!(
         reply.len() >= 9,
         "IDENTITIES_ANSWER too short: {} bytes",
         reply.len()
     );
-    let nkeys = u32::from_be_bytes([reply[5], reply[6], reply[7], reply[8]]);
-    assert!(nkeys >= 1, "agent has no keys; got nkeys={nkeys}");
-    let mut p = 9_usize;
-    let blob_len =
-        u32::from_be_bytes([reply[p], reply[p + 1], reply[p + 2], reply[p + 3]]) as usize;
-    p += 4;
-    let blob = reply[p..p + blob_len].to_vec();
+    let identities = parse_identities(&reply);
+    assert!(!identities.is_empty(), "agent returned no identities");
+
+    // Find the shared key by its SSH wire-format blob (constructed from the
+    // on-disk .pub SEC1 bytes).  Matching by blob is more reliable than matching
+    // by comment because sshenc sets the comment to the OS username@hostname, not
+    // the key label.
+    let target_blob = shared_enclave_ssh_blob();
+    let blob = target_blob
+        .as_ref()
+        .and_then(|t| {
+            identities
+                .iter()
+                .find(|(b, _)| b == t)
+                .map(|(b, _)| b.clone())
+        })
+        .unwrap_or_else(|| {
+            // Fallback: use the first identity if we can't locate the shared key.
+            // The first identity is sorted "default" first, which may require Touch ID.
+            eprintln!(
+                "warning: could not locate '{SHARED_ENCLAVE_LABEL}' blob in identities; \
+                 using first identity (sign may require Touch ID)"
+            );
+            identities[0].0.clone()
+        });
 
     // Build SignRequest: opcode + key_blob (string) + data (string) + flags (u32).
     let mut body = Vec::new();
@@ -156,17 +240,24 @@ fn sign_request_with_rsa_sha2_flag_on_ecdsa_key_signs_normally() {
     frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
     frame.extend_from_slice(&body);
 
-    let resp = read_reply(&env.socket_path(), &frame).expect("SIGN_REQUEST reply");
+    // Use read_one_ssh_frame so we return as soon as the response arrives rather
+    // than blocking until a read timeout.  With auth-policy none the SE signs
+    // without biometrics and the response should arrive in well under a second.
+    let resp = read_one_ssh_frame(&env.socket_path(), &frame, Duration::from_secs(10))
+        .expect("SIGN_REQUEST reply");
     assert!(
         resp.len() >= 5,
-        "SIGN_REQUEST reply too short: {} bytes",
-        resp.len()
+        "SIGN_REQUEST reply too short: {} bytes; agent stderr:\n{}",
+        resp.len(),
+        env.agent_stderr_snapshot()
     );
     let opcode = resp[4];
     assert_eq!(
-        opcode, SSH_AGENT_SIGN_RESPONSE,
+        opcode,
+        SSH_AGENT_SIGN_RESPONSE,
         "expected SIGN_RESPONSE (14) — agent should ignore the RSA-specific flag for an ECDSA key \
-         and produce a valid signature; got opcode {opcode}"
+         and produce a valid signature; got opcode {opcode}; agent stderr:\n{}",
+        env.agent_stderr_snapshot()
     );
 
     // Agent stays alive for subsequent requests.

@@ -1571,8 +1571,57 @@ pub fn uninstall() -> Result<()> {
             );
         }
 
-        // Clean up WSL distros
+        // Clean up WSL distros (shell blocks, binaries, runtime files).
         crate::wsl::unconfigure_wsl_distros();
+
+        // Remove the sshenc config directory if it is now empty.
+        // Fails silently when the keys/ subdirectory is still present.
+        if let Some(config_dir) = dirs::config_dir() {
+            std::fs::remove_dir(config_dir.join("sshenc")).ok();
+        }
+    }
+
+    // Non-macOS Unix: kill the running agent via its pid file.
+    // macOS handled this above via LaunchAgent bootout.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let pid_path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".sshenc")
+            .join("agent.pid");
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                std::process::Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status()
+                    .ok();
+                // Brief pause so the agent can remove its own socket
+                // before we attempt to delete it below.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+    }
+
+    // All Unix: remove agent runtime files. Keys in ~/.sshenc/keys/
+    // are intentionally left intact.
+    #[cfg(unix)]
+    {
+        let sshenc_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".sshenc");
+        for name in &["agent.sock", "agent.pid"] {
+            std::fs::remove_file(sshenc_dir.join(name)).ok();
+        }
+        // LaunchAgent log files (macOS only — StandardOutPath /
+        // StandardErrorPath in the plist).
+        #[cfg(target_os = "macos")]
+        for name in &["agent.out.log", "agent.err.log"] {
+            std::fs::remove_file(sshenc_dir.join(name)).ok();
+        }
+        // Remove the directory only if it is now empty.
+        // This succeeds after a full `sshenc delete` pass; if keys
+        // remain it returns ENOTEMPTY, which we ignore.
+        std::fs::remove_dir(&sshenc_dir).ok();
     }
 
     Ok(())

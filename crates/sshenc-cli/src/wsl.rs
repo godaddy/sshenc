@@ -136,6 +136,15 @@ fi"#;
         } else {
             None
         },
+        // Always set regardless of dev/release mode so a dev-build
+        // `sshenc uninstall` still removes binaries installed by a
+        // prior release build.
+        linux_binaries_to_remove: vec![
+            "sshenc".to_string(),
+            "sshenc-agent".to_string(),
+            "sshenc-keygen".to_string(),
+            "gitenc".to_string(),
+        ],
     }
 }
 

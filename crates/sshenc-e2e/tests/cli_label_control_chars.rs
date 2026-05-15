@@ -1,11 +1,13 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Labels containing control characters (newline, tab, NUL via
-//! the OsStr layer) are rejected by `validate_label` before any
-//! keystore state is written. Existing tests cover slashes and
-//! path-traversal forms; this pins the orthogonal control-char
-//! axis.
+//! Labels containing control characters or non-ASCII characters
+//! (newline, tab, emoji) are rejected by `validate_label` before any
+//! keystore state is written.
+//!
+//! `validate_label` accepts only ASCII alphanumeric, hyphens, and
+//! underscores. Emoji encode as multi-byte UTF-8 sequences that
+//! contain non-ASCII bytes and thus fail that check.
 
 #![cfg(unix)]
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
@@ -65,6 +67,55 @@ fn keygen_rejects_label_with_control_chars() {
         assert!(
             !combined.contains("panicked at"),
             "keygen panicked on control-char label {bad:?}:\n{combined}"
+        );
+    }
+
+    // No partial keystore state.
+    let listed = run(env
+        .sshenc_cmd()
+        .expect("sshenc cmd")
+        .args(["list", "--json"]))
+    .expect("list");
+    assert!(listed.succeeded(), "list: {}", listed.stderr);
+    let parsed: serde_json::Value =
+        serde_json::from_str(listed.stdout.trim()).expect("list --json invalid JSON");
+    if let Some(arr) = parsed.as_array() {
+        assert!(arr.is_empty(), "list should be empty; got: {parsed}");
+    }
+}
+
+/// `sshenc keygen --label` with an emoji (non-ASCII, multi-byte UTF-8)
+/// is rejected cleanly. `validate_label` requires ASCII alphanumeric
+/// plus hyphens and underscores.
+#[test]
+#[ignore = "requires docker"]
+fn keygen_rejects_label_with_emoji() {
+    if skip_if_no_docker("keygen_rejects_label_with_emoji") {
+        return;
+    }
+    let mut env = SshencEnv::new().expect("env");
+    env.use_ephemeral_keys_dir().expect("ephemeral");
+
+    for bad in ["key-🔑", "🗝️-label", "mykey🙂"] {
+        let kg = run(env.sshenc_cmd().expect("sshenc cmd").args([
+            "keygen",
+            "--label",
+            bad,
+            "--auth-policy",
+            "none",
+            "--no-pub-file",
+        ]))
+        .expect("keygen");
+        assert!(
+            !kg.succeeded(),
+            "keygen with emoji label {bad:?} should fail; stdout:\n{}\nstderr:\n{}",
+            kg.stdout,
+            kg.stderr
+        );
+        let combined = format!("{}\n{}", kg.stdout, kg.stderr);
+        assert!(
+            !combined.contains("panicked at"),
+            "keygen panicked on emoji label {bad:?}:\n{combined}"
         );
     }
 

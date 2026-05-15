@@ -121,7 +121,7 @@ fn agent_handles_concurrent_sign_requests() {
     let pub_path = Arc::new(pub_path);
     let allowed = Arc::new(allowed);
 
-    const N: usize = 8;
+    const N: usize = 30;
     let mut handles = Vec::with_capacity(N);
     for i in 0..N {
         let env = Arc::clone(&env);
@@ -179,8 +179,8 @@ fn agent_handles_mixed_sign_and_list_concurrent() {
         .to_string();
     let key_body = Arc::new(key_body);
 
-    const SIGN_WORKERS: usize = 4;
-    const LIST_WORKERS: usize = 4;
+    const SIGN_WORKERS: usize = 15;
+    const LIST_WORKERS: usize = 15;
     let mut handles = Vec::with_capacity(SIGN_WORKERS + LIST_WORKERS);
 
     for i in 0..SIGN_WORKERS {

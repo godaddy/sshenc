@@ -25,10 +25,13 @@
 #![cfg(unix)]
 #![allow(clippy::panic, clippy::unwrap_used, clippy::print_stderr)]
 
-use sshenc_e2e::{docker_skip_reason, workspace_bin, SshencEnv};
+use sshenc_e2e::{
+    docker_skip_reason, run, shared_enclave_pubkey, workspace_bin, SshencEnv, SHARED_ENCLAVE_LABEL,
+};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn skip_if_no_docker(test_name: &str) -> bool {
@@ -164,6 +167,167 @@ fn agent_replaces_stale_socket_on_restart() {
     // Clean up the second instance so the test exits clean.
     send_signal(&second, "INT");
     let _ = wait_for_exit(second, Duration::from_secs(5));
+}
+
+/// SIGTERM while many `sshenc -Y sign` processes are active must not
+/// cause any client to hang indefinitely. Each in-flight or pending
+/// sign either completes (if the agent served it before shutdown) or
+/// gets a connection error — never a blocked wait with no progress.
+///
+/// This pins the graceful-shutdown contract: the tokio runtime must
+/// finish draining active connections within a bounded window after
+/// the SIGTERM handler fires.
+#[test]
+#[ignore = "requires docker"]
+fn agent_sigterm_while_sign_traffic_active_no_hang() {
+    if skip_if_no_docker("agent_sigterm_while_sign_traffic_active_no_hang") {
+        return;
+    }
+    let env = SshencEnv::new().expect("env");
+    let enclave = shared_enclave_pubkey(&env).expect("enclave");
+
+    // Spawn agent directly so we can hold the Child for signal delivery.
+    let agent_child = spawn_agent_foreground(&env);
+    wait_for_socket(&env.socket_path(), Duration::from_secs(10));
+
+    let pub_path = env.ssh_dir().join(format!("{SHARED_ENCLAVE_LABEL}.pub"));
+    std::fs::create_dir_all(env.ssh_dir()).expect("mkdir ssh dir");
+    std::fs::write(&pub_path, format!("{enclave}\n")).expect("write pub");
+
+    let env = Arc::new(env);
+    let pub_path = Arc::new(pub_path);
+
+    // Spawn N threads; each fires multiple sign requests in a tight
+    // loop so the agent is busy when SIGTERM arrives.
+    const N: usize = 8;
+    let (tx, rx) = std::sync::mpsc::channel::<usize>();
+    for i in 0..N {
+        let env = Arc::clone(&env);
+        let pub_path = Arc::clone(&pub_path);
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for j in 0..20 {
+                let data = env.home().join(format!("sigterm-sign-{i}-{j}.txt"));
+                std::fs::write(&data, format!("payload-{i}-{j}\n")).ok();
+                let mut cmd = env.sshenc_cmd().expect("sshenc cmd");
+                cmd.arg("-Y")
+                    .arg("sign")
+                    .arg("-n")
+                    .arg("git")
+                    .arg("-f")
+                    .arg(&*pub_path)
+                    .arg(&data);
+                drop(run(&mut cmd));
+            }
+            tx.send(i).ok();
+        });
+    }
+    drop(tx);
+
+    // Let threads get several requests in flight, then SIGTERM.
+    std::thread::sleep(Duration::from_millis(100));
+    send_signal(&agent_child, "TERM");
+    let _ = wait_for_exit(agent_child, Duration::from_secs(5));
+
+    // All threads must complete within 10 s of the agent exiting.
+    // Once the socket is gone, pending sshenc -Y sign processes will
+    // get connection errors and exit, unblocking the threads.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut finished = 0;
+    while finished < N {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(_) => finished += 1,
+            Err(_) => {
+                panic!("worker thread hung after agent SIGTERM (only {finished}/{N} finished)")
+            }
+        }
+    }
+}
+
+/// SIGTERM while `sshenc keygen` operations are in progress must
+/// leave the keystore in a consistent state: each key is either
+/// fully created (key + pub file both present, key visible in list)
+/// or fully absent (no pub file, not in list). No torn state.
+#[test]
+#[ignore = "requires docker"]
+fn agent_sigterm_during_keygen_leaves_consistent_keystore() {
+    if skip_if_no_docker("agent_sigterm_during_keygen_leaves_consistent_keystore") {
+        return;
+    }
+    use sshenc_e2e::extended_enabled;
+    use sshenc_e2e::software_mode;
+    if !extended_enabled() && !software_mode() {
+        eprintln!(
+            "skip agent_sigterm_during_keygen_leaves_consistent_keystore: \
+             needs to mint keys; set SSHENC_E2E_SOFTWARE=1 or SSHENC_E2E_EXTENDED=1"
+        );
+        return;
+    }
+
+    let mut env = SshencEnv::new().expect("env");
+    env.use_ephemeral_keys_dir().expect("ephemeral");
+    let agent_child = spawn_agent_foreground(&env);
+    wait_for_socket(&env.socket_path(), Duration::from_secs(10));
+
+    let env = Arc::new(env);
+
+    // Fire several keygen operations concurrently. Each targets a
+    // unique label so they don't interfere with each other.
+    const N: usize = 6;
+    let labels: Vec<String> = (0..N).map(|i| format!("sigterm-gen-{i}")).collect();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+
+    for label in &labels {
+        let env = Arc::clone(&env);
+        let label = label.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut cmd = env.sshenc_cmd().expect("sshenc cmd");
+            cmd.args(["keygen", "--label", &label, "--auth-policy", "none"]);
+            drop(run(&mut cmd));
+            tx.send(label).ok();
+        });
+    }
+    drop(tx);
+
+    // Give threads a moment to start, then SIGTERM the agent.
+    std::thread::sleep(Duration::from_millis(50));
+    send_signal(&agent_child, "TERM");
+    let _ = wait_for_exit(agent_child, Duration::from_secs(5));
+
+    // All keygen threads must complete (they'll get errors once agent exits).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut finished = 0;
+    while finished < N {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(_) => finished += 1,
+            Err(_) => panic!("keygen thread hung after agent SIGTERM ({finished}/{N} finished)"),
+        }
+    }
+
+    // Start a fresh agent to check keystore consistency.
+    let env = Arc::try_unwrap(env).expect("arc unwrap");
+    let mut env = env;
+    env.start_agent().expect("restart agent");
+
+    let listed = run(env
+        .sshenc_cmd()
+        .expect("sshenc cmd")
+        .args(["list", "--json"]))
+    .expect("list");
+    assert!(listed.succeeded(), "list: {}", listed.stderr);
+
+    let keys_dir = env.home().join(".sshenc").join("keys");
+    for label in &labels {
+        let key_in_list = listed.stdout.contains(label.as_str());
+        let pub_file = keys_dir.join(format!("{label}.pub"));
+        let pub_exists = pub_file.exists();
+        assert_eq!(
+            key_in_list,
+            pub_exists,
+            "key {label}: list says present={key_in_list} but pub file present={pub_exists} — torn state"
+        );
+    }
 }
 
 /// The agent must refuse to bind to a socket path where a

@@ -307,6 +307,104 @@ fn validate_binary_signature() -> Result<()> {
     Ok(())
 }
 
+/// Mitigation 1 + 2: detect "no window server session" at startup and either
+/// auto-relaunch via launchd (if the LaunchAgent plist exists) or emit a
+/// prominent warning so the user knows every sign will fail.
+///
+/// This runs before daemonize so we can exit cleanly and let launchd start
+/// the real agent with a proper GUI session.
+#[cfg(target_os = "macos")]
+#[allow(clippy::print_stderr, clippy::exit)]
+fn check_window_server_or_relaunch() {
+    // Already under launchd: XPC_SERVICE_NAME is set to our job label.
+    // Nothing to fix.
+    if std::env::var_os("XPC_SERVICE_NAME").is_some() {
+        return;
+    }
+
+    // Touch ID available → we have a window server session. The user may be
+    // running a secondary agent intentionally (custom socket, testing, etc.).
+    if enclaveapp_apple::touch_id_available() {
+        return;
+    }
+
+    // No window server session and not under launchd: Touch ID will fail on
+    // every sign. Try to fix by bootstrapping the LaunchAgent.
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            eprintln!(
+                "WARNING: sshenc-agent has no window server session; Touch ID \
+                 will fail on every sign. Could not find home directory."
+            );
+            return;
+        }
+    };
+    let plist = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join("com.godaddy.sshenc.agent.plist");
+
+    if !plist.exists() {
+        eprintln!(
+            "WARNING: sshenc-agent has no window server session; Touch ID will \
+             fail on every sign.\n\
+             Fix: run `sshenc install` to register the LaunchAgent."
+        );
+        return;
+    }
+
+    // Get the numeric UID for the launchctl domain (gui/<uid>).
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if uid.is_empty() {
+        eprintln!(
+            "WARNING: sshenc-agent has no window server session; Touch ID will \
+             fail on every sign.\n\
+             Fix: launchctl load {}",
+            plist.display()
+        );
+        return;
+    }
+
+    let domain = format!("gui/{uid}");
+    // Bootout first so a stale-loaded (but not running) job doesn't block bootstrap.
+    drop(
+        std::process::Command::new("launchctl")
+            .args(["bootout", &format!("{domain}/com.godaddy.sshenc.agent")])
+            .output(),
+    );
+
+    let bootstrap = std::process::Command::new("launchctl")
+        .args(["bootstrap", &domain])
+        .arg(&plist)
+        .output();
+
+    match bootstrap {
+        Ok(out) if out.status.success() => {
+            eprintln!(
+                "sshenc-agent: no window server session detected; \
+                 restarted via launchd for Touch ID access."
+            );
+            std::process::exit(0);
+        }
+        _ => {
+            eprintln!(
+                "WARNING: sshenc-agent has no window server session; Touch ID will \
+                 fail on every sign.\n\
+                 Fix: launchctl load {}",
+                plist.display()
+            );
+        }
+    }
+}
+
 fn main() -> Result<()> {
     enclaveapp_core::process::harden_process();
 
@@ -323,6 +421,13 @@ fn main() -> Result<()> {
         }
         return Err(error);
     }
+
+    // Mitigations 1 + 2: detect when the agent is running without a window
+    // server session (started outside launchd) so Touch ID will fail on
+    // every sign. On macOS only: check before daemonize so we can exit
+    // cleanly and let launchd start the real agent.
+    #[cfg(target_os = "macos")]
+    check_window_server_or_relaunch();
 
     // Read the old PID before daemonize() so the child inherits it across
     // fork(). The parent overwrites the PID file with the new child PID, so

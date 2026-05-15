@@ -208,6 +208,128 @@ pub fn install(agent_bin: &Path, socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Return the PID that launchd reports for the sshenc-agent job, or `None`
+/// if the job is not loaded / has no PID (stopped but registered).
+///
+/// Parses the first field of `launchctl list com.godaddy.sshenc.agent`
+/// output, which is the PID (or `-` when not running).
+pub fn launchd_agent_pid() -> Option<u32> {
+    let out = Command::new("launchctl")
+        .args(["list", LABEL])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Output format: "<PID>\t<LastExitStatus>\t<Label>"
+    // PID is `-` when the job is loaded but not running.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first = stdout.split_whitespace().next()?;
+    first.parse::<u32>().ok()
+}
+
+/// Return the PID of the process that has `socket_path` bound as a Unix
+/// socket, using `lsof -U`. Returns `None` if nothing is listening or
+/// if `lsof` is unavailable.
+pub fn socket_listener_pid(socket_path: &Path) -> Option<u32> {
+    let out = Command::new("lsof")
+        .args(["-U", "-F", "p"])
+        .arg(socket_path)
+        .output()
+        .ok()?;
+    // lsof -F p outputs lines like "p<pid>" for each process.
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(pid_str) = line.strip_prefix('p') {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+/// If an sshenc-agent is listening on `socket_path` but is NOT the
+/// launchd-managed instance, kill it and bootstrap the LaunchAgent so
+/// the proper launchd-managed agent takes over.
+///
+/// Returns `Ok(true)` if a rogue agent was replaced, `Ok(false)` if the
+/// listening agent is already the launchd-managed one (or nothing is
+/// listening), and `Err` on failure.
+pub fn replace_rogue_agent(socket_path: &Path) -> Result<bool> {
+    let listener_pid = match socket_listener_pid(socket_path) {
+        Some(p) => p,
+        None => return Ok(false), // nothing listening
+    };
+    let launchd_pid = launchd_agent_pid();
+
+    // If the listener IS the launchd-managed agent, nothing to do.
+    if launchd_pid == Some(listener_pid) {
+        return Ok(false);
+    }
+
+    // Rogue agent: kill it and bootstrap the launchd-managed one.
+    let plist = plist_path()?;
+    if !plist.exists() {
+        // No plist → can't replace; just report the mismatch.
+        return Err(anyhow!(
+            "sshenc-agent PID {} is running outside launchd but no LaunchAgent \
+             plist was found at {}. Run `sshenc install` to register the agent.",
+            listener_pid,
+            plist.display()
+        ));
+    }
+
+    // SIGTERM the rogue agent; give it up to 2s to exit, then SIGKILL.
+    drop(
+        Command::new("kill")
+            .args(["-TERM", &listener_pid.to_string()])
+            .output(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if !process_is_running(listener_pid) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            drop(
+                Command::new("kill")
+                    .args(["-KILL", &listener_pid.to_string()])
+                    .output(),
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Bootstrap the launchd-managed agent.
+    let domain = launchctl_domain()?;
+    bootout_if_loaded()?;
+    let bootstrap = Command::new("launchctl")
+        .args(["bootstrap", &domain])
+        .arg(&plist)
+        .output()
+        .context("launchctl bootstrap")?;
+    if !bootstrap.status.success() {
+        return Err(anyhow!(
+            "launchctl bootstrap failed after killing rogue agent: {}",
+            String::from_utf8_lossy(&bootstrap.stderr)
+        ));
+    }
+
+    Ok(true)
+}
+
+/// Returns true if a process with the given PID is still running.
+fn process_is_running(pid: u32) -> bool {
+    // `kill -0` sends no signal but checks if the process exists and
+    // we have permission to signal it.
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Bootout the LaunchAgent and remove its plist. Idempotent: a
 /// missing plist or already-unloaded service is treated as success.
 pub fn uninstall() -> Result<()> {

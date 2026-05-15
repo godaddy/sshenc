@@ -1,6 +1,6 @@
 # Design: Window Server / Touch ID Availability Mitigations
 
-**Status: In Progress**
+**Status: Complete** — all four mitigations merged (libenclaveapp #151, sshenc #229)
 
 ## Problem
 
@@ -173,8 +173,8 @@ process is on the socket but doesn't match that PID, it's rogue.
       if replacement occurred
 - [x] Called from `ensure_agent_running` in `commands.rs` (macOS only, when
       agent is already running); logs replacement, returns `AgentStartStatus::Started`
-- [ ] Call from `install()` in `commands.rs` similarly (deferred — install
-      already calls `ensure_agent_running` indirectly)
+- [x] `install()` in `commands.rs` calls `ensure_agent_running` indirectly —
+      rogue-agent replacement fires on install as well
 
 ---
 

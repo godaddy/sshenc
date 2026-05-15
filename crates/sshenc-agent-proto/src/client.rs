@@ -670,10 +670,11 @@ mod tests {
 
     fn unique_socket_path(tag: &str) -> PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir().join(format!(
-            "sshenc-cli-agentproxy-{tag}-{}-{id}.sock",
-            std::process::id()
-        ))
+        // Use /tmp directly: std::env::temp_dir() on macOS CI runners can
+        // expand to /private/var/folders/.../T/ (~59 chars), pushing the
+        // full path past sockaddr_un's 104-byte SUN_PATH limit.
+        let short: String = tag.chars().take(8).collect();
+        Path::new("/tmp").join(format!("se-{short}-{}-{id}.sock", std::process::id()))
     }
 
     /// Spawn a minimal test agent on a fresh Unix socket. The agent
@@ -735,10 +736,7 @@ mod tests {
 
     #[test]
     fn returns_none_when_socket_does_not_exist() {
-        let bogus = std::env::temp_dir().join(format!(
-            "sshenc-cli-agentproxy-nope-{}.sock",
-            std::process::id()
-        ));
+        let bogus = Path::new("/tmp").join(format!("se-nope-{}.sock", std::process::id()));
         drop(std::fs::remove_file(&bogus));
         assert!(try_sign_via_socket(&bogus, &[0x01], &[0x02]).is_none());
     }
@@ -920,10 +918,7 @@ mod tests {
 
     #[test]
     fn delete_falls_back_when_socket_missing() {
-        let bogus = std::env::temp_dir().join(format!(
-            "sshenc-cli-agentproxy-del-nope-{}.sock",
-            std::process::id()
-        ));
+        let bogus = Path::new("/tmp").join(format!("se-del-nope-{}.sock", std::process::id()));
         drop(std::fs::remove_file(&bogus));
         assert!(try_delete_via_socket(&bogus, "any").is_none());
     }
@@ -1035,10 +1030,7 @@ mod tests {
 
     #[test]
     fn generate_falls_back_when_socket_missing() {
-        let bogus = std::env::temp_dir().join(format!(
-            "sshenc-cli-agentproxy-gen-nope-{}.sock",
-            std::process::id()
-        ));
+        let bogus = Path::new("/tmp").join(format!("se-gen-nope-{}.sock", std::process::id()));
         drop(std::fs::remove_file(&bogus));
         assert!(try_generate_via_socket(&bogus, "x", None, 0, 0, None).is_none());
     }

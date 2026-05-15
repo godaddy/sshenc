@@ -525,9 +525,8 @@ label = "gl"
 
     #[test]
     fn test_config_load_returns_error_on_invalid_toml() {
-        let dir = std::env::temp_dir().join(format!(
-            "sshenc-test-config-invalid-{}", std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sshenc-test-config-invalid-{}", std::process::id()));
         drop(std::fs::remove_dir_all(&dir));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
@@ -540,7 +539,8 @@ label = "gl"
     #[test]
     fn test_config_load_returns_error_on_field_type_mismatch() {
         let dir = std::env::temp_dir().join(format!(
-            "sshenc-test-config-mismatch-{}", std::process::id()
+            "sshenc-test-config-mismatch-{}",
+            std::process::id()
         ));
         drop(std::fs::remove_dir_all(&dir));
         std::fs::create_dir_all(&dir).unwrap();
@@ -548,7 +548,10 @@ label = "gl"
         // allowed_labels must be an array of strings, not an integer.
         std::fs::write(&path, b"allowed_labels = 42\n").unwrap();
         let result = Config::load(&path);
-        assert!(result.is_err(), "type-mismatched TOML field must return an error");
+        assert!(
+            result.is_err(),
+            "type-mismatched TOML field must return an error"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -556,9 +559,8 @@ label = "gl"
     fn test_config_load_empty_file_uses_defaults() {
         // An empty TOML file is valid; all fields have serde defaults so
         // load must succeed and produce the same result as Config::default().
-        let dir = std::env::temp_dir().join(format!(
-            "sshenc-test-config-empty-{}", std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sshenc-test-config-empty-{}", std::process::id()));
         drop(std::fs::remove_dir_all(&dir));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
@@ -583,9 +585,8 @@ label = "gl"
         let _config: Config = toml::from_str(toml).unwrap();
         // expand_paths is called by load() — here we call it via load() on a
         // temp file so the tilde expansion code path is exercised.
-        let dir = std::env::temp_dir().join(format!(
-            "sshenc-test-config-tilde-{}", std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sshenc-test-config-tilde-{}", std::process::id()));
         drop(std::fs::remove_dir_all(&dir));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");

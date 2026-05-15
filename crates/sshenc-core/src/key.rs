@@ -613,14 +613,24 @@ mod tests {
     #[test]
     fn test_effective_presence_mode_explicit_cached() {
         let label = KeyLabel::new("k").unwrap();
-        let meta = KeyMetadata::with_presence_mode(label, AccessPolicy::Any, Some(PresenceMode::Cached), None);
+        let meta = KeyMetadata::with_presence_mode(
+            label,
+            AccessPolicy::Any,
+            Some(PresenceMode::Cached),
+            None,
+        );
         assert_eq!(meta.effective_presence_mode(), PresenceMode::Cached);
     }
 
     #[test]
     fn test_effective_presence_mode_explicit_none() {
         let label = KeyLabel::new("k").unwrap();
-        let meta = KeyMetadata::with_presence_mode(label, AccessPolicy::None, Some(PresenceMode::None), None);
+        let meta = KeyMetadata::with_presence_mode(
+            label,
+            AccessPolicy::None,
+            Some(PresenceMode::None),
+            None,
+        );
         assert_eq!(meta.effective_presence_mode(), PresenceMode::None);
         assert!(!meta.requires_user_presence());
     }
@@ -630,7 +640,12 @@ mod tests {
         // When presence_mode is None, effective_presence_mode falls back to
         // migration_default(access_policy). Verify it doesn't panic and returns
         // a value consistent with the access policy.
-        for policy in [AccessPolicy::None, AccessPolicy::Any, AccessPolicy::BiometricOnly, AccessPolicy::PasswordOnly] {
+        for policy in [
+            AccessPolicy::None,
+            AccessPolicy::Any,
+            AccessPolicy::BiometricOnly,
+            AccessPolicy::PasswordOnly,
+        ] {
             let label = KeyLabel::new("k").unwrap();
             let meta = KeyMetadata::new(label, policy, None);
             // Must not panic; value is whatever migration_default dictates.

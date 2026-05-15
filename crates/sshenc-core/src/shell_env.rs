@@ -882,11 +882,18 @@ mod tests {
 
         // Regardless of which thread won the race, the rc file must be valid:
         // exactly one BEGIN/END sshenc block — no partial write, no double block.
-        let contents = std::fs::read_to_string(&rc).expect("rc file must exist after concurrent writes");
+        let contents =
+            std::fs::read_to_string(&rc).expect("rc file must exist after concurrent writes");
         let begin_count = contents.matches("BEGIN sshenc").count();
         let end_count = contents.matches("END sshenc").count();
-        assert_eq!(begin_count, 1, "expected exactly one BEGIN sshenc block, found {begin_count};\n{contents}");
-        assert_eq!(end_count, 1, "expected exactly one END sshenc block, found {end_count};\n{contents}");
+        assert_eq!(
+            begin_count, 1,
+            "expected exactly one BEGIN sshenc block, found {begin_count};\n{contents}"
+        );
+        assert_eq!(
+            end_count, 1,
+            "expected exactly one END sshenc block, found {end_count};\n{contents}"
+        );
 
         cleanup(&dir);
     }

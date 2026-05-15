@@ -1102,7 +1102,10 @@ mod tests {
         assert_eq!(payload[0], SSH_AGENTC_SSHENC_RENAME_KEY);
         let parsed = parse_request(&payload).unwrap();
         match parsed {
-            AgentRequest::RenameKey { old_label, new_label } => {
+            AgentRequest::RenameKey {
+                old_label,
+                new_label,
+            } => {
                 assert_eq!(old_label, b"old-name");
                 assert_eq!(new_label, b"new-name");
             }
@@ -1120,7 +1123,10 @@ mod tests {
         };
         let parsed = parse_request(&serialize_request(&original)).unwrap();
         match parsed {
-            AgentRequest::RenameKey { old_label, new_label } => {
+            AgentRequest::RenameKey {
+                old_label,
+                new_label,
+            } => {
                 assert_eq!(old_label, old);
                 assert_eq!(new_label, new);
             }

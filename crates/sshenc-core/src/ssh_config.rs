@@ -591,15 +591,24 @@ mod tests {
 
         // is_installed reads with read_to_string; must return Err, not panic.
         let r = is_installed(&config_path);
-        assert!(r.is_err(), "is_installed must return Err for non-UTF-8 file");
+        assert!(
+            r.is_err(),
+            "is_installed must return Err for non-UTF-8 file"
+        );
 
         // install_block also reads the file; must return Err, not panic.
         let r = install_block(&config_path, &socket, None);
-        assert!(r.is_err(), "install_block must return Err for non-UTF-8 file");
+        assert!(
+            r.is_err(),
+            "install_block must return Err for non-UTF-8 file"
+        );
 
         // uninstall_block likewise.
         let r = uninstall_block(&config_path);
-        assert!(r.is_err(), "uninstall_block must return Err for non-UTF-8 file");
+        assert!(
+            r.is_err(),
+            "uninstall_block must return Err for non-UTF-8 file"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

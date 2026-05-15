@@ -666,14 +666,14 @@ mod tests {
     fn verify_agent_responsive_returns_ok_when_agent_responds() {
         let sock_path = unique_socket_path("responsive");
         // Fake agent responds to RequestIdentities with an empty list.
-        let handle = spawn_fake_agent(
-            &sock_path,
-            vec![AgentResponse::IdentitiesAnswer(vec![])],
-        );
+        let handle = spawn_fake_agent(&sock_path, vec![AgentResponse::IdentitiesAnswer(vec![])]);
         let result = verify_agent_responsive(&sock_path);
         drop(handle.join().ok());
         drop(std::fs::remove_file(&sock_path));
-        assert!(result.is_ok(), "responsive agent must return Ok: {result:?}");
+        assert!(
+            result.is_ok(),
+            "responsive agent must return Ok: {result:?}"
+        );
     }
 
     #[test]

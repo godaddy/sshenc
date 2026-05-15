@@ -307,6 +307,9 @@ mod tests {
             ".bak file must not be overwritten on a repeat run"
         );
         let updated = fs::read_to_string(&path).unwrap();
-        assert!(updated.contains("NEWBLOB"), "allowed_signers must be updated");
+        assert!(
+            updated.contains("NEWBLOB"),
+            "allowed_signers must be updated"
+        );
     }
 }

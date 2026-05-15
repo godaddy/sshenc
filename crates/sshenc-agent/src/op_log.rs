@@ -1090,8 +1090,14 @@ mod tests {
         let lines = read_lines(&log);
         assert_eq!(lines.len(), 1);
         let reason = &lines[0]["reason"];
-        assert_eq!(reason, "git commit signing", "reason field should round-trip through JSON");
-        assert!(!reason.is_null(), "reason should not be null when Some was passed");
+        assert_eq!(
+            reason, "git commit signing",
+            "reason field should round-trip through JSON"
+        );
+        assert!(
+            !reason.is_null(),
+            "reason should not be null when Some was passed"
+        );
         cleanup(&dir);
     }
 

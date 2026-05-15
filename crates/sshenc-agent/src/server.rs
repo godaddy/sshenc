@@ -3065,8 +3065,7 @@ mod tests {
 
         let key_blob = {
             let keys = inner.list().unwrap();
-            let pubkey =
-                SshPublicKey::from_sec1_bytes(&keys[0].public_key_bytes, None).unwrap();
+            let pubkey = SshPublicKey::from_sec1_bytes(&keys[0].public_key_bytes, None).unwrap();
             pubkey.to_wire_format()
         };
 

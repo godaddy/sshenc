@@ -968,7 +968,11 @@ mod tests {
 
     #[test]
     fn presence_mode_wire_round_trip_all_variants() {
-        for mode in [PresenceMode::Cached, PresenceMode::Strict, PresenceMode::None] {
+        for mode in [
+            PresenceMode::Cached,
+            PresenceMode::Strict,
+            PresenceMode::None,
+        ] {
             let byte = presence_mode_to_wire(mode);
             let decoded = presence_mode_from_wire(byte);
             assert_eq!(
@@ -991,7 +995,11 @@ mod tests {
 
     #[test]
     fn presence_mode_app_specific_round_trip_all_variants() {
-        for mode in [PresenceMode::Cached, PresenceMode::Strict, PresenceMode::None] {
+        for mode in [
+            PresenceMode::Cached,
+            PresenceMode::Strict,
+            PresenceMode::None,
+        ] {
             let s = presence_mode_to_app_specific_str(mode);
             let v = serde_json::json!({ "presence_mode": s });
             let decoded = presence_mode_from_app_specific(&v);
@@ -1043,7 +1051,7 @@ mod tests {
     #[cfg(unix)]
     mod mock_socket {
         use super::*;
-        use sshenc_agent_proto::message::{AgentResponse, Identity, serialize_response};
+        use sshenc_agent_proto::message::{serialize_response, AgentResponse, Identity};
         use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;
         use std::path::Path;
@@ -1062,10 +1070,8 @@ mod tests {
 
         fn proxy_dirs(tag: &str) -> (PathBuf, PathBuf) {
             let id = SOCK_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let base = std::env::temp_dir().join(format!(
-                "sshenc-proxy-ms-{tag}-{}-{id}",
-                std::process::id()
-            ));
+            let base = std::env::temp_dir()
+                .join(format!("sshenc-proxy-ms-{tag}-{}-{id}", std::process::id()));
             let keys = base.join("keys");
             let pubs = base.join("pub");
             std::fs::create_dir_all(&keys).unwrap();
@@ -1251,17 +1257,23 @@ mod tests {
             let agent_h = spawn_fake_agent(
                 &sock,
                 vec![
-                    vec![],                                    // Conn 0: is_socket_ready
+                    vec![],                                        // Conn 0: is_socket_ready
                     vec![AgentResponse::IdentitiesAnswer(vec![])], // Conn 1: verify_agent_responsive
-                    vec![AgentResponse::Success],              // Conn 2: delete
+                    vec![AgentResponse::Success],                  // Conn 2: delete
                 ],
             );
 
             backend.delete("del-me").expect("delete via mock socket");
             drop(agent_h.join());
 
-            assert!(!keys.join("del-me.pub").exists(), "pub cache must be removed after delete");
-            assert!(!keys.join("del-me.meta").exists(), "meta cache must be removed after delete");
+            assert!(
+                !keys.join("del-me.pub").exists(),
+                "pub cache must be removed after delete"
+            );
+            assert!(
+                !keys.join("del-me.meta").exists(),
+                "meta cache must be removed after delete"
+            );
 
             drop(std::fs::remove_file(&sock));
             std::fs::remove_dir_all(keys.parent().unwrap()).unwrap();
@@ -1295,11 +1307,19 @@ mod tests {
                 ],
             );
 
-            backend.rename("ren-src", "ren-dst").expect("rename via mock socket");
+            backend
+                .rename("ren-src", "ren-dst")
+                .expect("rename via mock socket");
             drop(agent_h.join());
 
-            assert!(!keys.join("ren-src.pub").exists(), "old pub cache must be gone");
-            assert!(keys.join("ren-dst.pub").exists(), "new pub cache must exist");
+            assert!(
+                !keys.join("ren-src.pub").exists(),
+                "old pub cache must be gone"
+            );
+            assert!(
+                keys.join("ren-dst.pub").exists(),
+                "new pub cache must exist"
+            );
             let meta = crate::compat::load_sshenc_meta(&keys, "ren-dst").unwrap();
             assert_eq!(meta.label, "ren-dst", "meta label must reflect rename");
 
@@ -1335,10 +1355,16 @@ mod tests {
             let r: Vec<u8> = (1_u8..=32).collect();
             let s: Vec<u8> = (33_u8..=64).collect();
             let mut inner = Vec::new();
-            inner.push(0x02_u8); inner.push(32_u8); inner.extend_from_slice(&r);
-            inner.push(0x02_u8); inner.push(32_u8); inner.extend_from_slice(&s);
+            inner.push(0x02_u8);
+            inner.push(32_u8);
+            inner.extend_from_slice(&r);
+            inner.push(0x02_u8);
+            inner.push(32_u8);
+            inner.extend_from_slice(&s);
             let mut der_sig = Vec::new();
-            der_sig.push(0x30_u8); der_sig.push(inner.len() as u8); der_sig.extend_from_slice(&inner);
+            der_sig.push(0x30_u8);
+            der_sig.push(inner.len() as u8);
+            der_sig.extend_from_slice(&inner);
             let ssh_sig = der_to_ssh_signature(&der_sig).unwrap();
 
             // Conn 2 (try_sign_via_socket) handles two exchanges on the same connection:
@@ -1346,9 +1372,10 @@ mod tests {
             let agent_h = spawn_fake_agent(
                 &sock,
                 vec![
-                    vec![],                                    // Conn 0: is_socket_ready
+                    vec![],                                        // Conn 0: is_socket_ready
                     vec![AgentResponse::IdentitiesAnswer(vec![])], // Conn 1: verify_agent_responsive
-                    vec![                                      // Conn 2: agent_has_identity + sign
+                    vec![
+                        // Conn 2: agent_has_identity + sign
                         AgentResponse::IdentitiesAnswer(vec![Identity {
                             key_blob: wire_blob,
                             comment: "sign-me".into(),

@@ -98,7 +98,10 @@ fn get_after_generate_returns_same_key_info() {
     let b = backend();
     let generated = b.generate(&opts("fetch-me")).unwrap();
     let fetched = b.get("fetch-me").unwrap();
-    assert_eq!(fetched.metadata.label.as_str(), generated.metadata.label.as_str());
+    assert_eq!(
+        fetched.metadata.label.as_str(),
+        generated.metadata.label.as_str()
+    );
     assert_eq!(fetched.public_key_bytes, generated.public_key_bytes);
 }
 

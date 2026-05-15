@@ -973,7 +973,10 @@ mod tests {
         let mut buf = u32::MAX.to_be_bytes().to_vec();
         buf.extend_from_slice(b"tiny");
         let result = read_ssh_string(&buf);
-        assert!(result.is_err(), "claimed length exceeding buffer must error");
+        assert!(
+            result.is_err(),
+            "claimed length exceeding buffer must error"
+        );
     }
 
     // --- write_mpint all-high-bits needs leading zero ---

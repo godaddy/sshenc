@@ -176,7 +176,10 @@ mod tests {
         let k2 = sample_sk_key("ssh:other-rp-id.example.com");
         let (sha1, _) = sk_fingerprints(&k1);
         let (sha2, _) = sk_fingerprints(&k2);
-        assert_ne!(sha1, sha2, "different application strings must produce different fingerprints");
+        assert_ne!(
+            sha1, sha2,
+            "different application strings must produce different fingerprints"
+        );
     }
 
     #[test]

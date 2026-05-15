@@ -2614,8 +2614,8 @@ mod tests {
     #[cfg(not(windows))]
     use enclaveapp_core::KeyType;
     use sshenc_test_support::MockKeyBackend;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::sync::Mutex;
 
     /// Backend wrapper that always fails `generate()` with a non-duplicate
@@ -2657,9 +2657,7 @@ mod tests {
     impl KeyBackend for FailAfterDeleteBackend {
         fn generate(&self, opts: &KeyGenOptions) -> sshenc_core::error::Result<KeyInfo> {
             if self.deleted.load(Ordering::SeqCst) {
-                return Err(SshencError::Other(
-                    "injected failure after delete".into(),
-                ));
+                return Err(SshencError::Other("injected failure after delete".into()));
             }
             self.inner.generate(opts)
         }
@@ -4117,7 +4115,10 @@ HKEY_CURRENT_USER\Environment
             false,
         );
 
-        assert!(result.is_err(), "keygen must return an error when generate() fails");
+        assert!(
+            result.is_err(),
+            "keygen must return an error when generate() fails"
+        );
         let after = inner
             .get("intact-key")
             .expect("key must still exist after a non-duplicate generate failure");

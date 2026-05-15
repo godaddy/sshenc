@@ -74,6 +74,10 @@ automatically. Uninstalling via Windows Settings runs `sshenc uninstall`.
 
 ### Windows — Scoop
 
+> **Enterprise AV note:** Some corporate AV products flag Scoop's shim
+> executables. If that affects you, use the MSI installer above instead —
+> it installs the real binaries directly with no shims.
+
 ```powershell
 scoop bucket add sshenc https://github.com/godaddy/scoop-sshenc
 scoop install sshenc

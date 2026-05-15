@@ -165,6 +165,32 @@ fn ensure_agent_running(
     socket_path: &Path,
 ) -> Result<AgentStartStatus> {
     let agent_bin = preflight_agent_start(launcher, socket_path)?;
+
+    // Mitigation 4 (macOS): if an agent is already running but is NOT the
+    // launchd-managed instance, kill it and bootstrap the launchd one so
+    // Touch ID works. This catches the common case where the user has a
+    // shell-started agent running and then runs `sshenc sign` or installs.
+    #[cfg(target_os = "macos")]
+    if agent_bin.is_none() {
+        match crate::launchagent::replace_rogue_agent(socket_path) {
+            Ok(true) => {
+                tracing::info!(
+                    "replaced shell-started sshenc-agent with launchd-managed \
+                     instance for Touch ID access"
+                );
+                // The launchd agent needs a moment to come up; the caller's
+                // ensure_agent_ready / verify_agent_responsive handles the wait.
+                return Ok(AgentStartStatus::Started);
+            }
+            Ok(false) => {} // already launchd-managed or nothing listening
+            Err(e) => {
+                // Log but don't fail the operation: the existing agent may
+                // still be able to serve requests (e.g. keys without user-presence).
+                tracing::warn!("rogue-agent check: {e}");
+            }
+        }
+    }
+
     start_agent_with_binary(launcher, socket_path, agent_bin.as_deref())
 }
 

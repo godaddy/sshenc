@@ -259,8 +259,7 @@ pub fn try_sign_via_socket_result(
         }
     }
 
-    request_signature(&mut stream, pubkey_blob, data)
-        .ok_or(SignAttemptError::SignRefused)
+    request_signature(&mut stream, pubkey_blob, data).ok_or(SignAttemptError::SignRefused)
 }
 
 /// Sign `data` via the agent. Returns `None` on any failure; prefer

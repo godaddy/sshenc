@@ -55,6 +55,39 @@ const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 // If the user wants to cancel, they can Ctrl+C the git command.
 const AGENT_SIGN_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// Reason a `try_sign_via_socket_result` call did not produce a signature.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SignAttemptError {
+    /// Agent has no identity matching the supplied public-key blob.
+    IdentityNotFound,
+    /// Agent found the identity but the sign operation failed (biometric
+    /// cancelled, keychain denied, backend error, etc.).  Check agent logs
+    /// for the specific cause.
+    SignRefused,
+    /// Could not connect to or communicate with the agent.
+    AgentUnreachable,
+}
+
+impl std::fmt::Display for SignAttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignAttemptError::IdentityNotFound => {
+                write!(f, "agent has no matching identity for this key")
+            }
+            SignAttemptError::SignRefused => {
+                write!(
+                    f,
+                    "agent refused sign request (keychain/biometric failure or \
+                     backend error); check agent logs"
+                )
+            }
+            SignAttemptError::AgentUnreachable => {
+                write!(f, "could not connect to or communicate with the agent")
+            }
+        }
+    }
+}
+
 /// Platform-native connected stream to a running `sshenc-agent`.
 /// Unix: a `UnixStream`. Windows: a `PipeStream` wrapping a named-
 /// pipe `HANDLE`. Both implement [`Read`] + [`Write`] so the framing
@@ -190,7 +223,15 @@ pub fn try_sign_via_agent(pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
     try_sign_via_socket(&sock, pubkey_blob, data)
 }
 
-pub fn try_sign_via_socket(sock_path: &Path, pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+/// Sign `data` via the agent at `sock_path`, returning `Ok(signature)` on
+/// success or a [`SignAttemptError`] that distinguishes why the attempt failed.
+/// Prefer this over [`try_sign_via_socket`] when the caller wants to surface
+/// a specific error message rather than a generic `None`.
+pub fn try_sign_via_socket_result(
+    sock_path: &Path,
+    pubkey_blob: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>, SignAttemptError> {
     tracing::debug!(
         socket = %sock_path.display(),
         blob_len = pubkey_blob.len(),
@@ -198,14 +239,11 @@ pub fn try_sign_via_socket(sock_path: &Path, pubkey_blob: &[u8], data: &[u8]) ->
         "try_sign_via_socket: starting sign request"
     );
 
-    // Use the longer timeout for sign operations since they require user interaction
-    let mut stream = match connect_agent_with_timeout(sock_path, AGENT_SIGN_TIMEOUT) {
-        Some(s) => s,
-        None => {
+    let mut stream = connect_agent_with_timeout(sock_path, AGENT_SIGN_TIMEOUT)
+        .ok_or_else(|| {
             tracing::warn!(socket = %sock_path.display(), "try_sign_via_socket: failed to connect to agent");
-            return None;
-        }
-    };
+            SignAttemptError::AgentUnreachable
+        })?;
 
     match agent_has_identity(&mut stream, pubkey_blob) {
         Some(true) => {
@@ -213,15 +251,22 @@ pub fn try_sign_via_socket(sock_path: &Path, pubkey_blob: &[u8], data: &[u8]) ->
         }
         Some(false) => {
             tracing::warn!("try_sign_via_socket: no matching identity in agent");
-            return None;
+            return Err(SignAttemptError::IdentityNotFound);
         }
         None => {
             tracing::warn!("try_sign_via_socket: failed to check identities");
-            return None;
+            return Err(SignAttemptError::AgentUnreachable);
         }
     }
 
     request_signature(&mut stream, pubkey_blob, data)
+        .ok_or(SignAttemptError::SignRefused)
+}
+
+/// Sign `data` via the agent. Returns `None` on any failure; prefer
+/// [`try_sign_via_socket_result`] when distinct error reasons matter.
+pub fn try_sign_via_socket(sock_path: &Path, pubkey_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    try_sign_via_socket_result(sock_path, pubkey_blob, data).ok()
 }
 
 #[must_use]
@@ -997,5 +1042,100 @@ mod tests {
         ));
         drop(std::fs::remove_file(&bogus));
         assert!(try_generate_via_socket(&bogus, "x", None, 0, 0, None).is_none());
+    }
+
+    // ---- try_sign_via_socket_result: error discrimination ----
+
+    #[test]
+    fn result_is_unreachable_when_socket_missing() {
+        let bogus = unique_socket_path("result-nope");
+        drop(std::fs::remove_file(&bogus));
+        assert_eq!(
+            try_sign_via_socket_result(&bogus, &[0x01], &[0x02]),
+            Err(SignAttemptError::AgentUnreachable)
+        );
+    }
+
+    #[test]
+    fn result_is_identity_not_found_when_blob_not_in_agent() {
+        let target = b"want-this".to_vec();
+        let other = b"some-other-key".to_vec();
+        let sock_path = unique_socket_path("result-nomatch");
+
+        let handle = spawn_fake_agent(
+            &sock_path,
+            vec![AgentResponse::IdentitiesAnswer(vec![Identity {
+                key_blob: other,
+                comment: "other".into(),
+            }])],
+        );
+
+        let got = try_sign_via_socket_result(&sock_path, &target, b"data");
+        drop(handle.join().ok());
+        drop(std::fs::remove_file(&sock_path));
+
+        assert_eq!(got, Err(SignAttemptError::IdentityNotFound));
+    }
+
+    #[test]
+    fn result_is_sign_refused_when_agent_returns_failure() {
+        let pubkey_blob = b"target".to_vec();
+        let sock_path = unique_socket_path("result-signfail");
+
+        let handle = spawn_fake_agent(
+            &sock_path,
+            vec![
+                AgentResponse::IdentitiesAnswer(vec![Identity {
+                    key_blob: pubkey_blob.clone(),
+                    comment: "t".into(),
+                }]),
+                AgentResponse::Failure,
+            ],
+        );
+
+        let got = try_sign_via_socket_result(&sock_path, &pubkey_blob, b"data");
+        drop(handle.join().ok());
+        drop(std::fs::remove_file(&sock_path));
+
+        assert_eq!(got, Err(SignAttemptError::SignRefused));
+    }
+
+    #[test]
+    fn result_ok_when_agent_signs_successfully() {
+        let pubkey_blob = b"target".to_vec();
+        let signature_blob = b"ssh-sig".to_vec();
+        let sock_path = unique_socket_path("result-ok");
+
+        let handle = spawn_fake_agent(
+            &sock_path,
+            vec![
+                AgentResponse::IdentitiesAnswer(vec![Identity {
+                    key_blob: pubkey_blob.clone(),
+                    comment: "t".into(),
+                }]),
+                AgentResponse::SignResponse {
+                    signature_blob: signature_blob.clone(),
+                },
+            ],
+        );
+
+        let got = try_sign_via_socket_result(&sock_path, &pubkey_blob, b"data");
+        drop(handle.join().ok());
+        drop(std::fs::remove_file(&sock_path));
+
+        assert_eq!(got, Ok(signature_blob));
+    }
+
+    #[test]
+    fn sign_attempt_error_display_messages_are_informative() {
+        assert!(SignAttemptError::IdentityNotFound
+            .to_string()
+            .contains("identity"));
+        assert!(SignAttemptError::SignRefused
+            .to_string()
+            .contains("refused"));
+        assert!(SignAttemptError::AgentUnreachable
+            .to_string()
+            .contains("agent"));
     }
 }

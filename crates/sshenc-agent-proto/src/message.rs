@@ -1089,4 +1089,108 @@ mod tests {
         let err = parse_request(&payload).unwrap_err();
         drop(err);
     }
+
+    // --- sshenc RenameKey extension ---
+
+    #[test]
+    fn roundtrip_rename_key_request() {
+        let original = AgentRequest::RenameKey {
+            old_label: b"old-name".to_vec(),
+            new_label: b"new-name".to_vec(),
+        };
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_RENAME_KEY);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::RenameKey { old_label, new_label } => {
+                assert_eq!(old_label, b"old-name");
+                assert_eq!(new_label, b"new-name");
+            }
+            other => panic!("expected RenameKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_key_unicode_labels_roundtrip() {
+        let old = "鍵-旧".as_bytes().to_vec();
+        let new = "鍵-新".as_bytes().to_vec();
+        let original = AgentRequest::RenameKey {
+            old_label: old.clone(),
+            new_label: new.clone(),
+        };
+        let parsed = parse_request(&serialize_request(&original)).unwrap();
+        match parsed {
+            AgentRequest::RenameKey { old_label, new_label } => {
+                assert_eq!(old_label, old);
+                assert_eq!(new_label, new);
+            }
+            other => panic!("expected RenameKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_rename_key_missing_new_label() {
+        // Type byte + old_label string but no new_label.
+        let mut payload = vec![SSH_AGENTC_SSHENC_RENAME_KEY];
+        wire::write_string(&mut payload, b"old");
+        // No new_label
+        assert!(parse_request(&payload).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_truncated_rename_key_request() {
+        // Just the type byte.
+        let payload = vec![SSH_AGENTC_SSHENC_RENAME_KEY];
+        assert!(parse_request(&payload).is_err());
+    }
+
+    // --- sshenc MigrateMeta extension ---
+
+    #[test]
+    fn roundtrip_migrate_meta_request() {
+        let original = AgentRequest::MigrateMeta {
+            label: b"my-key".to_vec(),
+        };
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_MIGRATE_META);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::MigrateMeta { label } => assert_eq!(label, b"my-key"),
+            other => panic!("expected MigrateMeta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_truncated_migrate_meta_request() {
+        let payload = vec![SSH_AGENTC_SSHENC_MIGRATE_META];
+        assert!(parse_request(&payload).is_err());
+    }
+
+    // --- sshenc CheckMigrationMarker / SetMigrationMarker ---
+
+    #[test]
+    fn roundtrip_check_migration_marker_request() {
+        let original = AgentRequest::CheckMigrationMarker;
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER);
+        assert_eq!(payload.len(), 1, "CheckMigrationMarker must have no body");
+        let parsed = parse_request(&payload).unwrap();
+        assert!(
+            matches!(parsed, AgentRequest::CheckMigrationMarker),
+            "got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn roundtrip_set_migration_marker_request() {
+        let original = AgentRequest::SetMigrationMarker;
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER);
+        assert_eq!(payload.len(), 1, "SetMigrationMarker must have no body");
+        let parsed = parse_request(&payload).unwrap();
+        assert!(
+            matches!(parsed, AgentRequest::SetMigrationMarker),
+            "got {parsed:?}"
+        );
+    }
 }

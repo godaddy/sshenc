@@ -51,5 +51,8 @@ enclaveapp-apple = { workspace = true, features = ["signing"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 enclaveapp-keyring = { workspace = true, features = ["signing", "keyring-storage"] }
 
+[dev-dependencies]
+sshenc-test-support = { workspace = true }
+
 [lints]
 workspace = true

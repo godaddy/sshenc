@@ -300,4 +300,54 @@ mod tests {
         let result = der_to_ssh_signature(&truncated);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_der_to_ssh_signature_rejects_extra_trailing_bytes() {
+        let r = vec![0x01_u8; 32];
+        let s = vec![0x02_u8; 32];
+        let mut der = make_der_signature(&r, &s);
+        // Append a spurious byte after the sequence — p256 crate must reject it.
+        der.push(0xFF);
+        assert!(
+            der_to_ssh_signature(&der).is_err(),
+            "DER with trailing bytes must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_der_to_ssh_signature_r_equals_one() {
+        // r = 1 (single byte) is a valid minimal r value; the output SSH
+        // mpint should encode it as a single non-zero byte with no leading zero.
+        let r = vec![0x01_u8];
+        let s = vec![0x01_u8; 32];
+        let der = make_der_signature(&r, &s);
+        // Whether the p256 crate accepts a tiny r is implementation-defined;
+        // the important thing is that we don't panic.
+        drop(der_to_ssh_signature(&der));
+    }
+
+    #[test]
+    fn test_der_to_ssh_signature_sequence_length_overflow() {
+        // Sequence claims a length larger than the remaining buffer.
+        let bad = vec![0x30_u8, 0xFF, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02];
+        assert!(
+            der_to_ssh_signature(&bad).is_err(),
+            "overlong sequence length must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_der_to_ssh_signature_zero_length_integer() {
+        // DER INTEGER with length 0 is not valid; must not panic.
+        let bad = vec![0x30_u8, 0x04, 0x02, 0x00, 0x02, 0x01, 0x01];
+        assert!(
+            der_to_ssh_signature(&bad).is_err(),
+            "zero-length DER INTEGER must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_der_to_ssh_signature_empty_input() {
+        assert!(der_to_ssh_signature(&[]).is_err());
+    }
 }

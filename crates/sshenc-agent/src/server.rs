@@ -2990,6 +2990,205 @@ mod tests {
         }
     }
 
+    // A backend that delegates everything to MockKeyBackend but always
+    // returns an error from sign() — used to test the sign-failure path.
+    struct FailOnSignBackend(Arc<MockKeyBackend>);
+
+    impl KeyBackend for FailOnSignBackend {
+        fn generate(
+            &self,
+            opts: &KeyGenOptions,
+        ) -> sshenc_core::error::Result<sshenc_core::key::KeyInfo> {
+            self.0.generate(opts)
+        }
+        fn list(&self) -> sshenc_core::error::Result<Vec<sshenc_core::key::KeyInfo>> {
+            self.0.list()
+        }
+        fn get(&self, label: &str) -> sshenc_core::error::Result<sshenc_core::key::KeyInfo> {
+            self.0.get(label)
+        }
+        fn delete(&self, label: &str) -> sshenc_core::error::Result<()> {
+            self.0.delete(label)
+        }
+        fn rename(&self, old: &str, new: &str) -> sshenc_core::error::Result<()> {
+            self.0.rename(old, new)
+        }
+        fn sign(&self, _label: &str, _data: &[u8]) -> sshenc_core::error::Result<Vec<u8>> {
+            Err(sshenc_core::error::Error::Other(
+                "injected sign failure".into(),
+            ))
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sign_request_rsa_flags_ignored() {
+        // RSA-specific flag bits (SSH_AGENT_RSA_SHA2_256 = 0x02) on an
+        // ECDSA key must be silently ignored; signing should still succeed.
+        let backend = setup_backend();
+        let key_blob = get_key_blob(&backend);
+
+        let resp = handle_request(
+            AgentRequest::SignRequest {
+                key_blob,
+                data: b"data to sign".to_vec(),
+                flags: 0x02,
+            },
+            backend.clone(),
+            Arc::new(empty_labels()),
+            PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(resp, AgentResponse::SignResponse { .. }),
+            "RSA flag bits on ECDSA key must not block the sign"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sign_request_backend_error_returns_failure() {
+        let inner = Arc::new(MockKeyBackend::new());
+        inner
+            .generate(&KeyGenOptions {
+                label: KeyLabel::new("err-key").unwrap(),
+                comment: None,
+                access_policy: AccessPolicy::None,
+                presence_mode: enclaveapp_core::types::PresenceMode::None,
+                write_pub_path: None,
+                record_pub_path: None,
+            })
+            .unwrap();
+
+        let key_blob = {
+            let keys = inner.list().unwrap();
+            let pubkey =
+                SshPublicKey::from_sec1_bytes(&keys[0].public_key_bytes, None).unwrap();
+            pubkey.to_wire_format()
+        };
+
+        let backend: Arc<dyn KeyBackend> = Arc::new(FailOnSignBackend(inner));
+
+        let resp = handle_request(
+            AgentRequest::SignRequest {
+                key_blob,
+                data: b"payload".to_vec(),
+                flags: 0,
+            },
+            backend,
+            Arc::new(empty_labels()),
+            PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(resp, AgentResponse::Failure),
+            "backend sign error must produce Failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rename_key_succeeds() {
+        let backend = setup_backend();
+        assert_eq!(backend.list().unwrap().len(), 1);
+
+        let resp = handle_request(
+            AgentRequest::RenameKey {
+                old_label: b"test-key".to_vec(),
+                new_label: b"renamed-key".to_vec(),
+            },
+            backend.clone(),
+            Arc::new(empty_labels()),
+            PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Success));
+
+        // Old label must be gone; new label must be present.
+        assert!(backend.get("test-key").is_err());
+        assert!(backend.get("renamed-key").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_rename_key_fails_for_missing_label() {
+        let backend = setup_backend();
+
+        let resp = handle_request(
+            AgentRequest::RenameKey {
+                old_label: b"no-such-key".to_vec(),
+                new_label: b"whatever".to_vec(),
+            },
+            backend.clone(),
+            Arc::new(empty_labels()),
+            PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+        // Backend must be untouched.
+        assert_eq!(backend.list().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_generate_key_duplicate_label_returns_failure() {
+        let backend = setup_backend();
+        // "test-key" already exists from setup_backend().
+        let resp = handle_request(
+            AgentRequest::GenerateKey {
+                label: b"test-key".to_vec(),
+                comment: Vec::new(),
+                access_policy: 0,
+                presence_mode: None,
+                pub_file_path: None,
+            },
+            backend.clone(),
+            Arc::new(empty_labels()),
+            PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resp, AgentResponse::Failure));
+        // Backend must still hold only the original key.
+        assert_eq!(backend.list().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sign_request_warm_blob_cache_skips_list() {
+        // Pre-populate the blob_cache so the sign path takes the warm
+        // branch (blob_cache.get() hit) rather than calling list().
+        let backend = setup_backend();
+        let key_blob = get_key_blob(&backend);
+
+        let mut cache = HashMap::new();
+        cache.insert(key_blob.clone(), "test-key".to_string());
+
+        let resp = handle_request(
+            AgentRequest::SignRequest {
+                key_blob,
+                data: b"cached sign".to_vec(),
+                flags: 0,
+            },
+            backend.clone(),
+            Arc::new(empty_labels()),
+            PromptPolicy::KeyDefault,
+            &mut cache,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(resp, AgentResponse::SignResponse { .. }),
+            "warm-cache sign must succeed"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn allowed_peer_binaries_contains_no_duplicates() {
@@ -3023,5 +3222,57 @@ mod tests {
         // Use a very high PID that's unlikely to exist
         let result = get_process_exe(u32::MAX);
         assert!(result.is_none(), "should return None for non-existent PID");
+    }
+
+    /// `PromptPolicy::Always` forces `PresenceMode::Strict` regardless of
+    /// the per-key metadata. MockKeyBackend's `sign_with_presence` default
+    /// delegates to `sign()`, so the sign should still succeed.
+    #[tokio::test]
+    async fn test_sign_request_prompt_policy_always_succeeds() {
+        let backend = setup_backend();
+        let key_blob = get_key_blob(&backend);
+
+        let resp = handle_request(
+            AgentRequest::SignRequest {
+                key_blob,
+                data: b"presence-required data".to_vec(),
+                flags: 0,
+            },
+            backend.clone(),
+            Arc::new(empty_labels()),
+            PromptPolicy::Always,
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(resp, AgentResponse::SignResponse { .. }),
+            "sign with PromptPolicy::Always must return SignResponse via sign_with_presence"
+        );
+    }
+
+    /// `MigrateMeta` for a label with no `.meta` file on disk returns
+    /// `AgentResponse::Failure` on every platform that implements the check.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    #[tokio::test]
+    async fn test_migrate_meta_returns_failure_for_missing_label() {
+        let backend = setup_backend();
+        // Use a label that will never exist on disk to exercise the
+        // "no .meta for label" early-return path in perform_migrate_meta.
+        let resp = handle_request(
+            AgentRequest::MigrateMeta {
+                label: b"nonexistent-migrate-test-label-zzz".to_vec(),
+            },
+            backend.clone(),
+            Arc::new(empty_labels()),
+            PromptPolicy::KeyDefault,
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(resp, AgentResponse::Failure),
+            "MigrateMeta for a missing label must return Failure"
+        );
     }
 }

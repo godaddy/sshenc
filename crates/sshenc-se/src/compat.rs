@@ -376,4 +376,50 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// An unrecognized `auth_policy` integer in the old format must not panic.
+    /// The implementation falls back to `AccessPolicy::None` for unknown values.
+    #[test]
+    fn old_format_unrecognized_auth_policy_integer_falls_back_to_none() {
+        let dir = test_dir();
+        let json = serde_json::json!({
+            "label": "k",
+            "auth_policy": 999
+        });
+        std::fs::write(dir.join("k.meta"), json.to_string()).unwrap();
+
+        let meta = load_sshenc_meta(&dir, "k").expect("unknown int auth_policy should not error");
+        assert_eq!(
+            meta.access_policy,
+            AccessPolicy::None,
+            "unrecognized integer must fall back to None"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// New-format metadata with a missing required field (`label`) must return a
+    /// descriptive serialization error and not panic.
+    #[test]
+    fn new_format_missing_required_field_returns_error() {
+        let dir = test_dir();
+        // Omit the required "label" field.
+        let json = serde_json::json!({
+            "key_type": "signing",
+            "access_policy": "none",
+            "created": "0",
+            "app_specific": null
+        });
+        std::fs::write(dir.join("missing-label.meta"), json.to_string()).unwrap();
+
+        let result = load_sshenc_meta(&dir, "missing-label");
+        assert!(
+            result.is_err(),
+            "new-format meta with missing required field must return Err"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(!msg.is_empty(), "error message must be non-empty");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

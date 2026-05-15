@@ -829,4 +829,65 @@ mod tests {
     fn cleanup(dir: &Path) {
         drop(std::fs::remove_dir_all(dir));
     }
+
+    /// Two threads call `install_block` concurrently on the same rc file.
+    ///
+    /// `write_rc` delegates to `atomic_write`, which creates a temp file named
+    /// `.<file>.<pid>.<nanos>.tmp` and renames it into place.  Two threads in
+    /// the same process share a PID; if they reach `create_new` within the same
+    /// nanosecond the second gets EEXIST on the temp file and its call fails.
+    /// That is acceptable — the requirement is only that:
+    ///   (a) at least one write succeeds, and
+    ///   (b) the resulting file contains exactly one sshenc block (no
+    ///       corruption, no double block from two racing renames).
+    ///
+    /// The "strictly two processes" variant (different PIDs → different temp
+    /// names → pure POSIX-rename race) would always let both writes succeed
+    /// and last-writer-wins, but that requires spawning child processes and is
+    /// tested adequately by the single-threaded idempotency suite.
+    #[test]
+    fn concurrent_install_produces_exactly_one_block() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = tempdir();
+        let rc = dir.join(".zshrc");
+        let socket = PathBuf::from("/tmp/sshenc-concurrent-test.sock");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let rc1 = rc.clone();
+        let sock1 = socket.clone();
+        let b1 = Arc::clone(&barrier);
+        let rc2 = rc.clone();
+        let sock2 = socket.clone();
+        let b2 = Arc::clone(&barrier);
+
+        let t1 = thread::spawn(move || {
+            b1.wait();
+            install_block(Shell::Zsh, &rc1, &sock1)
+        });
+        let t2 = thread::spawn(move || {
+            b2.wait();
+            install_block(Shell::Zsh, &rc2, &sock2)
+        });
+
+        let r1 = t1.join().expect("thread 1 panicked");
+        let r2 = t2.join().expect("thread 2 panicked");
+
+        // At least one must have succeeded; both succeeding is also fine.
+        assert!(
+            r1.is_ok() || r2.is_ok(),
+            "at least one concurrent install_block must succeed; t1={r1:?} t2={r2:?}"
+        );
+
+        // Regardless of which thread won the race, the rc file must be valid:
+        // exactly one BEGIN/END sshenc block — no partial write, no double block.
+        let contents = std::fs::read_to_string(&rc).expect("rc file must exist after concurrent writes");
+        let begin_count = contents.matches("BEGIN sshenc").count();
+        let end_count = contents.matches("END sshenc").count();
+        assert_eq!(begin_count, 1, "expected exactly one BEGIN sshenc block, found {begin_count};\n{contents}");
+        assert_eq!(end_count, 1, "expected exactly one END sshenc block, found {end_count};\n{contents}");
+
+        cleanup(&dir);
+    }
 }

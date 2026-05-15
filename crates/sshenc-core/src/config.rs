@@ -524,6 +524,83 @@ label = "gl"
     }
 
     #[test]
+    fn test_config_load_returns_error_on_invalid_toml() {
+        let dir = std::env::temp_dir().join(format!(
+            "sshenc-test-config-invalid-{}", std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, b"[broken = [[[").unwrap();
+        let result = Config::load(&path);
+        assert!(result.is_err(), "invalid TOML must return an error");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_config_load_returns_error_on_field_type_mismatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "sshenc-test-config-mismatch-{}", std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // allowed_labels must be an array of strings, not an integer.
+        std::fs::write(&path, b"allowed_labels = 42\n").unwrap();
+        let result = Config::load(&path);
+        assert!(result.is_err(), "type-mismatched TOML field must return an error");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_config_load_empty_file_uses_defaults() {
+        // An empty TOML file is valid; all fields have serde defaults so
+        // load must succeed and produce the same result as Config::default().
+        let dir = std::env::temp_dir().join(format!(
+            "sshenc-test-config-empty-{}", std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, b"").unwrap();
+        let loaded = Config::load(&path).expect("empty TOML must parse as default config");
+        assert!(loaded.allowed_labels.is_empty());
+        assert_eq!(loaded.prompt_policy, PromptPolicy::KeyDefault);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_wrapping_key_cache_ttl_default_is_14400() {
+        // The hardcoded default must stay 14400 seconds (4 hours).  Any
+        // change to this constant is a UX regression and must be explicit.
+        assert_eq!(default_wrapping_key_cache_ttl_secs(), 14400);
+    }
+
+    #[test]
+    fn test_config_tilde_only_expands_to_home() {
+        // A socket_path of exactly `~` should expand to the home directory.
+        let toml = "socket_path = \"~\"\n";
+        let _config: Config = toml::from_str(toml).unwrap();
+        // expand_paths is called by load() — here we call it via load() on a
+        // temp file so the tilde expansion code path is exercised.
+        let dir = std::env::temp_dir().join(format!(
+            "sshenc-test-config-tilde-{}", std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, toml.as_bytes()).unwrap();
+        if let Ok(loaded) = Config::load(&path) {
+            // If HOME is set, the socket_path must equal the home directory
+            // (not the literal `~` string).
+            if let Some(home) = dirs::home_dir() {
+                assert_eq!(loaded.socket_path, home, "~ must expand to home dir");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)] // Config::default() calls dirs::home_dir() -> FFI
     fn test_platform_conditional_socket_path() {
         let config = Config::default();

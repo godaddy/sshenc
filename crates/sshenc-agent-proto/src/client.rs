@@ -663,6 +663,33 @@ mod tests {
     }
 
     #[test]
+    fn verify_agent_responsive_returns_ok_when_agent_responds() {
+        let sock_path = unique_socket_path("responsive");
+        // Fake agent responds to RequestIdentities with an empty list.
+        let handle = spawn_fake_agent(
+            &sock_path,
+            vec![AgentResponse::IdentitiesAnswer(vec![])],
+        );
+        let result = verify_agent_responsive(&sock_path);
+        drop(handle.join().ok());
+        drop(std::fs::remove_file(&sock_path));
+        assert!(result.is_ok(), "responsive agent must return Ok: {result:?}");
+    }
+
+    #[test]
+    fn verify_agent_responsive_returns_err_when_socket_absent() {
+        let bogus = unique_socket_path("responsive-absent");
+        drop(std::fs::remove_file(&bogus));
+        let result = verify_agent_responsive(&bogus);
+        assert!(
+            result.is_err(),
+            "absent socket must return a descriptive Err"
+        );
+        let msg = result.unwrap_err();
+        assert!(!msg.is_empty(), "error message must be non-empty");
+    }
+
+    #[test]
     fn returns_none_when_socket_does_not_exist() {
         let bogus = std::env::temp_dir().join(format!(
             "sshenc-cli-agentproxy-nope-{}.sock",

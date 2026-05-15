@@ -404,7 +404,11 @@ fn write_line(path: &std::path::Path, line: &str) {
             return;
         }
     };
-    if let Err(e) = writeln!(file, "{line}") {
+    // Write the line + newline as a single call so concurrent appenders
+    // don't interleave the JSON body with the trailing newline.
+    let mut buf = line.to_string();
+    buf.push('\n');
+    if let Err(e) = file.write_all(buf.as_bytes()) {
         tracing::debug!(path = %path.display(), error = %e, "op_log: write failed");
         return;
     }
@@ -1066,6 +1070,100 @@ mod tests {
         assert!(after.contains("after-rotation"));
         let r1 = fs::read(rotation_path(&log, 1)).unwrap();
         assert_eq!(r1.len(), big.len());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn reason_field_round_trips_through_json() {
+        let dir = tempdir();
+        let log = dir.join("events.log");
+        record_to(
+            Some(&log),
+            "sign",
+            Some("work-key"),
+            None,
+            Duration::from_millis(5),
+            true,
+            None,
+            Some("git commit signing"),
+        );
+        let lines = read_lines(&log);
+        assert_eq!(lines.len(), 1);
+        let reason = &lines[0]["reason"];
+        assert_eq!(reason, "git commit signing", "reason field should round-trip through JSON");
+        assert!(!reason.is_null(), "reason should not be null when Some was passed");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn log_persists_and_is_readable_after_restart() {
+        // Write entries via record_to, drop the log path, then re-read
+        // from the same path. Simulates a process restart: the second
+        // reader has no in-memory state and reconstructs the log purely
+        // from what is on disk.
+        let dir = tempdir();
+        let log = dir.join("restart.log");
+
+        for i in 0..3 {
+            record_to(
+                Some(&log),
+                "sign",
+                Some(&format!("key-{i}")),
+                None,
+                Duration::from_millis(u64::try_from(i * 10).unwrap()),
+                true,
+                None,
+                None,
+            );
+        }
+        // Simulate restart: read back from disk without any in-memory help.
+        let lines = read_lines(&log);
+        assert_eq!(lines.len(), 3, "all three entries must survive a restart");
+        assert_eq!(lines[0]["label"], "key-0");
+        assert_eq!(lines[1]["label"], "key-1");
+        assert_eq!(lines[2]["label"], "key-2");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn concurrent_writes_do_not_corrupt_log() {
+        let dir = tempdir();
+        let log = dir.join("events.log");
+        const THREADS: usize = 4;
+        const ENTRIES_PER_THREAD: usize = 25;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    for j in 0..ENTRIES_PER_THREAD {
+                        let label = format!("t{i}-{j}");
+                        record_to(
+                            Some(log.as_path()),
+                            "sign",
+                            Some(label.as_str()),
+                            None,
+                            Duration::from_millis(1),
+                            true,
+                            None,
+                            None,
+                        );
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+        let lines = read_lines(&log);
+        assert_eq!(
+            lines.len(),
+            THREADS * ENTRIES_PER_THREAD,
+            "expected {} lines ({}×{}), got {}",
+            THREADS * ENTRIES_PER_THREAD,
+            THREADS,
+            ENTRIES_PER_THREAD,
+            lines.len()
+        );
         cleanup(&dir);
     }
 }

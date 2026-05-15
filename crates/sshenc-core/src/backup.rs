@@ -200,15 +200,19 @@ fn rollback_backups(entries: &[FileBackup]) -> Result<()> {
 }
 
 fn unique_backup_path(path: &Path) -> Result<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    unique_backup_path_with_nanos(path, nanos)
+}
+
+fn unique_backup_path_with_nanos(path: &Path, nanos: u128) -> Result<PathBuf> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("backup");
     let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
     for attempt in 0_u32..100 {
         let candidate = if attempt == 0 {
             path.with_file_name(format!("{file_name}.{pid}.{nanos}.bak"))
@@ -418,6 +422,36 @@ mod tests {
             bak_files.is_empty(),
             "backup files should be cleaned up on success, found: {:?}",
             bak_files.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// When all 100 candidate slots are occupied for a given nanos value,
+    /// `unique_backup_path_with_nanos` must return an error instead of
+    /// looping indefinitely or panicking.
+    #[test]
+    fn unique_backup_path_exhaustion_returns_error() {
+        let dir = test_dir("exhaustion");
+        let path = dir.join("key");
+        let nanos: u128 = 999_999_999_999_999_999;
+        let pid = std::process::id();
+
+        // Pre-create all 100 candidate files for this (pid, nanos) pair.
+        std::fs::write(dir.join(format!("key.{pid}.{nanos}.bak")), "").unwrap();
+        for i in 1_u32..100 {
+            std::fs::write(dir.join(format!("key.{pid}.{nanos}.{i}.bak")), "").unwrap();
+        }
+
+        let result = unique_backup_path_with_nanos(&path, nanos);
+        assert!(
+            result.is_err(),
+            "all 100 slots occupied — must return error, not loop"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("could not find unique backup path"),
+            "unexpected error message: {msg}"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

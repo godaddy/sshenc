@@ -577,6 +577,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A config file that contains non-UTF-8 bytes must produce a clean error
+    /// from all entry points — no panic, no corrupted output.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_non_utf8_bytes_return_error_not_panic() {
+        let dir = temp_dir("non-utf8");
+        let config_path = dir.join("config");
+        let socket = PathBuf::from("/tmp/.sshenc/agent.sock");
+
+        // Write a file with a lone 0xFF byte — invalid in UTF-8.
+        std::fs::write(&config_path, b"Host *\n    User \xff\n").unwrap();
+
+        // is_installed reads with read_to_string; must return Err, not panic.
+        let r = is_installed(&config_path);
+        assert!(r.is_err(), "is_installed must return Err for non-UTF-8 file");
+
+        // install_block also reads the file; must return Err, not panic.
+        let r = install_block(&config_path, &socket, None);
+        assert!(r.is_err(), "install_block must return Err for non-UTF-8 file");
+
+        // uninstall_block likewise.
+        let r = uninstall_block(&config_path);
+        assert!(r.is_err(), "uninstall_block must return Err for non-UTF-8 file");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_uninstall_refuses_truncated_block() {

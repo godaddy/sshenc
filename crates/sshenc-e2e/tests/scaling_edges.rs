@@ -71,12 +71,14 @@ fn list_returns_all_40_keys_in_bounded_time() {
 
     const N: usize = 40;
     let labels: Vec<String> = (0..N).map(|i| unique_label("scale40", i)).collect();
-    // Each keygen opens *two* connections to the agent (an
-    // `ensure_agent_ready` probe and the actual GenerateKey RPC).
-    // The agent's rate limiter caps at 50 connections per
-    // sliding second, so 40 keygens = 80 connections and we'd
-    // hit the limit around the 25th keygen without pacing. A
-    // 50 ms sleep keeps us under the cap and only adds 2 s.
+    // Each keygen opens *three* connections to the agent:
+    //   1. `is_socket_ready` probe inside `ensure_daemon_ready`
+    //   2. `verify_agent_responsive` RequestIdentities check
+    //   3. the actual GenerateKey RPC
+    // The agent's rate limiter caps at 50 connections per sliding second,
+    // so 40 keygens = 120 connections. At 100 ms between keygens the peak
+    // rate is 3 / 0.1 s = 30 conn/sec — safely below the cap even if
+    // keygens complete instantaneously.
     for label in &labels {
         let outcome = run(env.sshenc_cmd().expect("sshenc cmd").args([
             "keygen",
@@ -87,8 +89,13 @@ fn list_returns_all_40_keys_in_bounded_time() {
             "--no-pub-file",
         ]))
         .expect("keygen");
-        assert!(outcome.succeeded(), "keygen {label}: {}", outcome.stderr);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            outcome.succeeded(),
+            "keygen {label}: {}\nagent logs:\n{}",
+            outcome.stderr,
+            env.agent_stderr_snapshot()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     let start = Instant::now();

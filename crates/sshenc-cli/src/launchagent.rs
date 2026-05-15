@@ -264,6 +264,36 @@ mod tests {
         );
     }
 
+    /// Socket paths and binary paths containing hyphens and underscores must
+    /// appear verbatim in the generated plist — special characters in paths
+    /// must not be escaped or truncated.
+    #[test]
+    fn render_plist_handles_path_with_hyphens_and_underscores() {
+        let p = render_plist(
+            Path::new("/opt/my-tools/sshenc_agent"),
+            Path::new("/var/run/sshenc-agent_socket/agent.sock"),
+        );
+        assert!(
+            p.contains("/opt/my-tools/sshenc_agent"),
+            "binary path with hyphens/underscores must appear verbatim"
+        );
+        assert!(
+            p.contains("/var/run/sshenc-agent_socket/agent.sock"),
+            "socket path with hyphens/underscores must appear verbatim"
+        );
+    }
+
+    /// Calling `render_plist` twice with the same inputs must produce byte-identical
+    /// output, confirming idempotent file writes won't cause spurious mtime changes.
+    #[test]
+    fn render_plist_is_deterministic() {
+        let bin = Path::new("/usr/local/bin/sshenc-agent");
+        let sock = Path::new("/tmp/.sshenc/agent.sock");
+        let first = render_plist(bin, sock);
+        let second = render_plist(bin, sock);
+        assert_eq!(first, second, "render_plist must be deterministic");
+    }
+
     #[test]
     fn plist_path_is_under_user_launchagents() {
         let p = plist_path().unwrap();

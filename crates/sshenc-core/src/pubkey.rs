@@ -926,4 +926,88 @@ mod tests {
         let result = encode_sk_signature_blob(&bad, 0, 0);
         assert!(result.is_err());
     }
+
+    // --- SshSkPublicKey::from_xy roundtrip ---
+
+    #[test]
+    fn test_sk_pubkey_from_xy_to_wire_roundtrip() {
+        let x: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let y: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_add(128));
+        let application = "ssh:test-rp.example.com".to_string();
+        let comment = Some("test comment".to_string());
+
+        let key = SshSkPublicKey::from_xy(&x, &y, application.clone(), comment.clone());
+        let wire = key.to_wire_format();
+
+        // Must be parseable and reconstruct matching fields.
+        let (algo, rest) = read_ssh_string(&wire).unwrap();
+        assert_eq!(algo, b"sk-ecdsa-sha2-nistp256@openssh.com");
+        let (curve, rest) = read_ssh_string(rest).unwrap();
+        assert_eq!(curve, b"nistp256");
+        let (ec_point, rest) = read_ssh_string(rest).unwrap();
+        assert_eq!(ec_point[0], 0x04, "must be uncompressed point");
+        assert_eq!(&ec_point[1..33], &x);
+        assert_eq!(&ec_point[33..], &y);
+        let (app_bytes, _) = read_ssh_string(rest).unwrap();
+        assert_eq!(app_bytes, application.as_bytes());
+    }
+
+    #[test]
+    fn test_sk_pubkey_from_xy_and_from_sec1_produce_same_wire() {
+        let x: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_mul(3));
+        let y: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_mul(7));
+        let mut sec1 = vec![0x04_u8];
+        sec1.extend_from_slice(&x);
+        sec1.extend_from_slice(&y);
+
+        let k1 = SshSkPublicKey::from_xy(&x, &y, "ssh:rp".to_string(), None);
+        let k2 = SshSkPublicKey::from_sec1_bytes(&sec1, "ssh:rp".to_string(), None).unwrap();
+        assert_eq!(k1.to_wire_format(), k2.to_wire_format());
+    }
+
+    // --- read_ssh_string with claimed length larger than buffer ---
+
+    #[test]
+    fn test_read_ssh_string_claimed_length_exceeds_buffer() {
+        // Length prefix claims u32::MAX bytes but the buffer is tiny.
+        let mut buf = u32::MAX.to_be_bytes().to_vec();
+        buf.extend_from_slice(b"tiny");
+        let result = read_ssh_string(&buf);
+        assert!(
+            result.is_err(),
+            "claimed length exceeding buffer must error"
+        );
+    }
+
+    // --- write_mpint all-high-bits needs leading zero ---
+
+    #[test]
+    fn test_mpint_single_byte_below_0x80_no_leading_zero() {
+        // 0x7F: high bit clear — no leading zero should be added.
+        let mut buf = Vec::new();
+        write_mpint(&mut buf, &[0x7F]);
+        let (data, _) = read_ssh_string(&buf).unwrap();
+        assert_eq!(data, &[0x7F]);
+    }
+
+    #[test]
+    fn test_mpint_single_byte_0x80_gets_leading_zero() {
+        // 0x80: high bit set — must be prefixed with 0x00 to stay positive.
+        let mut buf = Vec::new();
+        write_mpint(&mut buf, &[0x80]);
+        let (data, _) = read_ssh_string(&buf).unwrap();
+        assert_eq!(data, &[0x00, 0x80]);
+    }
+
+    #[test]
+    fn test_mpint_all_high_bits_sequence_gets_leading_zero() {
+        // [0xFF, 0xFF, 0xFF] has the high bit set; write_mpint must
+        // prefix a 0x00 byte to keep it a positive number in DER/SSH.
+        let mut buf = Vec::new();
+        write_mpint(&mut buf, &[0xFF, 0xFF, 0xFF]);
+        // wire format: u32 length + bytes
+        let (data, _) = read_ssh_string(&buf).unwrap();
+        assert_eq!(data[0], 0x00, "leading zero must be present");
+        assert_eq!(&data[1..], &[0xFF, 0xFF, 0xFF]);
+    }
 }

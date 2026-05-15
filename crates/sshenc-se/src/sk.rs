@@ -383,4 +383,18 @@ mod tests {
         let id = user_id_for_label("anything");
         assert_eq!(id.len(), 32);
     }
+
+    #[test]
+    fn user_id_is_deterministic() {
+        let a = user_id_for_label("my-key");
+        let b = user_id_for_label("my-key");
+        assert_eq!(a, b, "same label must always produce the same user ID");
+    }
+
+    #[test]
+    fn user_id_is_distinct_per_label() {
+        let a = user_id_for_label("key-alpha");
+        let b = user_id_for_label("key-beta");
+        assert_ne!(a, b, "distinct labels must produce distinct user IDs");
+    }
 }

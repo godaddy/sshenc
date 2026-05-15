@@ -963,4 +963,440 @@ mod tests {
         assert!(info.fingerprint_sha256.starts_with("SHA256:"));
         std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
     }
+
+    // ---- presence_mode round-trip ----
+
+    #[test]
+    fn presence_mode_wire_round_trip_all_variants() {
+        for mode in [
+            PresenceMode::Cached,
+            PresenceMode::Strict,
+            PresenceMode::None,
+        ] {
+            let byte = presence_mode_to_wire(mode);
+            let decoded = presence_mode_from_wire(byte);
+            assert_eq!(
+                decoded,
+                Some(mode),
+                "mode {mode:?} must survive wire round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn presence_mode_from_wire_rejects_unknown_byte() {
+        for byte in [3_u8, 10, 255] {
+            assert!(
+                presence_mode_from_wire(byte).is_none(),
+                "byte {byte} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn presence_mode_app_specific_round_trip_all_variants() {
+        for mode in [
+            PresenceMode::Cached,
+            PresenceMode::Strict,
+            PresenceMode::None,
+        ] {
+            let s = presence_mode_to_app_specific_str(mode);
+            let v = serde_json::json!({ "presence_mode": s });
+            let decoded = presence_mode_from_app_specific(&v);
+            assert_eq!(
+                decoded,
+                Some(mode),
+                "mode {mode:?} must survive app_specific round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn presence_mode_from_app_specific_returns_none_for_unknown_string() {
+        let v = serde_json::json!({ "presence_mode": "strict-but-louder" });
+        assert!(presence_mode_from_app_specific(&v).is_none());
+    }
+
+    #[test]
+    fn presence_mode_from_app_specific_returns_none_when_field_absent() {
+        let v = serde_json::json!({ "other_field": "cached" });
+        assert!(presence_mode_from_app_specific(&v).is_none());
+    }
+
+    // ---- disk-only read-path tests (no agent socket needed) ----
+
+    #[test]
+    fn get_returns_error_for_unknown_label() {
+        let (keys_dir, pub_dir) = cache_test_dirs();
+        let backend = make_backend(keys_dir.clone(), pub_dir, PathBuf::from("/dev/null"));
+        let result = backend.get("does-not-exist");
+        assert!(result.is_err(), "get for missing label must return Err");
+        std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn list_returns_empty_vec_for_empty_keys_dir() {
+        let (keys_dir, pub_dir) = cache_test_dirs();
+        let backend = make_backend(keys_dir.clone(), pub_dir, PathBuf::from("/dev/null"));
+        let list = backend.list().expect("list on empty dir must not error");
+        assert!(
+            list.is_empty(),
+            "empty keys_dir must produce empty list, got {list:?}"
+        );
+        std::fs::remove_dir_all(keys_dir.parent().unwrap()).unwrap();
+    }
+
+    // ---- mock-socket tests (Unix only) ----
+
+    #[cfg(unix)]
+    mod mock_socket {
+        use super::*;
+        use sshenc_agent_proto::message::{serialize_response, AgentResponse, Identity};
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        use std::path::Path;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::thread;
+
+        static SOCK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        fn unique_sock(tag: &str) -> PathBuf {
+            let id = SOCK_COUNTER.fetch_add(1, Ordering::SeqCst);
+            PathBuf::from("/tmp").join(format!(
+                "sshenc-proxy-ms-{tag}-{}-{id}.sock",
+                std::process::id()
+            ))
+        }
+
+        fn proxy_dirs(tag: &str) -> (PathBuf, PathBuf) {
+            let id = SOCK_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let base = std::env::temp_dir()
+                .join(format!("sshenc-proxy-ms-{tag}-{}-{id}", std::process::id()));
+            let keys = base.join("keys");
+            let pubs = base.join("pub");
+            std::fs::create_dir_all(&keys).unwrap();
+            std::fs::create_dir_all(&pubs).unwrap();
+            (keys, pubs)
+        }
+
+        /// Spawn a fake agent on `sock_path`.
+        ///
+        /// `scripts` is a list of per-connection handlers. Each entry is a
+        /// list of `AgentResponse` values — one is sent per incoming request
+        /// on that connection. An empty entry means "accept and close".
+        ///
+        /// Connections are served in order. The agent thread exits after the
+        /// last script is consumed.
+        fn spawn_fake_agent(
+            sock_path: &Path,
+            scripts: Vec<Vec<AgentResponse>>,
+        ) -> thread::JoinHandle<()> {
+            drop(std::fs::remove_file(sock_path));
+            let listener = UnixListener::bind(sock_path).unwrap();
+            thread::spawn(move || {
+                for script in scripts {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(x) => x,
+                        Err(_) => return,
+                    };
+                    for response in script {
+                        // Read and discard the incoming request frame.
+                        let mut len_buf = [0_u8; 4];
+                        if stream.read_exact(&mut len_buf).is_err() {
+                            break;
+                        }
+                        let len = u32::from_be_bytes(len_buf) as usize;
+                        let mut buf = vec![0_u8; len];
+                        if stream.read_exact(&mut buf).is_err() {
+                            break;
+                        }
+                        // Send the scripted response.
+                        let payload = serialize_response(&response);
+                        let frame_len = (payload.len() as u32).to_be_bytes();
+                        drop(stream.write_all(&frame_len));
+                        drop(stream.write_all(&payload));
+                    }
+                    // Drop stream → closes connection.
+                }
+            })
+        }
+
+        /// Spawn a socket that accepts all connections but closes them
+        /// immediately (no data exchanged). Used to verify "socket present
+        /// but unresponsive → write ops return Err, not panic".
+        fn spawn_drop_agent(sock_path: &Path, count: usize) -> thread::JoinHandle<()> {
+            drop(std::fs::remove_file(sock_path));
+            let listener = UnixListener::bind(sock_path).unwrap();
+            thread::spawn(move || {
+                for _ in 0..count {
+                    drop(listener.accept());
+                    // Drop the stream immediately.
+                }
+            })
+        }
+
+        fn make_proxy(keys: PathBuf, pubs: PathBuf, sock: PathBuf) -> AgentProxyBackend {
+            AgentProxyBackend {
+                keys_dir: keys,
+                pub_dir: pubs,
+                socket_path: sock,
+            }
+        }
+
+        // ---- unresponsive socket: every write op returns Err, not panic ----
+
+        #[test]
+        fn generate_returns_err_when_socket_closes_immediately() {
+            let sock = unique_sock("gen-drop");
+            let (keys, pubs) = proxy_dirs("gen-drop");
+            // Enough accepts for is_socket_ready + verify_agent_responsive
+            // + any retries. 5 is generous.
+            let _agent_h = spawn_drop_agent(&sock, 5);
+            let backend = make_proxy(keys.clone(), pubs, sock.clone());
+            let opts = KeyGenOptions {
+                label: KeyLabel::new("drop-gen").unwrap(),
+                comment: None,
+                access_policy: enclaveapp_core::AccessPolicy::None,
+                presence_mode: PresenceMode::None,
+                write_pub_path: None,
+                record_pub_path: None,
+            };
+            let result = backend.generate(&opts);
+            assert!(
+                result.is_err(),
+                "generate against unresponsive socket must return Err"
+            );
+            drop(std::fs::remove_file(&sock));
+            std::fs::remove_dir_all(keys.parent().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn delete_returns_err_when_socket_closes_immediately() {
+            let sock = unique_sock("del-drop");
+            let (keys, pubs) = proxy_dirs("del-drop");
+            let _agent_h = spawn_drop_agent(&sock, 5);
+            let backend = make_proxy(keys.clone(), pubs, sock.clone());
+            let result = backend.delete("any-label");
+            assert!(
+                result.is_err(),
+                "delete against unresponsive socket must return Err"
+            );
+            drop(std::fs::remove_file(&sock));
+            std::fs::remove_dir_all(keys.parent().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn rename_returns_err_when_socket_closes_immediately() {
+            let sock = unique_sock("ren-drop");
+            let (keys, pubs) = proxy_dirs("ren-drop");
+            let _agent_h = spawn_drop_agent(&sock, 5);
+            let backend = make_proxy(keys.clone(), pubs, sock.clone());
+            let result = backend.rename("old", "new");
+            assert!(
+                result.is_err(),
+                "rename against unresponsive socket must return Err"
+            );
+            drop(std::fs::remove_file(&sock));
+            std::fs::remove_dir_all(keys.parent().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn sign_returns_err_when_socket_closes_immediately() {
+            let sock = unique_sock("sign-drop");
+            let (keys, pubs) = proxy_dirs("sign-drop");
+            // Cache a key so get() succeeds before we even reach ensure_agent.
+            let backend = make_proxy(keys.clone(), pubs, sock.clone());
+            let opts = KeyGenOptions {
+                label: KeyLabel::new("drop-sign").unwrap(),
+                comment: None,
+                access_policy: enclaveapp_core::AccessPolicy::None,
+                presence_mode: PresenceMode::None,
+                write_pub_path: None,
+                record_pub_path: None,
+            };
+            backend
+                .cache_key_artifacts_locally(&opts, &p256_pub_bytes(), None)
+                .unwrap();
+            let _agent_h = spawn_drop_agent(&sock, 5);
+            let result = backend.sign("drop-sign", b"data");
+            assert!(
+                result.is_err(),
+                "sign against unresponsive socket must return Err"
+            );
+            drop(std::fs::remove_file(&sock));
+            std::fs::remove_dir_all(keys.parent().unwrap()).unwrap();
+        }
+
+        // ---- mock agent returning real protocol responses ----
+        //
+        // Connection layout for every write op on Unix:
+        //   Conn 0 — is_socket_ready (accept + immediate drop from client)
+        //   Conn 1 — verify_agent_responsive (RequestIdentities → IdentitiesAnswer([]))
+        //   Conn 2 — the actual operation request → response
+
+        #[test]
+        fn delete_via_mock_socket_succeeds_and_drops_cached_artifacts() {
+            let sock = unique_sock("del-ok");
+            let (keys, pubs) = proxy_dirs("del-ok");
+            let backend = make_proxy(keys.clone(), pubs, sock.clone());
+
+            // Cache artifacts so drop_cached_artifacts has something to remove.
+            let opts = KeyGenOptions {
+                label: KeyLabel::new("del-me").unwrap(),
+                comment: None,
+                access_policy: enclaveapp_core::AccessPolicy::None,
+                presence_mode: PresenceMode::None,
+                write_pub_path: None,
+                record_pub_path: None,
+            };
+            backend
+                .cache_key_artifacts_locally(&opts, &p256_pub_bytes(), None)
+                .unwrap();
+            assert!(keys.join("del-me.pub").exists());
+
+            let agent_h = spawn_fake_agent(
+                &sock,
+                vec![
+                    vec![],                                        // Conn 0: is_socket_ready
+                    vec![AgentResponse::IdentitiesAnswer(vec![])], // Conn 1: verify_agent_responsive
+                    vec![AgentResponse::Success],                  // Conn 2: delete
+                ],
+            );
+
+            backend.delete("del-me").expect("delete via mock socket");
+            drop(agent_h.join());
+
+            assert!(
+                !keys.join("del-me.pub").exists(),
+                "pub cache must be removed after delete"
+            );
+            assert!(
+                !keys.join("del-me.meta").exists(),
+                "meta cache must be removed after delete"
+            );
+
+            drop(std::fs::remove_file(&sock));
+            std::fs::remove_dir_all(keys.parent().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn rename_via_mock_socket_succeeds_and_renames_cached_artifacts() {
+            let sock = unique_sock("ren-ok");
+            let (keys, pubs) = proxy_dirs("ren-ok");
+            let backend = make_proxy(keys.clone(), pubs, sock.clone());
+
+            // Cache artifacts under the old label.
+            let opts = KeyGenOptions {
+                label: KeyLabel::new("ren-src").unwrap(),
+                comment: Some("rename-test".into()),
+                access_policy: enclaveapp_core::AccessPolicy::None,
+                presence_mode: PresenceMode::None,
+                write_pub_path: None,
+                record_pub_path: None,
+            };
+            backend
+                .cache_key_artifacts_locally(&opts, &p256_pub_bytes(), None)
+                .unwrap();
+
+            let agent_h = spawn_fake_agent(
+                &sock,
+                vec![
+                    vec![],
+                    vec![AgentResponse::IdentitiesAnswer(vec![])],
+                    vec![AgentResponse::Success],
+                ],
+            );
+
+            backend
+                .rename("ren-src", "ren-dst")
+                .expect("rename via mock socket");
+            drop(agent_h.join());
+
+            assert!(
+                !keys.join("ren-src.pub").exists(),
+                "old pub cache must be gone"
+            );
+            assert!(
+                keys.join("ren-dst.pub").exists(),
+                "new pub cache must exist"
+            );
+            let meta = crate::compat::load_sshenc_meta(&keys, "ren-dst").unwrap();
+            assert_eq!(meta.label, "ren-dst", "meta label must reflect rename");
+
+            drop(std::fs::remove_file(&sock));
+            std::fs::remove_dir_all(keys.parent().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn sign_via_mock_socket_returns_der_signature() {
+            let sock = unique_sock("sign-ok");
+            let (keys, pubs) = proxy_dirs("sign-ok");
+            let backend = make_proxy(keys.clone(), pubs, sock.clone());
+
+            // Cache the key so backend.get() succeeds (disk-only, no socket).
+            let opts = KeyGenOptions {
+                label: KeyLabel::new("sign-me").unwrap(),
+                comment: None,
+                access_policy: enclaveapp_core::AccessPolicy::None,
+                presence_mode: PresenceMode::None,
+                write_pub_path: None,
+                record_pub_path: None,
+            };
+            let pub_bytes = p256_pub_bytes();
+            backend
+                .cache_key_artifacts_locally(&opts, &pub_bytes, None)
+                .unwrap();
+
+            // Build the wire blob (same as proxy::sign uses for agent_has_identity).
+            let ssh_pubkey = SshPublicKey::from_sec1_bytes(&pub_bytes, None).unwrap();
+            let wire_blob = ssh_pubkey.wire_blob();
+
+            // Build a valid SSH-format signature to return from the mock.
+            let r: Vec<u8> = (1_u8..=32).collect();
+            let s: Vec<u8> = (33_u8..=64).collect();
+            let mut inner = Vec::new();
+            inner.push(0x02_u8);
+            inner.push(32_u8);
+            inner.extend_from_slice(&r);
+            inner.push(0x02_u8);
+            inner.push(32_u8);
+            inner.extend_from_slice(&s);
+            let mut der_sig = Vec::new();
+            der_sig.push(0x30_u8);
+            der_sig.push(inner.len() as u8);
+            der_sig.extend_from_slice(&inner);
+            let ssh_sig = der_to_ssh_signature(&der_sig).unwrap();
+
+            // Conn 2 (try_sign_via_socket) handles two exchanges on the same connection:
+            // first RequestIdentities (from agent_has_identity), then SignRequest.
+            let agent_h = spawn_fake_agent(
+                &sock,
+                vec![
+                    vec![],                                        // Conn 0: is_socket_ready
+                    vec![AgentResponse::IdentitiesAnswer(vec![])], // Conn 1: verify_agent_responsive
+                    vec![
+                        // Conn 2: agent_has_identity + sign
+                        AgentResponse::IdentitiesAnswer(vec![Identity {
+                            key_blob: wire_blob,
+                            comment: "sign-me".into(),
+                        }]),
+                        AgentResponse::SignResponse {
+                            signature_blob: ssh_sig,
+                        },
+                    ],
+                ],
+            );
+
+            let result = backend.sign("sign-me", b"hello world");
+            drop(agent_h.join());
+
+            let der = result.expect("sign via mock socket must return DER signature");
+            assert!(!der.is_empty(), "DER signature must be non-empty");
+            assert_eq!(der[0], 0x30, "DER signature must start with SEQUENCE tag");
+            assert_eq!(der, der_sig, "DER round-trip must be lossless");
+
+            drop(std::fs::remove_file(&sock));
+            std::fs::remove_dir_all(keys.parent().unwrap()).unwrap();
+        }
+    }
 }

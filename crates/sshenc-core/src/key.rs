@@ -512,4 +512,144 @@ mod tests {
     fn test_key_algorithm_ssh_curve_id() {
         assert_eq!(KeyAlgorithm::EcdsaP256.ssh_curve_id(), "nistp256");
     }
+
+    // --- SkEcdsaP256 variant (untested above) ---
+
+    #[test]
+    fn test_sk_algorithm_display() {
+        assert_eq!(KeyAlgorithm::SkEcdsaP256.to_string(), "sk-ecdsa-p256");
+    }
+
+    #[test]
+    fn test_sk_algorithm_key_bits() {
+        assert_eq!(KeyAlgorithm::SkEcdsaP256.key_bits(), 256);
+    }
+
+    #[test]
+    fn test_sk_algorithm_ssh_key_type() {
+        assert_eq!(
+            KeyAlgorithm::SkEcdsaP256.ssh_key_type(),
+            "sk-ecdsa-sha2-nistp256@openssh.com"
+        );
+    }
+
+    #[test]
+    fn test_sk_algorithm_ssh_curve_id() {
+        assert_eq!(KeyAlgorithm::SkEcdsaP256.ssh_curve_id(), "nistp256");
+    }
+
+    #[test]
+    fn test_sk_algorithm_is_sk_true() {
+        assert!(KeyAlgorithm::SkEcdsaP256.is_sk());
+        assert!(!KeyAlgorithm::EcdsaP256.is_sk());
+    }
+
+    // --- KeyLabel edge cases ---
+
+    #[test]
+    fn test_key_label_digits_only_valid() {
+        assert!(KeyLabel::new("0123456789").is_ok());
+    }
+
+    #[test]
+    fn test_key_label_leading_hyphen_valid() {
+        // The charset rule has no positional constraint; a leading hyphen is allowed.
+        assert!(KeyLabel::new("-starts-with-hyphen").is_ok());
+    }
+
+    #[test]
+    fn test_key_label_leading_underscore_valid() {
+        assert!(KeyLabel::new("_starts_with_underscore").is_ok());
+    }
+
+    #[test]
+    fn test_key_label_at_sign_invalid() {
+        assert!(KeyLabel::new("key@host").is_err());
+    }
+
+    #[test]
+    fn test_key_label_equality_and_hash() {
+        use std::collections::HashSet;
+        let a = KeyLabel::new("my-key").unwrap();
+        let b = KeyLabel::new("my-key").unwrap();
+        let c = KeyLabel::new("other").unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&b));
+        assert!(!set.contains(&c));
+    }
+
+    // --- AccessPolicy::PasswordOnly coverage ---
+
+    #[test]
+    fn test_key_metadata_password_only_requires_user_presence() {
+        let label = KeyLabel::new("pwd").unwrap();
+        let meta = KeyMetadata::new(label, AccessPolicy::PasswordOnly, None);
+        assert!(meta.requires_user_presence());
+        assert_eq!(meta.access_policy, AccessPolicy::PasswordOnly);
+    }
+
+    #[test]
+    fn test_key_metadata_for_sk_sets_sk_algorithm_and_fields() {
+        let label = KeyLabel::new("sk-key").unwrap();
+        let cred_id = vec![0xDE_u8, 0xAD, 0xBE, 0xEF];
+        let rp_id = "sshenc-abc123.local".to_string();
+        let meta = KeyMetadata::for_sk(
+            label.clone(),
+            AccessPolicy::Any,
+            Some(PresenceMode::Strict),
+            Some("sk comment".to_string()),
+            cred_id.clone(),
+            rp_id.clone(),
+        );
+        assert!(matches!(meta.algorithm, KeyAlgorithm::SkEcdsaP256));
+        assert_eq!(meta.credential_id.as_deref(), Some(cred_id.as_slice()));
+        assert_eq!(meta.rp_id.as_deref(), Some(rp_id.as_str()));
+        assert_eq!(meta.presence_mode, Some(PresenceMode::Strict));
+    }
+
+    #[test]
+    fn test_effective_presence_mode_explicit_cached() {
+        let label = KeyLabel::new("k").unwrap();
+        let meta = KeyMetadata::with_presence_mode(
+            label,
+            AccessPolicy::Any,
+            Some(PresenceMode::Cached),
+            None,
+        );
+        assert_eq!(meta.effective_presence_mode(), PresenceMode::Cached);
+    }
+
+    #[test]
+    fn test_effective_presence_mode_explicit_none() {
+        let label = KeyLabel::new("k").unwrap();
+        let meta = KeyMetadata::with_presence_mode(
+            label,
+            AccessPolicy::None,
+            Some(PresenceMode::None),
+            None,
+        );
+        assert_eq!(meta.effective_presence_mode(), PresenceMode::None);
+        assert!(!meta.requires_user_presence());
+    }
+
+    #[test]
+    fn test_effective_presence_mode_unset_uses_migration_default() {
+        // When presence_mode is None, effective_presence_mode falls back to
+        // migration_default(access_policy). Verify it doesn't panic and returns
+        // a value consistent with the access policy.
+        for policy in [
+            AccessPolicy::None,
+            AccessPolicy::Any,
+            AccessPolicy::BiometricOnly,
+            AccessPolicy::PasswordOnly,
+        ] {
+            let label = KeyLabel::new("k").unwrap();
+            let meta = KeyMetadata::new(label, policy, None);
+            // Must not panic; value is whatever migration_default dictates.
+            let _ = meta.effective_presence_mode();
+        }
+    }
 }

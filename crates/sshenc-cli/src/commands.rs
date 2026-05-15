@@ -2614,8 +2614,73 @@ mod tests {
     #[cfg(not(windows))]
     use enclaveapp_core::KeyType;
     use sshenc_test_support::MockKeyBackend;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::sync::Mutex;
+
+    /// Backend wrapper that always fails `generate()` with a non-duplicate
+    /// error — simulates hardware or transport failure. All other methods
+    /// delegate to the inner `MockKeyBackend`.
+    struct AlwaysFailGenerateBackend(Arc<MockKeyBackend>);
+
+    impl KeyBackend for AlwaysFailGenerateBackend {
+        fn generate(&self, _opts: &KeyGenOptions) -> sshenc_core::error::Result<KeyInfo> {
+            Err(SshencError::Other("injected hardware failure".into()))
+        }
+        fn list(&self) -> sshenc_core::error::Result<Vec<KeyInfo>> {
+            self.0.list()
+        }
+        fn get(&self, label: &str) -> sshenc_core::error::Result<KeyInfo> {
+            self.0.get(label)
+        }
+        fn delete(&self, label: &str) -> sshenc_core::error::Result<()> {
+            self.0.delete(label)
+        }
+        fn rename(&self, old: &str, new: &str) -> sshenc_core::error::Result<()> {
+            self.0.rename(old, new)
+        }
+        fn sign(&self, label: &str, data: &[u8]) -> sshenc_core::error::Result<Vec<u8>> {
+            self.0.sign(label, data)
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// Backend wrapper where `generate()` succeeds until `delete()` is called,
+    /// then fails — simulates a backend that becomes unavailable mid-rotation.
+    struct FailAfterDeleteBackend {
+        inner: Arc<MockKeyBackend>,
+        deleted: AtomicBool,
+    }
+
+    impl KeyBackend for FailAfterDeleteBackend {
+        fn generate(&self, opts: &KeyGenOptions) -> sshenc_core::error::Result<KeyInfo> {
+            if self.deleted.load(Ordering::SeqCst) {
+                return Err(SshencError::Other("injected failure after delete".into()));
+            }
+            self.inner.generate(opts)
+        }
+        fn list(&self) -> sshenc_core::error::Result<Vec<KeyInfo>> {
+            self.inner.list()
+        }
+        fn get(&self, label: &str) -> sshenc_core::error::Result<KeyInfo> {
+            self.inner.get(label)
+        }
+        fn delete(&self, label: &str) -> sshenc_core::error::Result<()> {
+            self.deleted.store(true, Ordering::SeqCst);
+            self.inner.delete(label)
+        }
+        fn rename(&self, old: &str, new: &str) -> sshenc_core::error::Result<()> {
+            self.inner.rename(old, new)
+        }
+        fn sign(&self, label: &str, data: &[u8]) -> sshenc_core::error::Result<Vec<u8>> {
+            self.inner.sign(label, data)
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -4016,5 +4081,133 @@ HKEY_CURRENT_USER\Environment
         assert_ne!(k1.fingerprint_sha256, k3.fingerprint_sha256);
 
         assert_ne!(k1.public_key_bytes, k2.public_key_bytes);
+    }
+
+    // -----------------------------------------------------------------------
+    // rotation path tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn keygen_non_duplicate_error_leaves_existing_key_intact() {
+        // When generate() fails with a non-duplicate error the keygen flow must
+        // NOT call delete() — the existing key for that label must be untouched.
+        let inner = Arc::new(mock_backend());
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("intact-key").unwrap(),
+            comment: None,
+            access_policy: AccessPolicy::None,
+            presence_mode: sshenc_core::PresenceMode::None,
+            write_pub_path: None,
+            record_pub_path: None,
+        };
+        inner.generate(&opts).unwrap();
+        let original_bytes = inner.get("intact-key").unwrap().public_key_bytes.clone();
+
+        let backend = AlwaysFailGenerateBackend(Arc::clone(&inner));
+        let result = keygen(
+            &backend,
+            "intact-key",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
+            false,
+        );
+
+        assert!(
+            result.is_err(),
+            "keygen must return an error when generate() fails"
+        );
+        let after = inner
+            .get("intact-key")
+            .expect("key must still exist after a non-duplicate generate failure");
+        assert_eq!(
+            after.public_key_bytes, original_bytes,
+            "key material must be unchanged"
+        );
+    }
+
+    #[test]
+    fn keygen_mid_rotation_generate_failure_returns_error() {
+        // After delete() fires in the rotation path, if the second generate()
+        // fails the command must return an error (not panic or return Ok).
+        // Current behaviour: no rollback — the label is left keyless.
+        let inner = Arc::new(mock_backend());
+        let opts = KeyGenOptions {
+            label: KeyLabel::new("del-then-fail").unwrap(),
+            comment: None,
+            access_policy: AccessPolicy::None,
+            presence_mode: sshenc_core::PresenceMode::None,
+            write_pub_path: None,
+            record_pub_path: None,
+        };
+        inner.generate(&opts).unwrap();
+
+        let backend = FailAfterDeleteBackend {
+            inner: Arc::clone(&inner),
+            deleted: AtomicBool::new(false),
+        };
+        let result = keygen(
+            &backend,
+            "del-then-fail",
+            None,
+            None,
+            false,
+            AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
+            false,
+        );
+
+        assert!(
+            result.is_err(),
+            "keygen must return an error when the second generate() fails mid-rotation"
+        );
+    }
+
+    #[test]
+    fn keygen_rotation_updates_pub_file_with_new_key() {
+        // Successful rotation with write_pub_path: the pub file must be
+        // overwritten with the new key's blob after rotation completes.
+        let dir = test_dir("rot-pub");
+        let pub_path = dir.join("rot-key.pub");
+        let backend = mock_backend();
+
+        keygen(
+            &backend,
+            "rot-key",
+            Some("first".into()),
+            Some(pub_path.clone()),
+            false,
+            AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
+            false,
+        )
+        .unwrap();
+        let first_pub = std::fs::read_to_string(&pub_path).unwrap();
+
+        keygen(
+            &backend,
+            "rot-key",
+            Some("second".into()),
+            Some(pub_path.clone()),
+            false,
+            AccessPolicy::None,
+            sshenc_core::PresenceMode::None,
+            false,
+        )
+        .unwrap();
+        let second_pub = std::fs::read_to_string(&pub_path).unwrap();
+
+        assert_ne!(
+            second_pub, first_pub,
+            "pub file must be updated with new key blob after rotation"
+        );
+        assert!(
+            second_pub.contains("ecdsa-sha2-nistp256"),
+            "pub file should contain a valid key type"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

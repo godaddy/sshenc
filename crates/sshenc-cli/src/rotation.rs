@@ -278,4 +278,38 @@ mod tests {
         assert_eq!(append_ext(Path::new("allowed_signers"), "bak"), "bak");
         assert_eq!(append_ext(Path::new("foo.txt"), "bak"), "txt.bak");
     }
+
+    #[test]
+    fn rewrite_returns_error_when_source_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent_allowed_signers");
+        let result = rewrite(&path, "BLOB", "NEWBLOB");
+        assert!(result.is_err(), "rewrite on a missing file must return Err");
+    }
+
+    #[test]
+    fn rewrite_does_not_overwrite_existing_bak_file() {
+        // If a .bak already exists (from a previous rotation), the backup
+        // must not be overwritten — we keep the oldest backup so the user
+        // can always roll back to the pre-first-rotation state.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("allowed_signers");
+        let bak_path = path.with_extension("bak");
+        write(&path, "user@x ecdsa-sha2-nistp256 OLDBLOB comment\n");
+        write(&bak_path, "pre-existing-backup-content\n");
+
+        let n = rewrite(&path, "OLDBLOB", "NEWBLOB").unwrap();
+        assert_eq!(n, 1);
+
+        let bak_content = fs::read_to_string(&bak_path).unwrap();
+        assert_eq!(
+            bak_content, "pre-existing-backup-content\n",
+            ".bak file must not be overwritten on a repeat run"
+        );
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(
+            updated.contains("NEWBLOB"),
+            "allowed_signers must be updated"
+        );
+    }
 }

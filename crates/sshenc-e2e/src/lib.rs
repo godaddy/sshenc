@@ -16,7 +16,7 @@ use std::io;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -442,6 +442,11 @@ pub struct SshencEnv {
     /// the shared key.
     keys_dir_override: Option<PathBuf>,
     agent: Option<Child>,
+    /// Drained copy of the agent's stderr, capped at 64 KiB. A background
+    /// thread drains the pipe so the kernel buffer never fills and stalls
+    /// the agent. Tests read this on failure to surface the actual error
+    /// ("generate_key: failed: …") that would otherwise be invisible.
+    agent_stderr_buf: Arc<Mutex<Vec<u8>>>,
 }
 
 impl SshencEnv {
@@ -460,6 +465,7 @@ impl SshencEnv {
             home,
             keys_dir_override: None,
             agent: None,
+            agent_stderr_buf: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -519,11 +525,40 @@ impl SshencEnv {
         if let Some(path) = config {
             cmd.arg("--config").arg(path);
         }
-        let child = cmd
+        // Clear any stderr from a previous agent started by this env.
+        self.agent_stderr_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        let buf = Arc::clone(&self.agent_stderr_buf);
+        let mut child = cmd
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .context("spawn sshenc-agent")?;
+        // Drain stderr in a background thread so the kernel pipe buffer
+        // never fills (which would stall the agent mid-operation). The
+        // drained bytes are kept in agent_stderr_buf so tests can include
+        // them in failure messages.
+        if let Some(stderr) = child.stderr.take() {
+            thread::spawn(move || {
+                use std::io::Read;
+                const CAP: usize = 64 * 1024;
+                let mut reader = io::BufReader::new(stderr);
+                let mut tmp = [0_u8; 1024];
+                loop {
+                    match reader.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let mut g = buf.lock().unwrap_or_else(|e| e.into_inner());
+                            let remaining = CAP.saturating_sub(g.len());
+                            let take = n.min(remaining);
+                            g.extend_from_slice(&tmp[..take]);
+                        }
+                    }
+                }
+            });
+        }
         self.agent = Some(child);
 
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -537,6 +572,17 @@ impl SshencEnv {
             "sshenc-agent did not create socket {} in time",
             socket.display()
         );
+    }
+
+    /// Return a snapshot of the agent's stderr output collected so far.
+    /// Useful for including in assertion failure messages when a keygen
+    /// or sign operation fails with "check agent logs".
+    pub fn agent_stderr_snapshot(&self) -> String {
+        let buf = self
+            .agent_stderr_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        String::from_utf8_lossy(&buf).into_owned()
     }
 
     pub fn stop_agent(&mut self) {

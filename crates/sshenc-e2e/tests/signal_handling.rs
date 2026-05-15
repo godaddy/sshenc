@@ -317,7 +317,7 @@ fn agent_sigterm_during_keygen_leaves_consistent_keystore() {
     .expect("list");
     assert!(listed.succeeded(), "list: {}", listed.stderr);
 
-    let keys_dir = env.home().join(".sshenc").join("keys");
+    let keys_dir = env.keys_dir();
     for label in &labels {
         let key_in_list = listed.stdout.contains(label.as_str());
         let pub_file = keys_dir.join(format!("{label}.pub"));

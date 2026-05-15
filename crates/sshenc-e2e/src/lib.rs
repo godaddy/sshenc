@@ -569,6 +569,12 @@ impl SshencEnv {
         &self.home
     }
 
+    pub fn keys_dir(&self) -> PathBuf {
+        self.keys_dir_override
+            .clone()
+            .unwrap_or_else(persistent_keys_dir)
+    }
+
     pub fn ssh_dir(&self) -> PathBuf {
         self.home.join(".ssh")
     }

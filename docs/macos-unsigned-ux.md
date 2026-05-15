@@ -243,6 +243,75 @@ What we do instead:
   `enclaveapp: Data Protection keychain rejected access group ... (errSecMissingEntitlement) — binary lacks the matching keychain-access-groups entitlement`
   if a misconfigured caller asks for it without an entitlement.
 
+## Running e2e tests on macOS with real Secure Enclave hardware
+
+The `sshenc-e2e` integration test suite can run locally against the real SE
+backend (macOS developer machine). Several non-obvious behaviours apply.
+
+### Debug binary signing
+
+The Swift bridge in `libenclaveapp` always queries the keychain with
+`kSecAttrAccessGroup = "7UMADG39Z9.com.godaddy.sshenc"`. Any binary that
+does not carry the matching `keychain-access-groups` entitlement gets
+`errSecMissingEntitlement` (OSStatus -34018) on every keychain access.
+
+The test harness (`crates/sshenc-e2e/src/lib.rs`, `sign_dev_binaries()`)
+auto-signs the debug binaries with `installer/sshenc.entitlements` using the
+GoDaddy Developer ID certificate when one is present:
+
+```
+codesign --force --sign "Developer ID Application: Go Daddy Operating Company..." \
+         --entitlements installer/sshenc.entitlements \
+         -- target/debug/sshenc-agent
+```
+
+**Important:** do NOT add `--options runtime` (hardened runtime) to this
+command. Hardened runtime causes macOS to require a fresh keychain authorisation
+dialog for every keychain item access, even if "Always Allow" was previously
+granted. Without `--options runtime`, a one-time "Always Allow" in the keychain
+dialog is sufficient and subsequent accesses are silent.
+
+If the GoDaddy Developer ID certificate is not in your login keychain, the
+signing step is silently skipped and the tests will fail with
+`errSecMissingEntitlement` (-34018) errors in the agent log.
+
+### auth-policy none keys for raw-protocol tests
+
+Tests that send raw SSH agent protocol frames (rather than using `ssh` or
+`ssh-add`) must sign with a key that has `--auth-policy none`. Keys with a
+presence policy require Touch ID or passcode, which causes the signing
+`spawn_blocking` call to block indefinitely if the user is not at the terminal.
+
+The shared `e2e-shared` key is created with `--auth-policy none` for exactly
+this purpose. Tests that need to sign without user interaction should use this
+key. Locate it by its SSH wire-format blob (derived from
+`~/.sshenc-e2e/keys/e2e-shared.pub`) rather than by its comment, because
+`sshenc keygen` sets the comment to `username@hostname` rather than the key
+label.
+
+### Reading raw SSH responses correctly
+
+When reading raw SSH agent protocol responses, use `read_exact` on the 4-byte
+length prefix then `read_exact` on the body, rather than a timeout-based
+read-until-EOF loop. The agent does not close connections after responding — it
+loops waiting for the next request. A timeout-based reader blocks for the full
+timeout duration after receiving the response.
+
+### Rate limits under concurrent load
+
+The agent's connection rate limiter (`DEFAULT_MAX_CONNECTIONS_PER_SECOND` in
+`sshenc-agent/src/server.rs`) is set to 200/sec. This was raised from 50/sec
+because concurrency tests with 30 workers each making 3 connections (90 burst)
+were hitting the limit. The value errs on the side of availability over
+protection: the goal is to not block legitimate concurrent use cases.
+
+### macOS `sshenc install` LaunchAgent transition
+
+On macOS, `sshenc install` explicitly kills any running `sshenc-agent` (via
+`pkill -f sshenc-agent`), removes the socket, and installs a LaunchAgent plist.
+launchd then starts a new agent asynchronously. Tests that call `sshenc install`
+must wait for the socket to reappear before asserting the agent is live.
+
 ## Cleanup notes
 
 The agent-side `sshenc delete <label>` triggers the legacy-keychain

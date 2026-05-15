@@ -220,7 +220,87 @@ fn build_binaries() -> Result<()> {
             String::from_utf8_lossy(&output.stderr),
         );
     }
+    #[cfg(target_os = "macos")]
+    sign_dev_binaries();
     Ok(())
+}
+
+/// Sign the freshly-built binaries with the GoDaddy Developer ID certificate
+/// so they pass the agent's `validate_binary_signature()` check on macOS.
+///
+/// Best-effort: if the certificate isn't present (e.g., on a fresh machine
+/// or in CI where code-signing is skipped) we print a one-line warning and
+/// continue. Tests that spawn `sshenc-agent` will then fail on their own
+/// with a clear unsigned-binary message.
+#[cfg(target_os = "macos")]
+fn sign_dev_binaries() {
+    const TEAM_ID: &str = "7UMADG39Z9";
+
+    // Find the certificate fingerprint for our team in the local keychain.
+    let identity = find_signing_identity(TEAM_ID);
+    let Some(identity) = identity else {
+        eprintln!(
+            "e2e: no Developer ID certificate for team {TEAM_ID} found in keychain; \
+             agent-based tests will fail (install the GoDaddy signing cert to fix this)"
+        );
+        return;
+    };
+
+    // Locate installer/sshenc.entitlements relative to the workspace root.
+    // current_exe() is in target/<profile>/deps/ (test binary), so
+    // 4 parent() calls reach the workspace root.
+    let entitlements = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent()?
+            .parent()?
+            .parent()?
+            .parent()
+            .map(|root| root.join("installer/sshenc.entitlements"))
+    });
+    let entitlements = entitlements.filter(|p| p.exists());
+
+    for (name, _) in REQUIRED_BINS {
+        let Ok(bin) = workspace_bin(name) else {
+            continue;
+        };
+        let mut cmd = Command::new("codesign");
+        cmd.args(["--force", "--sign", &identity]);
+        if let Some(ent) = &entitlements {
+            cmd.arg("--entitlements").arg(ent);
+        }
+        cmd.arg("--")
+            .arg(&bin)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        match cmd.output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => eprintln!(
+                "e2e: codesign {name} failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("e2e: codesign {name} error: {e}"),
+        }
+    }
+}
+
+/// Return the SHA-1 fingerprint of the first Developer ID cert in the
+/// keychain whose name contains `team_id`. Returns `None` if none found.
+#[cfg(target_os = "macos")]
+fn find_signing_identity(team_id: &str) -> Option<String> {
+    let output = Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.contains(team_id) && line.contains("Developer ID") {
+            // Line format: "  N) <SHA1>  \"Developer ID Application: ...\""
+            let sha1 = line.split_whitespace().nth(1)?;
+            return Some(sha1.to_string());
+        }
+    }
+    None
 }
 
 /// Build the OpenSSH test image once per process.

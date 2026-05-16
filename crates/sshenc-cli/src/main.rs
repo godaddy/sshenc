@@ -14,6 +14,8 @@ mod commands;
 mod launchagent;
 mod rotation;
 #[cfg(windows)]
+mod upgrade;
+#[cfg(windows)]
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 mod wsl;
 
@@ -255,6 +257,26 @@ enum Commands {
     Completions {
         /// Shell to generate completions for (bash, zsh, fish).
         shell: clap_complete::Shell,
+    },
+
+    /// Upgrade sshenc to the latest release (Windows only).
+    ///
+    /// Downloads the release zip from GitHub and installs all binaries
+    /// into the existing install directory in-place.
+    #[cfg(windows)]
+    Upgrade {
+        /// Install a specific version instead of the latest release.
+        /// Accepts `1.2.3` or `v1.2.3`.
+        #[arg(long)]
+        to_version: Option<String>,
+
+        /// Force reinstall even when already at the target version.
+        #[arg(long)]
+        force: bool,
+
+        /// Print what would be downloaded/installed without making changes.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// One-time meta-integrity migration after upgrading to a build
@@ -553,6 +575,12 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
         Commands::Identity { label, name, email } => commands::set_identity(&label, &name, &email),
         Commands::Default { label } => commands::promote_to_default(&label),
         Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
+        #[cfg(windows)]
+        Commands::Upgrade {
+            to_version,
+            force,
+            dry_run,
+        } => upgrade::run(to_version, force, dry_run),
         Commands::MigrateMeta {
             yes,
             force_rerun_i_understand,

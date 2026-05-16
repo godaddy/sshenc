@@ -47,6 +47,8 @@ enclaveapp-apple = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 enclaveapp-windows = { workspace = true }
 enclaveapp-wsl = { workspace = true }
+reqwest = { workspace = true }
+zip = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 enclaveapp-keyring = { workspace = true }

@@ -8,12 +8,14 @@
 //!   gitenc [git args...]                      # use default (agent picks)
 //!   gitenc --config NAME                      # set this repo to always use NAME
 //!   gitenc --config                           # set this repo to use default agent
+//!   gitenc upgrade [--force] [--dry-run]      # update to latest release (Windows)
 //!
 //! Examples:
 //!   gitenc --label github-work clone git@github.com:org/repo.git
 //!   gitenc --label github-personal push origin main
 //!   gitenc --config github-work               # configure current repo
 //!   gitenc pull                               # uses configured key
+//!   gitenc upgrade                            # download and install latest release
 //!
 //! ## Transport
 //!
@@ -47,7 +49,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
                   invocations use the chosen sshenc identity for both SSH and commit signing.\n\n\
                   Without --label, gitenc uses the sshenc agent's default identity. All arguments \
                   after the gitenc options are passed verbatim to git; use `gitenc <cmd> --help` \
-                  or `gitenc -- --help` to read git's own help.",
+                  or `gitenc -- --help` to read git's own help.\n\n\
+                  Run `gitenc upgrade` to download and install the latest release (Windows only). \
+                  Pass `--to-version X.Y.Z`, `--force`, or `--dry-run` to control the upgrade.",
     version,
     disable_help_subcommand = true
 )]
@@ -74,6 +78,10 @@ fn main() {
 
     let cli = Cli::parse();
 
+    if cli.args.first().map(|s| s.as_str()) == Some("upgrade") {
+        run_upgrade(&cli.args[1..]);
+    }
+
     if cli.config {
         let label = match resolve_config_label(cli.label.as_deref(), &cli.args) {
             Ok(l) => l,
@@ -98,6 +106,39 @@ fn resolve_config_label(
         (None, [single]) => Ok(Some(single.clone())),
         (None, _) => Err("--config takes at most one positional argument".into()),
     }
+}
+
+/// Delegate `gitenc upgrade [args...]` to `sshenc upgrade [args...]`.
+/// All flag parsing (--to-version, --force, --dry-run) is handled by sshenc.
+#[cfg(windows)]
+#[allow(clippy::print_stderr, clippy::exit)]
+fn run_upgrade(extra_args: &[String]) -> ! {
+    let Some(sshenc_bin) =
+        enclaveapp_core::bin_discovery::find_trusted_binary("sshenc.exe", "sshenc")
+    else {
+        eprintln!("gitenc: trusted sshenc binary not found; cannot run upgrade");
+        std::process::exit(1);
+    };
+    match Command::new(&sshenc_bin)
+        .arg("upgrade")
+        .args(extra_args)
+        .status()
+    {
+        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!("gitenc: failed to run sshenc upgrade: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+#[allow(clippy::print_stderr, clippy::exit)]
+fn run_upgrade(_extra_args: &[String]) -> ! {
+    eprintln!(
+        "gitenc: upgrade is only supported on Windows; use your package manager to update sshenc"
+    );
+    std::process::exit(1);
 }
 
 #[allow(clippy::exit, clippy::print_stderr)]

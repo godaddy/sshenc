@@ -144,6 +144,16 @@ pub async fn run_agent(
             .map_err(|e| anyhow::anyhow!("failed to initialize backend: {e}"))?,
     );
 
+    // Warm before binding: is_socket_ready (in enclaveapp-core daemon.rs)
+    // returns true as soon as the socket file exists and accepts a connect(),
+    // which happens the moment UnixListener::bind() returns — before the event
+    // loop starts. If we bind first, ensure_daemon_ready fires prematurely and
+    // verify_agent_responsive's 10-second timeout can expire while warmup is
+    // still blocking the task. On a cold CI runner (keys dir absent), warmup
+    // retries up to ~32s total. Binding after warmup means is_socket_ready only
+    // returns true when the agent can immediately serve RequestIdentities.
+    warm_backend_identities(backend.as_ref());
+
     let listener = UnixListener::bind(&socket_path)?;
 
     // Set restrictive permissions on the socket
@@ -151,17 +161,6 @@ pub async fn run_agent(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     }
-
-    // Eager-warm the backend's identity enumeration before signaling
-    // ready. Without this, `signal_ready` fires the moment the socket
-    // is bound, but the very first `RequestIdentities` from a client
-    // is what triggers the (cold-start, ~5-10s on WSL→bridge) initial
-    // `list_keys`. ssh-keygen -Y sign racing the agent's first
-    // enumeration produced the "No private key found" symptom on
-    // Ubuntu's first matrix-test run after `wsl --shutdown`. Warming
-    // up here makes the daemon-ready signal meaningfully encode
-    // "identity cache is hot, safe to serve."
-    warm_backend_identities(backend.as_ref());
 
     signal_ready(ready_file)?;
     tracing::info!(socket = %socket_path.display(), "agent listening");

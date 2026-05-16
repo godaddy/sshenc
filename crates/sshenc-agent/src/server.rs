@@ -162,7 +162,6 @@ pub async fn run_agent(
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    signal_ready(ready_file)?;
     tracing::info!(socket = %socket_path.display(), "agent listening");
 
     // Print SSH_AUTH_SOCK hint
@@ -170,6 +169,25 @@ pub async fn run_agent(
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
     let mut rate_limiter = RateLimiter::new(DEFAULT_MAX_CONNECTIONS_PER_SECOND);
+
+    // Defer signal_ready into the event loop so the ready file is written only
+    // after listener.accept() has been registered with the runtime's epoll.
+    // is_socket_ready (enclaveapp-core daemon.rs) returns true the moment bind()
+    // succeeds — before the select loop is ever polled. Calling signal_ready
+    // synchronously here would let ensure_daemon_ready return before the first
+    // accept() poll, leaving a window where verify_agent_responsive connects but
+    // the agent is not yet in its accept loop. The spawned task runs when the
+    // main task first yields at listener.accept().await (Poll::Pending — no
+    // clients can connect before the ready signal fires), so by the time the
+    // parent sees the ready file the agent is genuinely polling for connections.
+    let ready_file_owned: Option<PathBuf> = ready_file.map(|p| p.to_path_buf());
+    tokio::spawn(async move {
+        if let Some(path) = ready_file_owned {
+            if let Err(e) = signal_ready(Some(&path)) {
+                tracing::warn!("signal_ready failed: {e}");
+            }
+        }
+    });
 
     loop {
         tokio::select! {
@@ -499,13 +517,12 @@ pub async fn run_agent(
 /// hole where every cold-start paid 60s wall-clock per distro for
 /// no functional reason.
 ///
-/// Retry with exponential backoff up to ~30s. The socket is already
-/// bound by the time we get here, so any client connecting during
-/// the warmup blocks on `accept` rather than seeing an empty
-/// identity list. signal_ready (called next) only fires after a
-/// successful warmup or the full retry budget, so when the agent
-/// signals ready it really IS ready: clients see the identities
-/// from their very first request.
+/// Retry with exponential backoff up to ~30s. Warm runs before the socket
+/// is bound: is_socket_ready returns true the moment bind() succeeds, so
+/// completing warmup first ensures the agent can serve RequestIdentities
+/// immediately. signal_ready is then deferred into the tokio event loop,
+/// so by the time the parent exits and clients connect the agent is already
+/// polling listener.accept().
 ///
 /// If the retries all fail (e.g. truly broken bridge / no TPM
 /// available), proceed anyway — the agent must still start so

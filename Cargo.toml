@@ -94,6 +94,11 @@ signature = "2"
 # System
 libc = "0.2"
 
+# HTTP client (upgrade command, Windows-only)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+# Zip extraction (upgrade command, Windows-only)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 # Misc
 rand = "0.8"
 

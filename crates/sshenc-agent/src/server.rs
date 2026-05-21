@@ -21,8 +21,39 @@ use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::signal;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::time::Instant as TokioInstant;
+
+/// Minimum gap between consecutive biometric prompts (prevents rapid-fire
+/// Touch ID dialogs from confusing the system or the user).
+const SIGN_COOLDOWN: Duration = Duration::from_millis(200);
+
+/// Duration threshold above which we infer that a real biometric prompt was
+/// shown (cached Secure Enclave signs complete in ~17-30ms; prompted ones
+/// take 1-3s).
+const SIGN_PROMPT_THRESHOLD: Duration = Duration::from_millis(200);
+
+/// Serializes biometric sign operations so that only one LAContext /
+/// Windows Hello evaluation is in flight at a time. Without this,
+/// concurrent sign requests cause macOS to cancel one or both biometric
+/// prompts, producing spurious "user cancelled authentication" errors.
+struct SignSerializer {
+    lock: TokioMutex<Option<TokioInstant>>,
+    cooldown: Duration,
+    prompt_threshold: Duration,
+}
+
+impl SignSerializer {
+    fn new() -> Self {
+        Self {
+            lock: TokioMutex::new(None),
+            cooldown: SIGN_COOLDOWN,
+            prompt_threshold: SIGN_PROMPT_THRESHOLD,
+        }
+    }
+}
 
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -103,7 +134,7 @@ impl RateLimiter {
     /// Returns `true` if the connection is allowed, `false` if rate-limited.
     fn check(&mut self) -> bool {
         let now = Instant::now();
-        let one_second_ago = now - std::time::Duration::from_secs(1);
+        let one_second_ago = now - Duration::from_secs(1);
 
         // Remove entries older than 1 second
         while self.window.front().is_some_and(|t| *t < one_second_ago) {
@@ -133,7 +164,7 @@ pub async fn run_agent(
     pub_dir: PathBuf,
     allowed_labels: Vec<String>,
     prompt_policy: PromptPolicy,
-    wrapping_key_cache_ttl: std::time::Duration,
+    wrapping_key_cache_ttl: Duration,
     ready_file: Option<&Path>,
     old_pid: Option<u32>,
 ) -> Result<()> {
@@ -168,6 +199,7 @@ pub async fn run_agent(
     println!("SSH_AUTH_SOCK={}", socket_path.display());
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
+    let sign_serializer: Arc<SignSerializer> = Arc::new(SignSerializer::new());
     let mut rate_limiter = RateLimiter::new(DEFAULT_MAX_CONNECTIONS_PER_SECOND);
 
     // Defer signal_ready into the event loop so the ready file is written only
@@ -209,8 +241,9 @@ pub async fn run_agent(
                 verify_peer_binary(&stream);
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
+                let serializer = Arc::clone(&sign_serializer);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, backend, allowed, prompt_policy).await
+                    if let Err(e) = handle_connection(stream, backend, allowed, prompt_policy, serializer).await
                     {
                         tracing::warn!("connection error: {e}");
                     }
@@ -321,12 +354,12 @@ fn prepare_socket_path(socket_path: &Path, old_pid: Option<u32>) -> Result<()> {
                     let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
                     if sent {
                         // Give the old agent up to 3 s to exit gracefully.
-                        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+                        let deadline = Instant::now() + Duration::from_secs(3);
                         while Instant::now() < deadline {
                             if UnixStream::connect(socket_path).is_err() {
                                 break;
                             }
-                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            std::thread::sleep(Duration::from_millis(50));
                         }
                     }
                     std::fs::remove_file(socket_path)?;
@@ -372,7 +405,7 @@ pub async fn run_agent(
     pub_dir: PathBuf,
     allowed_labels: Vec<String>,
     prompt_policy: PromptPolicy,
-    wrapping_key_cache_ttl: std::time::Duration,
+    wrapping_key_cache_ttl: Duration,
     ready_file: Option<&Path>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -383,6 +416,7 @@ pub async fn run_agent(
     );
 
     let allowed: Arc<HashSet<String>> = Arc::new(allowed_labels.into_iter().collect());
+    let sign_serializer: Arc<SignSerializer> = Arc::new(SignSerializer::new());
 
     // Restrict the named pipe's DACL to the current user ("creator owner") and
     // SYSTEM only. The default pipe DACL also grants Administrators and
@@ -419,6 +453,7 @@ pub async fn run_agent(
 
         let backend_for_unix = Arc::clone(&backend);
         let allowed_for_unix = Arc::clone(&allowed);
+        let serializer_for_unix = Arc::clone(&sign_serializer);
         let prompt_policy_for_unix = prompt_policy;
 
         std::thread::spawn(move || {
@@ -451,12 +486,14 @@ pub async fn run_agent(
                     Ok((conn, _)) => {
                         let backend = Arc::clone(&backend_for_unix);
                         let allowed = Arc::clone(&allowed_for_unix);
+                        let serializer = Arc::clone(&serializer_for_unix);
                         std::thread::spawn(move || {
                             handle_blocking_connection(
                                 conn,
                                 backend,
                                 allowed,
                                 prompt_policy_for_unix,
+                                serializer,
                             );
                         });
                     }
@@ -481,8 +518,9 @@ pub async fn run_agent(
 
                 let backend = Arc::clone(&backend);
                 let allowed = Arc::clone(&allowed);
+                let serializer = Arc::clone(&sign_serializer);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, backend, allowed, prompt_policy).await
+                    if let Err(e) = handle_connection(stream, backend, allowed, prompt_policy, serializer).await
                     {
                         tracing::warn!("pipe connection error: {e}");
                     }
@@ -540,7 +578,7 @@ fn warm_backend_identities(backend: &dyn KeyBackend) {
 
     for &delay in std::iter::once(&0_u64).chain(BACKOFFS_MS.iter()) {
         if delay > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(delay));
+            std::thread::sleep(Duration::from_millis(delay));
         }
         tried += 1;
         match backend.list() {
@@ -756,6 +794,7 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
     backend: Arc<dyn KeyBackend>,
     allowed_labels: Arc<HashSet<String>>,
     prompt_policy: PromptPolicy,
+    sign_serializer: Arc<SignSerializer>,
 ) -> Result<()> {
     tracing::debug!("new agent connection");
     let mut blob_cache: HashMap<Vec<u8>, String> = HashMap::new();
@@ -788,6 +827,7 @@ async fn handle_connection<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt
             allowed_labels.clone(),
             prompt_policy,
             &mut blob_cache,
+            &sign_serializer,
         )
         .await?;
         let response_payload = message::serialize_response(&response);
@@ -806,6 +846,7 @@ fn handle_blocking_connection(
     backend: Arc<dyn KeyBackend>,
     allowed_labels: Arc<HashSet<String>>,
     prompt_policy: PromptPolicy,
+    sign_serializer: Arc<SignSerializer>,
 ) {
     use std::io::{Read, Write};
 
@@ -860,6 +901,7 @@ fn handle_blocking_connection(
             Arc::clone(&allowed_labels),
             prompt_policy,
             &mut blob_cache,
+            &sign_serializer,
         )) {
             Ok(r) => r,
             Err(e) => {
@@ -917,6 +959,7 @@ async fn handle_request(
     allowed_labels: Arc<HashSet<String>>,
     prompt_policy: PromptPolicy,
     blob_cache: &mut HashMap<Vec<u8>, String>,
+    sign_serializer: &SignSerializer,
 ) -> Result<AgentResponse> {
     match request {
         AgentRequest::RequestIdentities => {
@@ -1172,6 +1215,16 @@ async fn handle_request(
             };
             if is_sk {
                 tracing::debug!(label = label.as_str(), "dispatching SK sign request");
+
+                // Serialize: SK/FIDO2 always requires user presence.
+                let mut last_prompt = sign_serializer.lock.lock().await;
+                if let Some(completed_at) = *last_prompt {
+                    let elapsed = completed_at.elapsed();
+                    if elapsed < sign_serializer.cooldown {
+                        tokio::time::sleep(sign_serializer.cooldown - elapsed).await;
+                    }
+                }
+
                 let started = Instant::now();
                 let backend_clone = backend.clone();
                 let label_clone = label.clone();
@@ -1180,6 +1233,12 @@ async fn handle_request(
                     backend_clone.sk_sign(&label_clone, &data_clone)
                 })
                 .await;
+
+                if started.elapsed() > sign_serializer.prompt_threshold {
+                    *last_prompt = Some(TokioInstant::now());
+                }
+                drop(last_prompt);
+
                 let sk_result = match sk_result {
                     Ok(r) => r,
                     Err(e) => {
@@ -1277,11 +1336,23 @@ async fn handle_request(
                 }
             }
 
-            // Sign with Secure Enclave. Pass `0` for cache_ttl so the
-            // backend uses its own stored TTL (the same value the
-            // wrapping-key cache uses); macOS plumbs this into the
-            // `LAContext.touchIDAuthenticationAllowableReuseDuration`
-            // for `Cached` mode.
+            // Serialize biometric sign operations to prevent concurrent
+            // LAContext evaluations from cancelling each other. Keys with
+            // PresenceMode::None skip serialization (no biometric prompt).
+            let needs_serialization = effective_mode != enclaveapp_core::types::PresenceMode::None;
+            let mut sign_guard = if needs_serialization {
+                let guard = sign_serializer.lock.lock().await;
+                if let Some(completed_at) = *guard {
+                    let elapsed = completed_at.elapsed();
+                    if elapsed < sign_serializer.cooldown {
+                        tokio::time::sleep(sign_serializer.cooldown - elapsed).await;
+                    }
+                }
+                Some(guard)
+            } else {
+                None
+            };
+
             let started = Instant::now();
             let backend_clone = backend.clone();
             let label_clone = label.clone();
@@ -1297,6 +1368,14 @@ async fn handle_request(
                 )
             })
             .await;
+
+            if let Some(ref mut guard) = sign_guard {
+                if started.elapsed() > sign_serializer.prompt_threshold {
+                    **guard = Some(TokioInstant::now());
+                }
+            }
+            drop(sign_guard);
+
             let sign_result = match sign_result {
                 Ok(r) => r,
                 Err(e) => {
@@ -2084,6 +2163,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2105,6 +2185,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2145,6 +2226,7 @@ mod tests {
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2169,6 +2251,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2193,6 +2276,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2215,6 +2299,7 @@ mod tests {
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2230,6 +2315,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2249,6 +2335,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2272,6 +2359,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2296,6 +2384,7 @@ mod tests {
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2324,6 +2413,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2356,6 +2446,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2380,6 +2471,7 @@ mod tests {
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2402,6 +2494,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2423,6 +2516,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2441,6 +2535,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2463,6 +2558,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2545,6 +2641,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2578,6 +2675,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -2621,6 +2719,7 @@ mod tests {
             backend.clone(),
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
+            Arc::new(SignSerializer::new()),
         )
         .await;
         assert!(conn_result.is_ok());
@@ -2680,6 +2779,7 @@ mod tests {
             backend.clone(),
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
+            Arc::new(SignSerializer::new()),
         )
         .await;
         assert!(conn_result.is_ok());
@@ -2713,6 +2813,7 @@ mod tests {
             backend.clone(),
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
+            Arc::new(SignSerializer::new()),
         )
         .await;
         // Should return Ok(()) on client disconnect (UnexpectedEof)
@@ -2745,6 +2846,7 @@ mod tests {
             backend.clone(),
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
+            Arc::new(SignSerializer::new()),
         )
         .await;
         // Zero length should cause early return with Ok(())
@@ -2779,6 +2881,7 @@ mod tests {
             backend.clone(),
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
+            Arc::new(SignSerializer::new()),
         )
         .await;
         // Oversized length should cause early return with Ok(())
@@ -2912,6 +3015,7 @@ mod tests {
             backend.clone(),
             Arc::new(allowed),
             PromptPolicy::KeyDefault,
+            Arc::new(SignSerializer::new()),
         )
         .await;
         assert!(conn_result.is_ok());
@@ -2961,7 +3065,7 @@ mod tests {
         assert!(!rl.check());
 
         // Manually expire the window entries by replacing them with old timestamps
-        let old = Instant::now() - std::time::Duration::from_secs(2);
+        let old = Instant::now() - Duration::from_secs(2);
         rl.window.clear();
         rl.window.push_back(old);
         rl.window.push_back(old);
@@ -3058,6 +3162,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -3099,6 +3204,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -3122,6 +3228,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -3145,6 +3252,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -3169,6 +3277,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -3197,6 +3306,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut cache,
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -3259,6 +3369,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::Always,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();
@@ -3284,6 +3395,7 @@ mod tests {
             Arc::new(empty_labels()),
             PromptPolicy::KeyDefault,
             &mut HashMap::new(),
+            &SignSerializer::new(),
         )
         .await
         .unwrap();

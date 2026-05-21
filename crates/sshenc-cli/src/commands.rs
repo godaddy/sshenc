@@ -2130,21 +2130,16 @@ pub fn promote_to_default(label: &str) -> Result<()> {
 }
 
 #[allow(clippy::print_stdout)]
-pub fn set_identity(label: &str, name: &str, email: &str) -> Result<()> {
+pub fn set_identity(label: &str, name: &str, email: &str, socket_path: &Path) -> Result<()> {
     let _label = KeyLabel::new(label)?;
 
-    use enclaveapp_core::metadata;
-
-    let keys_dir = sshenc_keys_dir();
-
-    let mut meta = sshenc_se::compat::load_sshenc_meta(&keys_dir, label)
-        .map_err(|e| anyhow::anyhow!("failed to load metadata for '{label}': {e}"))?;
-    meta.set_app_field("git_name", name.to_string());
-    meta.set_app_field("git_email", email.to_string());
-
-    // Write updated metadata
-    metadata::save_meta(&keys_dir, label, &meta)
-        .map_err(|e| anyhow::anyhow!("failed to save metadata for '{label}': {e}"))?;
+    sshenc_agent_proto::client::try_set_identity_via_socket(socket_path, label, name, email)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to set identity for '{label}': agent did not accept the request. \
+             Is the sshenc agent running?"
+            )
+        })?;
 
     println!("Set identity for key '{label}':");
     println!("  Name:  {name}");

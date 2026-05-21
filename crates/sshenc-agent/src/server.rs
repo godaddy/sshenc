@@ -1288,9 +1288,10 @@ async fn handle_request(
                 .await
             {
                 Ok(Ok(k)) => k,
-                Ok(Err(_)) => {
+                Ok(Err(e)) => {
                     tracing::warn!(
                         label = label.as_str(),
+                        error = %e,
                         "key lookup failed; evicting from cache"
                     );
                     blob_cache.remove(&key_blob);
@@ -1793,6 +1794,76 @@ async fn handle_request(
                 }
                 Err(e) => {
                     tracing::warn!(label = label_str, error = %e, "migrate_meta: failed");
+                    Ok(AgentResponse::Failure)
+                }
+            }
+        }
+        AgentRequest::SetIdentity { label, name, email } => {
+            let label_str = match std::str::from_utf8(&label) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("set_identity: label not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            let name_str = match std::str::from_utf8(&name) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("set_identity: name not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            let email_str = match std::str::from_utf8(&email) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("set_identity: email not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            tracing::info!(label = label_str, "handling set_identity request");
+
+            if !allowed_labels.is_empty() && !allowed_labels.contains(label_str) {
+                tracing::warn!(
+                    label = label_str,
+                    "set_identity: label not in agent's allowed list"
+                );
+                return Ok(AgentResponse::Failure);
+            }
+
+            let dir = sshenc_se::sshenc_keys_dir();
+            let started = Instant::now();
+
+            let result = (|| -> Result<(), String> {
+                let mut meta = sshenc_se::compat::load_sshenc_meta(&dir, label_str)
+                    .map_err(|e| format!("load meta: {e}"))?;
+                meta.set_app_field("git_name", name_str.to_string());
+                meta.set_app_field("git_email", email_str.to_string());
+                enclaveapp_core::metadata::save_meta(&dir, label_str, &meta)
+                    .map_err(|e| format!("save meta: {e}"))?;
+                perform_migrate_meta(&dir, label_str)?;
+                Ok(())
+            })();
+
+            let error_msg = result
+                .as_ref()
+                .err()
+                .map(|e| format!("set_identity failed: {e}"));
+            crate::op_log::record(
+                "set_identity",
+                Some(label_str),
+                None,
+                started.elapsed(),
+                result.is_ok(),
+                error_msg.as_deref(),
+                None,
+            );
+            match result {
+                Ok(()) => {
+                    tracing::info!(label = label_str, "set_identity: succeeded");
+                    Ok(AgentResponse::Success)
+                }
+                Err(e) => {
+                    tracing::warn!(label = label_str, error = %e, "set_identity: failed");
                     Ok(AgentResponse::Failure)
                 }
             }

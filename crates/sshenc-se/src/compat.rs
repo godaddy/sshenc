@@ -55,6 +55,7 @@ pub fn load_sshenc_meta(
             .unwrap_or("")
             .to_string();
         let mut meta = enclaveapp_core::KeyMeta {
+            warning: enclaveapp_core::metadata::meta_warning_default(),
             label: label.to_string(),
             key_type: KeyType::Signing,
             access_policy,

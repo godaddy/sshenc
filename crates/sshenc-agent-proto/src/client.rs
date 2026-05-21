@@ -28,7 +28,7 @@ use crate::message::{
     self, AgentRequest, AgentResponse, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENTC_SIGN_REQUEST,
     SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER, SSH_AGENTC_SSHENC_DELETE_KEY,
     SSH_AGENTC_SSHENC_GENERATE_KEY, SSH_AGENTC_SSHENC_MIGRATE_META, SSH_AGENTC_SSHENC_RENAME_KEY,
-    SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER,
+    SSH_AGENTC_SSHENC_SET_IDENTITY, SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER,
 };
 use std::io::{Read, Write};
 use std::path::Path;
@@ -351,6 +351,16 @@ pub fn try_set_migration_marker_via_socket(sock_path: &Path) -> Option<()> {
     request_set_migration_marker(&mut stream)
 }
 
+pub fn try_set_identity_via_socket(
+    sock_path: &Path,
+    label: &str,
+    name: &str,
+    email: &str,
+) -> Option<()> {
+    let mut stream = connect_agent(sock_path)?;
+    request_set_identity(&mut stream, label, name, email)
+}
+
 /// Best-effort lookup of the agent socket from the environment —
 /// `SSH_AUTH_SOCK` on Unix, or on Windows (cmd.exe, PowerShell, Git
 /// Bash, etc.) the same variable if set. If absent, returns `None`
@@ -549,6 +559,32 @@ fn request_migrate_meta<S: Read + Write>(stream: &mut S, label: &str) -> Option<
         }
         other => {
             tracing::debug!(?other, "agent proxy: unexpected response to migrate-meta");
+            None
+        }
+    }
+}
+
+fn request_set_identity<S: Read + Write>(
+    stream: &mut S,
+    label: &str,
+    name: &str,
+    email: &str,
+) -> Option<()> {
+    let payload = message::serialize_request(&AgentRequest::SetIdentity {
+        label: label.as_bytes().to_vec(),
+        name: name.as_bytes().to_vec(),
+        email: email.as_bytes().to_vec(),
+    });
+    debug_assert_eq!(payload[0], SSH_AGENTC_SSHENC_SET_IDENTITY);
+    send_framed(stream, &payload)?;
+    match recv_response(stream)? {
+        AgentResponse::Success => Some(()),
+        AgentResponse::Failure => {
+            tracing::debug!("agent proxy: set-identity returned FAILURE");
+            None
+        }
+        other => {
+            tracing::debug!(?other, "agent proxy: unexpected response to set-identity");
             None
         }
     }

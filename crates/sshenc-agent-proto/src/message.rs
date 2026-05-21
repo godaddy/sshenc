@@ -59,6 +59,11 @@ pub const SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER: u8 = 0xF5;
 /// migrate-meta calls succeed. After this, the agent's legacy_meta
 /// error variant switches to the strong-tamper-warning form.
 pub const SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER: u8 = 0xF6;
+/// `SSH_AGENTC_SSHENC_SET_IDENTITY`: have the agent update the
+/// git identity (name + email) in a key's `.meta` and re-stamp the
+/// meta-tag. The CLI must NOT modify `.meta` directly — every meta
+/// mutation goes through the agent so the keychain tag stays in sync.
+pub const SSH_AGENTC_SSHENC_SET_IDENTITY: u8 = 0xF7;
 
 // sshenc-specific response: carries the public-key bytes of a
 // freshly-generated key back to the CLI. On failure the agent uses
@@ -168,6 +173,15 @@ pub enum AgentRequest {
     /// write the migrate-meta marker to the keychain. Sent by the
     /// CLI after all per-label migrations succeed.
     SetMigrationMarker,
+    /// `SSH_AGENTC_SSHENC_SET_IDENTITY` (sshenc extension):
+    /// update the git name and email in a key's `.meta` and re-stamp
+    /// the meta-tag atomically. The CLI delegates here instead of
+    /// writing `.meta` directly so the keychain tag is always in sync.
+    SetIdentity {
+        label: Vec<u8>,
+        name: Vec<u8>,
+        email: Vec<u8>,
+    },
     /// An unrecognized message type.
     Unknown(u8),
 }
@@ -271,6 +285,13 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
         }
         SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER => Ok(AgentRequest::CheckMigrationMarker),
         SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER => Ok(AgentRequest::SetMigrationMarker),
+        SSH_AGENTC_SSHENC_SET_IDENTITY => {
+            let mut cursor = Cursor::new(body);
+            let label = wire::read_string(&mut cursor)?;
+            let name = wire::read_string(&mut cursor)?;
+            let email = wire::read_string(&mut cursor)?;
+            Ok(AgentRequest::SetIdentity { label, name, email })
+        }
         other => Ok(AgentRequest::Unknown(other)),
     }
 }
@@ -370,6 +391,13 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
         }
         AgentRequest::CheckMigrationMarker => vec![SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER],
         AgentRequest::SetMigrationMarker => vec![SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER],
+        AgentRequest::SetIdentity { label, name, email } => {
+            let mut buf = vec![SSH_AGENTC_SSHENC_SET_IDENTITY];
+            wire::write_string(&mut buf, label);
+            wire::write_string(&mut buf, name);
+            wire::write_string(&mut buf, email);
+            buf
+        }
         AgentRequest::Unknown(t) => vec![*t],
     }
 }
@@ -1198,5 +1226,35 @@ mod tests {
             matches!(parsed, AgentRequest::SetMigrationMarker),
             "got {parsed:?}"
         );
+    }
+
+    // --- sshenc SetIdentity extension ---
+
+    #[test]
+    fn roundtrip_set_identity_request() {
+        let original = AgentRequest::SetIdentity {
+            label: b"my-key".to_vec(),
+            name: b"Jay Gowdy".to_vec(),
+            email: b"jay@example.com".to_vec(),
+        };
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_SET_IDENTITY);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::SetIdentity { label, name, email } => {
+                assert_eq!(label, b"my-key");
+                assert_eq!(name, b"Jay Gowdy");
+                assert_eq!(email, b"jay@example.com");
+            }
+            other => panic!("expected SetIdentity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_truncated_set_identity_request() {
+        let mut payload = vec![SSH_AGENTC_SSHENC_SET_IDENTITY];
+        wire::write_string(&mut payload, b"label");
+        // Missing name and email
+        assert!(parse_request(&payload).is_err());
     }
 }

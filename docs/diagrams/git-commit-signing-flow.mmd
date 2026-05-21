@@ -1,0 +1,25 @@
+sequenceDiagram
+    participant User
+    participant Git
+    participant Sshenc as sshenc -Y sign
+    participant Agent as sshenc-agent
+    participant Backend as sshenc-se
+    participant LibEA as libenclaveapp
+    participant Host as GitHub / verifier
+
+    User->>Git: git commit
+    Git->>Git: gpg.format=ssh and commit.gpgsign=true
+    Git->>Git: Read user.signingkey public key path
+    Git->>Sshenc: Invoke gpg.ssh.program as ssh-keygen -Y sign compatible command
+    Sshenc->>Sshenc: Intercept -Y sign before normal CLI parsing
+    Sshenc->>Sshenc: Read public key and build SSHSIG pre-sign bytes
+    Sshenc->>Agent: Ensure agent is ready and send SignRequest
+    Agent->>Backend: Match public key blob to stored identity
+    Backend->>LibEA: Sign SSHSIG pre-sign bytes
+    LibEA-->>Backend: DER ECDSA signature from platform backend
+    Backend-->>Agent: SSH-format signature
+    Agent-->>Sshenc: SignResponse
+    Sshenc-->>Git: PEM-armored SSHSIG v1 signature
+    Git-->>User: Commit object with SSH signature
+    User->>Host: Push commit and public signing key
+    Host-->>User: Signature shown as verified when key is trusted

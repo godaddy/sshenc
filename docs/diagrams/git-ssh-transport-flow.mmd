@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant User
+    participant Gitenc as gitenc
+    participant Git as git
+    participant Sshenc as sshenc ssh
+    participant SSH as OpenSSH
+    participant Agent as sshenc-agent
+    participant Backend as libenclaveapp backend
+    participant Remote as Git remote
+
+    alt one-shot identity
+        User->>Gitenc: gitenc --label work push
+        Gitenc->>Gitenc: Build GIT_SSH_COMMAND="sshenc ssh --label work --"
+        Gitenc->>Git: Run git push with environment override
+    else repo configured
+        User->>Git: git push
+        Git->>Git: Read core.sshCommand from repo config
+    end
+
+    Git->>Sshenc: Invoke sshenc ssh [--label work] -- host command
+    Sshenc->>Sshenc: Ensure sshenc-agent is running
+    Sshenc->>SSH: Exec or spawn OpenSSH with identity constraints
+    SSH->>Remote: Start SSH authentication
+    Remote-->>SSH: Challenge for selected public key
+    SSH->>Agent: SignRequest over sshenc agent socket or named pipe
+    Agent->>Backend: Sign challenge with selected hardware-backed key
+    Backend-->>Agent: Signature
+    Agent-->>SSH: Signature
+    SSH-->>Remote: Public-key auth response
+    Remote-->>Git: Authenticated git transport
+    Git-->>User: Git operation result

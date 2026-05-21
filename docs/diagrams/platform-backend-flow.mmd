@@ -1,0 +1,37 @@
+flowchart LR
+    caller["sshenc-agent\nSshencBackend"] --> appstorage["enclaveapp-app-storage\nselect backend at runtime"]
+    appstorage --> os{"Operating environment"}
+
+    os -->|macOS Apple Silicon or T2| apple["enclaveapp-apple"]
+    apple --> se["Secure Enclave\nCryptoKit signing key"]
+
+    os -->|Windows native| windows["enclaveapp-windows"]
+    windows --> tpmwin["TPM 2.0 via CNG"]
+
+    os -->|Linux with TPM| linuxtpm["enclaveapp-linux-tpm"]
+    linuxtpm --> tpmlin["TPM 2.0 via tss-esapi"]
+
+    os -->|Linux without TPM| linuxsoft["enclaveapp-software + enclaveapp-keyring"]
+    linuxsoft --> soft["Software P-256 key\nwrapped by OS keyring key"]
+
+    os -->|WSL| wsl["enclaveapp-wsl"]
+    wsl --> bridge["sshenc-tpm-bridge.exe\nJSON-RPC over stdio"]
+    bridge --> tpmwsl["Windows TPM 2.0"]
+
+    se --> result["ECDSA P-256 signature"]
+    tpmwin --> result
+    tpmlin --> result
+    soft --> result
+    tpmwsl --> result
+
+    result --> agent["sshenc-agent returns SSH signature"]
+
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#164e63;
+    classDef decision fill:#f8fafc,stroke:#64748b,color:#0f172a;
+    classDef hardware fill:#f0fdf4,stroke:#16a34a,color:#14532d;
+    classDef warn fill:#fef2f2,stroke:#dc2626,color:#7f1d1d;
+
+    class caller,appstorage,apple,windows,linuxtpm,linuxsoft,wsl,bridge,agent,result process;
+    class os decision;
+    class se,tpmwin,tpmlin,tpmwsl hardware;
+    class soft warn;

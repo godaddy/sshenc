@@ -1,0 +1,54 @@
+flowchart TD
+    start["sshenc keygen\nor sshenc-keygen"] --> validate["Validate label and options"]
+    validate --> proxy["AgentProxyBackend::generate"]
+    proxy --> ready["Ensure sshenc-agent is reachable"]
+    ready --> rpc["Send sshenc generate RPC over local IPC"]
+
+    rpc --> agent["sshenc-agent"]
+    agent --> direct["SshencBackend::generate"]
+    direct --> libea["libenclaveapp AppSigningBackend"]
+    libea --> backend{"Runtime backend"}
+
+    backend --> mac["macOS Secure Enclave"]
+    backend --> win["Windows TPM"]
+    backend --> lin["Linux TPM"]
+    backend --> soft["Software fallback"]
+    backend --> wsl["WSL bridge"]
+
+    mac --> files["Write application-side files"]
+    win --> files
+    lin --> files
+    soft --> files
+    wsl --> files
+
+    files --> meta["<label>.meta\nlabel, comment, policy, git identity"]
+    files --> pub["<label>.pub\ncached SEC1 public key bytes"]
+    files --> handle["<label>.handle\nopaque platform reference"]
+    files --> sshpub["<label>.ssh.pub or ~/.ssh/<label>.pub\nOpenSSH public key"]
+
+    files --> response["Return public key bytes to CLI"]
+    response --> print["CLI prints fingerprints and optional public-key path"]
+
+    list["sshenc list / inspect / export-pub"] --> readside["Read .meta and .pub files directly"]
+    readside --> noffi["No platform crypto call for read-only operations"]
+
+    sign["ssh, git push, or git commit signing"] --> signagent["sshenc-agent sign request"]
+    signagent --> load["Match key by label or public key blob"]
+    load --> signbackend["Ask platform backend to sign"]
+    signbackend --> sig["Return SSH-format signature"]
+
+    delete["sshenc delete NAME"] --> deleteproxy["AgentProxyBackend::delete"]
+    deleteproxy --> deleterpc["Send delete RPC to agent"]
+    deleterpc --> deleteagent["Agent removes platform key and sidecar files"]
+
+    classDef command fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#164e63;
+    classDef storage fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    classDef backend fill:#f0fdf4,stroke:#16a34a,color:#14532d;
+    classDef note fill:#f8fafc,stroke:#64748b,color:#0f172a;
+
+    class start,list,sign,delete command;
+    class proxy,ready,rpc,agent,direct,response,readside,signagent,load,signbackend,deleteproxy,deleterpc,deleteagent process;
+    class meta,pub,handle,sshpub,files storage;
+    class libea,backend,mac,win,lin,soft,wsl backend;
+    class noffi,print,sig note;

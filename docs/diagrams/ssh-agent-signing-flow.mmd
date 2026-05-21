@@ -1,0 +1,30 @@
+sequenceDiagram
+    participant User
+    participant SSH as OpenSSH client
+    participant Agent as sshenc-agent
+    participant Proto as sshenc-agent-proto
+    participant Backend as sshenc-se SshencBackend
+    participant Store as ~/.sshenc/keys
+    participant LibEA as libenclaveapp
+    participant HSM as Secure Enclave / TPM / fallback
+
+    User->>SSH: ssh, scp, sftp, git transport
+    SSH->>Agent: Connect via IdentityAgent socket or named pipe
+    SSH->>Agent: RequestIdentities
+    Agent->>Proto: Parse SSH agent frame
+    Agent->>Backend: list()
+    Backend->>Store: Read .meta and .pub
+    Backend-->>Agent: Allowed identities
+    Agent-->>SSH: Public key blobs
+
+    SSH->>Agent: SignRequest(key_blob, challenge)
+    Agent->>Proto: Parse and validate request
+    Agent->>Backend: Match key and prompt policy
+    Backend->>LibEA: sign(label, challenge)
+    LibEA->>HSM: Platform signing operation
+    HSM-->>LibEA: DER ECDSA signature
+    LibEA-->>Backend: Signature bytes
+    Backend->>Proto: Convert DER to SSH signature format
+    Proto-->>Agent: SSH agent SignResponse
+    Agent-->>SSH: Signature
+    SSH-->>User: Authentication succeeds or fails

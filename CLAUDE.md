@@ -80,6 +80,26 @@ Supports macOS, Windows, and Linux:
 - **Windows**: Uses TPM 2.0 via Windows CNG.
 - **Linux**: Uses software-backed ECDSA P-256 keys via `enclaveapp-software`. Keys are stored on disk in `~/.sshenc/keys/` and are NOT hardware-protected.
 
+## libenclaveapp Protection Class Safety
+
+sshenc depends on libenclaveapp for Secure Enclave operations. The Apple
+backend (`bridge.swift`) has **two protection class sites that must differ**:
+
+- **SE key access control** (`makeAccessControl`) → `WhenUnlockedThisDeviceOnly`
+  — required for LAContext biometric caching (`touchIDAuthenticationAllowableReuseDuration`)
+- **Keychain wrapping key** (`keychain_store`) → `AfterFirstUnlockThisDeviceOnly`
+  — required to survive sleep/wake
+
+See `libenclaveapp/AGENTS.md` for the full safety rules. The short version:
+**never do a blanket protection class replacement in bridge.swift.** Getting
+`makeAccessControl` wrong forces every user to delete and regenerate all keys
+(the SE key access control is immutable after creation). This happened once
+(PR #158) and must never happen again.
+
+**Verification after any libenclaveapp bridge.swift change:** first sign should
+trigger Touch ID (~2-3s), second sign within cache window should complete in
+<50ms. If every sign takes 2-3s, biometric caching is broken.
+
 ## Test failures: no flakes
 
 Test failures are never "flakes". A red is a real defect in the code, the

@@ -107,6 +107,20 @@ If you've accidentally run an unsigned agent and signing is broken:
    sshenc -Y sign -f /tmp/test-sign.txt
    ```
 
+## libenclaveapp Changes: Protection Class Safety
+
+When making changes to `libenclaveapp/crates/enclaveapp-apple/swift/bridge.swift`,
+read `libenclaveapp/AGENTS.md` first. The SE key access control and keychain
+wrapping key use **different** protection classes for different reasons:
+
+- `makeAccessControl()` → `WhenUnlockedThisDeviceOnly` (biometric caching)
+- `keychain_store()` → `AfterFirstUnlockThisDeviceOnly` (sleep/wake survival)
+
+**Never change `makeAccessControl`'s protection class.** The SE key access
+control is immutable after key creation — getting it wrong forces key
+regeneration for every user. After any bridge.swift change, verify biometric
+caching: second sign within cache window must complete in <50ms.
+
 ## Build Commands
 
 When working on sshenc code changes:

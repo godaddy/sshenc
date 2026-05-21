@@ -1840,7 +1840,13 @@ async fn handle_request(
                 meta.set_app_field("git_email", email_str.to_string());
                 enclaveapp_core::metadata::save_meta(&dir, label_str, &meta)
                     .map_err(|e| format!("save meta: {e}"))?;
-                perform_migrate_meta(&dir, label_str)?;
+                if let Err(e) = perform_migrate_meta(&dir, label_str) {
+                    tracing::warn!(
+                        label = label_str,
+                        error = %e,
+                        "set_identity: meta-tag re-stamp failed (meta saved successfully)"
+                    );
+                }
                 Ok(())
             })();
 

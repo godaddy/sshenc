@@ -656,8 +656,12 @@ dependencies = [
 name = "enclaveapp-windows"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "dirs",
+ "elliptic-curve",
  "enclaveapp-core",
+ "p256",
+ "rand 0.9.4",
  "serde",
  "serde_json",
  "sha2",

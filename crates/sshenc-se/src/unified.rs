@@ -200,6 +200,10 @@ impl SshencBackend {
             // path. Keep the soft-Hello-UX opt-in off for the signing
             // backend; it's a no-op on macOS/Linux regardless.
             prefer_windows_hello_ux: false,
+            // sshenc has its own software fallback (enclaveapp-software)
+            // controlled by $SSHENC_FORCE_SOFTWARE in bin_discovery.rs.
+            // Don't let libenclaveapp auto-downgrade on Windows.
+            windows_software_fallback: enclaveapp_app_storage::WindowsSoftwareFallback::Disabled,
         })?;
 
         Ok(Self {

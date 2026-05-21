@@ -1,0 +1,72 @@
+flowchart TB
+    subgraph userland["User-controlled process space"]
+        user["User shell"]
+        git["git"]
+        ssh["OpenSSH"]
+        sshenc["sshenc / sshenc-keygen / gitenc"]
+        pkcs11["sshenc-pkcs11 launcher"]
+    end
+
+    subgraph ipc["Local IPC boundary"]
+        socket["Unix socket\n0600 in private directory"]
+        pipe["Windows named pipe\nowner and SYSTEM DACL"]
+    end
+
+    subgraph agentbox["sshenc trust boundary"]
+        agent["sshenc-agent\nonly process that calls platform crypto"]
+        policy["allowed_labels and prompt policy"]
+        proto["SSH agent protocol parser"]
+    end
+
+    subgraph files["Application-side files"]
+        meta[".meta\nlabels, comments, git identity"]
+        pub[".pub / .ssh.pub\npublic keys"]
+        handle[".handle\nopaque reference or fallback wrapped key"]
+    end
+
+    subgraph platform["Platform crypto boundary"]
+        libea["libenclaveapp"]
+        hsm["Secure Enclave / TPM"]
+        fallback["Linux software fallback"]
+    end
+
+    user --> git
+    user --> ssh
+    user --> sshenc
+    git --> sshenc
+    git --> ssh
+    ssh --> socket
+    ssh --> pipe
+    ssh --> pkcs11
+    pkcs11 --> agent
+    sshenc --> socket
+    sshenc --> pipe
+
+    socket --> proto
+    pipe --> proto
+    proto --> agent
+    agent --> policy
+    policy --> files
+    policy --> libea
+    libea --> hsm
+    libea --> fallback
+
+    sshenc -. read-only operations .-> meta
+    sshenc -. read-only operations .-> pub
+    sshenc -. no direct platform signing .-> agent
+
+    handle -. not an exportable private key on hardware backends .-> libea
+
+    classDef external fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef ipcclass fill:#f8fafc,stroke:#64748b,color:#0f172a;
+    classDef trusted fill:#ecfeff,stroke:#0891b2,color:#164e63;
+    classDef storage fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    classDef hardware fill:#f0fdf4,stroke:#16a34a,color:#14532d;
+    classDef warn fill:#fef2f2,stroke:#dc2626,color:#7f1d1d;
+
+    class user,git,ssh,sshenc,pkcs11 external;
+    class socket,pipe ipcclass;
+    class agent,policy,proto trusted;
+    class meta,pub,handle storage;
+    class libea,hsm hardware;
+    class fallback warn;

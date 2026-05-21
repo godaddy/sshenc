@@ -1,0 +1,86 @@
+flowchart LR
+    user["User / developer"]
+    ssh["OpenSSH, scp, sftp"]
+    git["Git"]
+
+    subgraph cli["CLI and wrapper binaries"]
+        sshenc["sshenc CLI"]
+        keygen["sshenc-keygen"]
+        gitenc["gitenc"]
+        pkcs11["sshenc-pkcs11 launcher"]
+    end
+
+    subgraph shared["Workspace crates"]
+        core["sshenc-core\nconfig, labels, SSH encoding, file helpers"]
+        se["sshenc-se\nKeyBackend, SshencBackend, AgentProxyBackend"]
+        proto["sshenc-agent-proto\nSSH agent protocol and sshenc extensions"]
+    end
+
+    subgraph daemon["Agent process"]
+        agent["sshenc-agent\nUnix socket or Windows named pipe"]
+    end
+
+    subgraph appfiles["Application files"]
+        config["config.toml\nsocket path, prompt policy, allowed labels"]
+        keys["~/.sshenc/keys\n.meta, .pub, .ssh.pub, .handle"]
+        sshpub["~/.ssh/*.pub\nOpenSSH public key lines"]
+    end
+
+    subgraph libea["libenclaveapp boundary"]
+        appstorage["enclaveapp-app-storage\nruntime backend selection"]
+        enclavecore["enclaveapp-core\nsigning traits and shared helpers"]
+    end
+
+    subgraph platform["Platform crypto"]
+        mac["macOS Secure Enclave"]
+        win["Windows TPM 2.0"]
+        linux["Linux TPM 2.0"]
+        software["Linux software fallback"]
+        wsl["WSL bridge to Windows TPM"]
+    end
+
+    user --> sshenc
+    user --> keygen
+    user --> gitenc
+    user --> ssh
+    user --> git
+
+    gitenc --> git
+    git --> sshenc
+    git --> ssh
+    ssh --> pkcs11
+    ssh --> agent
+    pkcs11 --> agent
+
+    sshenc --> core
+    keygen --> core
+    gitenc --> core
+    sshenc --> se
+    keygen --> se
+    gitenc --> se
+    se --> proto
+    proto --> agent
+    agent --> se
+
+    core --> config
+    se --> keys
+    sshenc --> sshpub
+    gitenc --> sshpub
+
+    se --> appstorage
+    appstorage --> enclavecore
+    enclavecore --> mac
+    enclavecore --> win
+    enclavecore --> linux
+    enclavecore --> software
+    enclavecore --> wsl
+
+    classDef boundary fill:#f8fafc,stroke:#64748b,color:#0f172a;
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#164e63;
+    classDef storage fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    classDef hardware fill:#f0fdf4,stroke:#16a34a,color:#14532d;
+
+    class cli,shared,daemon,libea boundary;
+    class sshenc,keygen,gitenc,pkcs11,agent process;
+    class config,keys,sshpub storage;
+    class mac,win,linux,software,wsl hardware;

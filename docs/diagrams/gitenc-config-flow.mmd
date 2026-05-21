@@ -1,0 +1,48 @@
+flowchart TD
+    start["gitenc --config [NAME]\nor gitenc --label NAME --config"] --> resolve["Resolve optional label"]
+    resolve --> validate{"Label provided?"}
+    validate -->|yes| checklabel["Validate label"]
+    validate -->|no| default["Use agent-default identity"]
+    checklabel --> findbin["Find trusted sshenc binary"]
+    default --> findbin
+
+    findbin --> metadata["Load ~/.sshenc/keys/<label>.meta when present"]
+    metadata --> pubpath{"Recorded public-key path?"}
+    pubpath -->|exists| recorded["Use recorded public-key path"]
+    pubpath -->|missing| error["Fail with export-public-key guidance"]
+    pubpath -->|none| conventional["Use ~/.ssh/<label>.pub\nor ~/.ssh/id_ecdsa.pub for default"]
+
+    recorded --> entries["Build git config entries"]
+    conventional --> entries
+    metadata --> identity["Read git_name and git_email when present"]
+    identity --> entries
+
+    entries --> sshcmd["core.sshCommand = sshenc ssh --label NAME --\nor sshenc ssh --"]
+    entries --> format["gpg.format = ssh"]
+    entries --> program["gpg.ssh.program = /path/to/sshenc"]
+    entries --> signingkey["user.signingkey = public key path"]
+    entries --> gpgsign["commit.gpgsign = true"]
+    entries --> author["user.name / user.email when metadata has them"]
+    entries --> allowed["gpg.ssh.allowedSignersFile when email and pubkey are available"]
+
+    sshcmd --> plain["Future plain git commands use sshenc"]
+    program --> signing["Git invokes sshenc for SSH commit signing"]
+    signingkey --> signing
+    gpgsign --> signing
+
+    oneshot["gitenc --label NAME <git args>"] --> buildcmd["Build GIT_SSH_COMMAND=sshenc ssh --label NAME --"]
+    oneshot --> inline["Add inline signing config for -S when repo is not already configured"]
+    buildcmd --> run["Run git with args unchanged"]
+    inline --> run
+
+    classDef command fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef decision fill:#f8fafc,stroke:#64748b,color:#0f172a;
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#164e63;
+    classDef config fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    classDef error fill:#fef2f2,stroke:#dc2626,color:#7f1d1d;
+
+    class start,oneshot command;
+    class validate,pubpath decision;
+    class resolve,checklabel,default,findbin,metadata,recorded,conventional,identity,entries,buildcmd,inline,run,plain,signing process;
+    class sshcmd,format,program,signingkey,gpgsign,author,allowed config;
+    class error error;

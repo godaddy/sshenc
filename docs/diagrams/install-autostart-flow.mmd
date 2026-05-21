@@ -1,0 +1,41 @@
+flowchart TD
+    install["sshenc install"] --> loadcfg["Load sshenc config"]
+    loadcfg --> sshconfig["Update ~/.ssh/config"]
+    sshconfig --> identity["IdentityAgent\n~/.sshenc/agent.sock or Windows named pipe"]
+    sshconfig --> pkcs11{"Non-Windows?"}
+
+    pkcs11 -->|yes| launcher["PKCS11Provider\nlibsshenc_pkcs11"]
+    pkcs11 -->|no| winpipe["Use default Windows OpenSSH named pipe"]
+
+    loadcfg --> shellrc["Install SSH_AUTH_SOCK shell rc snippet"]
+    shellrc --> signing["Git SSH signing can find sshenc-agent"]
+
+    install --> start["Start or supervise sshenc-agent"]
+    start --> mac{"macOS?"}
+    mac -->|yes| launchagent["Install LaunchAgent in GUI session"]
+    mac -->|no| daemon["Start detached background agent"]
+
+    install --> windows{"Windows?"}
+    windows -->|yes| winenv["Set SSH_AUTH_SOCK and GIT_SSH_COMMAND"]
+    winenv --> service["Manage conflicting Windows ssh-agent service"]
+    service --> wsl["Detect and configure WSL distros"]
+    wsl --> bridge["Set up Unix socket bridge or git-only fallback"]
+    windows -->|no| doneunix["Unix install complete"]
+
+    sshuse["Later ssh command"] --> readcfg["OpenSSH reads ~/.ssh/config"]
+    readcfg --> identity
+    readcfg --> launcher
+    launcher --> ensure["PKCS#11 launcher ensures agent is running"]
+    ensure --> agent["sshenc-agent"]
+    identity --> agent
+    winpipe --> agent
+
+    classDef command fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef config fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#164e63;
+    classDef decision fill:#f8fafc,stroke:#64748b,color:#0f172a;
+
+    class install,sshuse command;
+    class sshconfig,identity,launcher,shellrc,winenv config;
+    class loadcfg,start,launchagent,daemon,service,wsl,bridge,readcfg,ensure,agent,signing,winpipe,doneunix process;
+    class pkcs11,mac,windows decision;

@@ -1002,6 +1002,9 @@ async fn handle_request(
                 let blob = pubkey.to_wire_format();
                 blob_cache.insert(blob.clone(), k.metadata.label.as_str().to_string());
                 if allowed_labels.is_empty() || allowed_labels.contains(k.metadata.label.as_str()) {
+                    if is_key_disabled(&sshenc_se::sshenc_keys_dir(), k.metadata.label.as_str()) {
+                        continue;
+                    }
                     let is_default = k.metadata.label.as_str() == "default";
                     identities.push((
                         is_default,
@@ -1041,6 +1044,9 @@ async fn handle_request(
             if !sk_labels.is_empty() {
                 for label in sk_labels {
                     if !allowed_labels.is_empty() && !allowed_labels.contains(&label) {
+                        continue;
+                    }
+                    if is_key_disabled(&sshenc_se::sshenc_keys_dir(), &label) {
                         continue;
                     }
                     let backend_clone = backend.clone();
@@ -1190,6 +1196,14 @@ async fn handle_request(
                     label = label.as_str(),
                     allowed_count = allowed_labels.len(),
                     "sign request rejected: key label not in agent's allowed list"
+                );
+                return Ok(AgentResponse::Failure);
+            }
+
+            if is_key_disabled(&sshenc_se::sshenc_keys_dir(), label.as_str()) {
+                tracing::warn!(
+                    label = label.as_str(),
+                    "sign request rejected: key is disabled"
                 );
                 return Ok(AgentResponse::Failure);
             }
@@ -1874,6 +1888,79 @@ async fn handle_request(
                 }
             }
         }
+        AgentRequest::SetKeyEnabled { label, enabled } => {
+            let label_str = match std::str::from_utf8(&label) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("set_key_enabled: label not valid UTF-8");
+                    return Ok(AgentResponse::Failure);
+                }
+            };
+            tracing::info!(
+                label = label_str,
+                enabled,
+                "handling set_key_enabled request"
+            );
+
+            if !allowed_labels.is_empty() && !allowed_labels.contains(label_str) {
+                tracing::warn!(
+                    label = label_str,
+                    "set_key_enabled: label not in agent's allowed list"
+                );
+                return Ok(AgentResponse::Failure);
+            }
+
+            let dir = sshenc_se::sshenc_keys_dir();
+            let started = Instant::now();
+            let enable = enabled != 0;
+
+            let result = (|| -> Result<(), String> {
+                let mut meta = sshenc_se::compat::load_sshenc_meta(&dir, label_str)
+                    .map_err(|e| format!("load meta: {e}"))?;
+                if enable {
+                    if let Some(obj) = meta.app_specific.as_object_mut() {
+                        obj.remove("disabled");
+                    }
+                } else {
+                    meta.set_app_field("disabled", true);
+                }
+                enclaveapp_core::metadata::save_meta(&dir, label_str, &meta)
+                    .map_err(|e| format!("save meta: {e}"))?;
+                if let Err(e) = perform_migrate_meta(&dir, label_str) {
+                    tracing::warn!(
+                        label = label_str,
+                        error = %e,
+                        "set_key_enabled: meta-tag re-stamp failed (meta saved successfully)"
+                    );
+                }
+                Ok(())
+            })();
+
+            let action = if enable { "enable" } else { "disable" };
+            let error_msg = result
+                .as_ref()
+                .err()
+                .map(|e| format!("set_key_enabled ({action}) failed: {e}"));
+            crate::op_log::record(
+                &format!("set_key_enabled_{action}"),
+                Some(label_str),
+                None,
+                started.elapsed(),
+                result.is_ok(),
+                error_msg.as_deref(),
+                None,
+            );
+            match result {
+                Ok(()) => {
+                    tracing::info!(label = label_str, action, "set_key_enabled: succeeded");
+                    Ok(AgentResponse::Success)
+                }
+                Err(e) => {
+                    tracing::warn!(label = label_str, action, error = %e, "set_key_enabled: failed");
+                    Ok(AgentResponse::Failure)
+                }
+            }
+        }
         AgentRequest::CheckMigrationMarker => {
             // Success = marker SET. Failure = marker NOT set or
             // keychain unreachable. The CLI treats both failure
@@ -1966,6 +2053,17 @@ async fn handle_request(
             tracing::debug!(msg_type, "unknown message type");
             Ok(AgentResponse::Failure)
         }
+    }
+}
+
+/// Check whether a key is disabled by inspecting its `.meta` file's
+/// `app_specific.disabled` boolean. Returns `false` on any error
+/// (missing meta, parse failure, etc.) — a key that can't be loaded
+/// is treated as enabled so it remains visible for diagnostics.
+fn is_key_disabled(keys_dir: &Path, label: &str) -> bool {
+    match sshenc_se::compat::load_sshenc_meta(keys_dir, label) {
+        Ok(meta) => meta.app_specific.get("disabled").and_then(|v| v.as_bool()) == Some(true),
+        Err(_) => false,
     }
 }
 

@@ -226,6 +226,21 @@ enum Commands {
         email: String,
     },
 
+    /// Disable a key so the agent stops offering it for signing and auth.
+    ///
+    /// The key material is preserved — use `sshenc enable <label>` to
+    /// re-activate it later.
+    Disable {
+        /// Key label to disable.
+        label: String,
+    },
+
+    /// Re-enable a previously disabled key.
+    Enable {
+        /// Key label to enable.
+        label: String,
+    },
+
     /// Remove sshenc configuration from ~/.ssh/config.
     Uninstall,
 
@@ -579,6 +594,8 @@ fn run_command(
         Commands::Identity { label, name, email } => {
             commands::set_identity(&label, &name, &email, socket_path)
         }
+        Commands::Disable { label } => commands::set_key_enabled(&label, false, socket_path),
+        Commands::Enable { label } => commands::set_key_enabled(&label, true, socket_path),
         Commands::Default { label } => commands::promote_to_default(&label),
         Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
         #[cfg(windows)]

@@ -385,15 +385,19 @@ fn main() -> Result<()> {
     // produce protocol-mismatch errors on benign setups.
     let socket_path = commands::client_socket_path(&config.socket_path);
     let backend: Box<dyn sshenc_se::KeyBackend> = Box::new(
-        sshenc_se::AgentProxyBackend::new(config.pub_dir.clone(), socket_path)
+        sshenc_se::AgentProxyBackend::new(config.pub_dir.clone(), socket_path.clone())
             .map_err(|e| anyhow::anyhow!("failed to initialize agent-proxy backend: {e}"))?,
     );
 
-    run_command(cli.command, &*backend)
+    run_command(cli.command, &*backend, &socket_path)
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
-fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result<()> {
+fn run_command(
+    command: Commands,
+    backend: &dyn sshenc_se::KeyBackend,
+    socket_path: &std::path::Path,
+) -> Result<()> {
     match command {
         Commands::Keygen {
             label,
@@ -572,7 +576,9 @@ fn run_command(command: Commands, backend: &dyn sshenc_se::KeyBackend) -> Result
         },
         Commands::Install => commands::install(),
         Commands::Uninstall => commands::uninstall(),
-        Commands::Identity { label, name, email } => commands::set_identity(&label, &name, &email),
+        Commands::Identity { label, name, email } => {
+            commands::set_identity(&label, &name, &email, socket_path)
+        }
         Commands::Default { label } => commands::promote_to_default(&label),
         Commands::Ssh { label, ssh_args } => commands::ssh_wrapper(label.as_deref(), &ssh_args),
         #[cfg(windows)]

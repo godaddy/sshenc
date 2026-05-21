@@ -19,18 +19,34 @@ Use your judgement on Windows/Linux: prefer the installed binary when one
 exists for parity reasons, but locally-built binaries are not a footgun on
 those platforms the way they are on macOS.
 
-## CRITICAL: Never Run Unsigned Binaries (macOS)
+## CRITICAL: Always Use CI/CD-Built Binaries (macOS)
 
-**DO NOT** run binaries from development builds (`cargo build`, `cargo run`, `~/.cargo/bin/*`) **on macOS** in production contexts or when they could access the Secure Enclave. (See the Platform Scope section above for Windows/Linux scoping.)
+**NEVER build, codesign, or install custom macOS binaries.** Always use the CI/CD release
+pipeline (`git tag vX.Y.Z` → GitHub Actions → Homebrew). This is non-negotiable.
 
-### Why This Matters
+The CI/CD pipeline performs steps that **cannot be replicated locally**:
 
-sshenc accesses hardware-backed cryptographic storage (macOS Secure Enclave, Windows TPM, Linux software keys). Running unsigned development builds as agents can:
+1. **Apple notarization** — AMFI (Apple Mobile File Integrity) only grants `keychain-access-groups`
+   entitlements to notarized app bundles. Without notarization, Secure Enclave key creation with
+   `.userPresence` access control fails with `-25308 (errSecInteractionNotAllowed)`.
+2. **Provisioning profile embedding** — required for the app bundle's entitlements to be honored.
+3. **Proper app bundle signing** — the entire `.app` bundle must be signed as a unit; signing
+   individual binaries and placing them in an existing bundle breaks the seal.
 
-1. **Poison the keychain** — unsigned agents create keychain entries that conflict with production agents
-2. **Trigger unexpected auth prompts** — users see Touch ID/password prompts from the wrong binary
-3. **Break signing** — the wrong agent binary services signing requests, causing failures
-4. **Leave stale processes** — development agents don't clean up properly when killed
+**DO NOT** run binaries from development builds (`cargo build`, `cargo run`, `~/.cargo/bin/*`)
+**on macOS** in production contexts or when they could access the Secure Enclave.
+(See the Platform Scope section above for Windows/Linux scoping.)
+
+### What Goes Wrong With Custom Builds
+
+sshenc accesses hardware-backed cryptographic storage (macOS Secure Enclave, Windows TPM, Linux software keys). Running non-CI/CD builds as agents can:
+
+1. **Fail silently on key generation** — AMFI rejects the entitlements, SE key creation with `.userPresence` returns `-25308`
+2. **Poison the keychain** — unsigned agents create keychain entries that conflict with production agents
+3. **Invalidate HMAC integrity** — unsigned binaries writing to `~/.sshenc/keys/*.meta` files corrupt the HMAC sidecar, breaking key operations for the production binary
+4. **Trigger unexpected auth prompts** — users see Touch ID/password prompts from the wrong binary
+5. **Break signing** — the wrong agent binary services signing requests, causing failures
+6. **Leave stale processes** — development agents don't clean up properly when killed
 
 ### Safe vs Unsafe Operations
 
@@ -132,15 +148,18 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 
-# DO NOT run the built binaries as daemons
+# DO NOT run the built binaries as daemons or install them
 # DO NOT run: cargo run --bin sshenc-agent
 # DO NOT run: ~/.cargo/bin/sshenc agent
+# DO NOT copy binaries into /opt/homebrew or any app bundle
+# DO NOT attempt to codesign binaries locally — notarization cannot be done locally
 
-# To test agent changes, install via homebrew first:
-cargo build --release
-# ... create PR, merge, release via CI ...
-brew upgrade sshenc
-# NOW it's safe to test agent functionality
+# To test agent/signing changes, use the CI/CD release pipeline:
+# 1. Create PR, get it reviewed and merged
+# 2. Tag a new release: git tag vX.Y.Z && git push origin vX.Y.Z
+# 3. Wait for GitHub Actions release workflow to complete
+# 4. brew upgrade sshenc
+# 5. NOW it's safe to test agent functionality
 ```
 
 ### For Users Building From Source
@@ -190,8 +209,11 @@ git commit -S -m "your message"
 
 ## Summary
 
-- ✅ Build and test code with `cargo`
-- ✅ Use production agents from `/opt/homebrew/bin`
+- ✅ Build and test code with `cargo build`, `cargo test`, `cargo clippy`
+- ✅ Use CI/CD-built binaries from Homebrew (`brew upgrade sshenc`)
+- ✅ Use the release pipeline for any binary changes (tag → CI → Homebrew)
 - ❌ Don't run `~/.cargo/bin/sshenc-agent` as a daemon
+- ❌ Don't build, codesign, or install custom macOS binaries — notarization cannot be done locally
+- ❌ Don't copy binaries into Homebrew's Cellar or app bundles
 - ❌ Don't test signing with development builds
 - 🔍 Always verify which agent binary is running before signing operations

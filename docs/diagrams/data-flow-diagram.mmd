@@ -1,0 +1,97 @@
+flowchart LR
+    user["External entity\nDeveloper"]
+    remote["External entity\nSSH server / Git remote"]
+
+    subgraph tools["Trust boundary: userland tools"]
+        ssh["OpenSSH / scp / sftp"]
+        git["Git"]
+        gitenc["gitenc"]
+        sshenc["sshenc CLI / sshenc-keygen"]
+        pkcs11["sshenc-pkcs11 launcher"]
+    end
+
+    subgraph agentboundary["Trust boundary: sshenc agent process"]
+        agent["sshenc-agent"]
+        parser["SSH agent protocol parser"]
+        policy["allowed_labels and prompt policy"]
+        backend["sshenc-se SshencBackend"]
+    end
+
+    subgraph ipc["Trust boundary: local IPC"]
+        socket["Unix socket\n0600 private directory"]
+        pipe["Windows named pipe\nowner + SYSTEM DACL"]
+    end
+
+    subgraph disk["Trust boundary: local user-writable disk"]
+        config["sshenc config.toml"]
+        sshconfig["~/.ssh/config\nIdentityAgent / PKCS11Provider"]
+        gitconfig["Repo .git/config\ncore.sshCommand / gpg.ssh.program"]
+        keyfiles["~/.sshenc/keys\n.meta / .pub / .ssh.pub / .handle"]
+        pubfiles["~/.ssh/*.pub\npublic keys"]
+    end
+
+    subgraph platform["Trust boundary: platform crypto"]
+        libea["libenclaveapp"]
+        hsm["Secure Enclave / TPM"]
+        fallback["Linux software fallback"]
+        wsl["WSL bridge to Windows TPM"]
+    end
+
+    user -->|"runs commands"| sshenc
+    user -->|"runs gitenc"| gitenc
+    user -->|"runs ssh/git"| ssh
+    user -->|"runs git"| git
+
+    sshenc -->|"read/write config"| config
+    sshenc -->|"install block"| sshconfig
+    sshenc -->|"keygen/delete/rename RPC"| socket
+    sshenc -->|"keygen/delete/rename RPC"| pipe
+    sshenc -->|"read-only list/inspect/export"| keyfiles
+    sshenc -->|"write public key"| pubfiles
+
+    gitenc -->|"write repo config"| gitconfig
+    gitenc -->|"GIT_SSH_COMMAND=sshenc ssh --label"| git
+    gitconfig -->|"core.sshCommand"| git
+    git -->|"invoke sshenc ssh or OpenSSH"| sshenc
+    git -->|"SSH transport"| ssh
+    git -->|"gpg.ssh.program=sshenc -Y sign"| sshenc
+
+    sshconfig -->|"IdentityAgent"| ssh
+    sshconfig -->|"PKCS11Provider load"| pkcs11
+    pkcs11 -->|"ensure agent running"| agent
+    ssh -->|"RequestIdentities / SignRequest"| socket
+    ssh -->|"RequestIdentities / SignRequest"| pipe
+
+    socket --> parser
+    pipe --> parser
+    parser --> agent
+    agent --> policy
+    policy --> backend
+    backend -->|"read metadata/public keys"| keyfiles
+    backend -->|"sign / generate / delete"| libea
+    libea --> hsm
+    libea --> fallback
+    libea --> wsl
+    hsm -->|"signature / public key"| backend
+    fallback -->|"signature / public key"| backend
+    wsl -->|"signature / public key"| backend
+    backend -->|"SSH-format signature"| agent
+    agent -->|"agent response"| ssh
+    ssh -->|"public-key auth"| remote
+    git -->|"push/fetch over SSH"| remote
+
+    classDef external fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#164e63;
+    classDef ipcclass fill:#f8fafc,stroke:#64748b,color:#0f172a;
+    classDef datastore fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    classDef secure fill:#f0fdf4,stroke:#16a34a,color:#14532d;
+    classDef weak fill:#fef2f2,stroke:#dc2626,color:#7f1d1d;
+    classDef trust fill:#f8fafc,stroke:#64748b,color:#0f172a;
+
+    class user,remote external;
+    class ssh,git,gitenc,sshenc,pkcs11,agent,parser,policy,backend,libea process;
+    class socket,pipe ipcclass;
+    class config,sshconfig,gitconfig,keyfiles,pubfiles datastore;
+    class hsm,wsl secure;
+    class fallback weak;
+    class tools,agentboundary,ipc,disk,platform trust;

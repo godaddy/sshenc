@@ -8,6 +8,12 @@ reviewed as normal source diffs.
 
 - [Workspace context](workspace-context.mmd) - how the `sshenc`, `gitenc`,
   agent, PKCS#11 launcher, libenclaveapp, and platform backends fit together.
+- [Architecture diagram](architecture.png) - rendered draw.io architecture
+  diagram with embedded source, suitable for Security review artifacts and
+  Confluence linking.
+- [Data flow diagram](data-flow-diagram.mmd) - Confluence threat-model DFD
+  showing external entities, processes, data stores, trust boundaries, and
+  labeled SSH/Git/signing flows.
 - [Key lifecycle](key-lifecycle-flow.mmd) - generation, metadata, public-key
   cache, signing, and deletion through the agent-backed storage model.
 - [SSH agent signing](ssh-agent-signing-flow.mmd) - OpenSSH agent protocol

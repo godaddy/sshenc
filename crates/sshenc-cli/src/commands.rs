@@ -901,8 +901,16 @@ pub fn list(backend: &dyn KeyBackend, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    let keys_dir = sshenc_keys_dir();
     for key in &keys {
         println!("{}", key.metadata.label);
+        let disabled = sshenc_se::compat::load_sshenc_meta(&keys_dir, key.metadata.label.as_str())
+            .ok()
+            .and_then(|meta| meta.app_specific.get("disabled")?.as_bool())
+            == Some(true);
+        if disabled {
+            println!("  Status:        DISABLED");
+        }
         println!("  Algorithm:     {}", key.metadata.algorithm);
         println!(
             "  Key size:      {} bits",
@@ -2144,6 +2152,29 @@ pub fn set_identity(label: &str, name: &str, email: &str, socket_path: &Path) ->
     println!("Set identity for key '{label}':");
     println!("  Name:  {name}");
     println!("  Email: {email}");
+    Ok(())
+}
+
+#[allow(clippy::print_stdout)]
+pub fn set_key_enabled(label: &str, enabled: bool, socket_path: &Path) -> Result<()> {
+    let _label = KeyLabel::new(label)?;
+
+    sshenc_agent_proto::client::try_set_key_enabled_via_socket(socket_path, label, enabled)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to {} key '{label}': agent did not accept the request. \
+                 Is the sshenc agent running?",
+                if enabled { "enable" } else { "disable" }
+            )
+        })?;
+
+    if enabled {
+        println!("Key '{label}' is now enabled.");
+    } else {
+        println!("Key '{label}' is now disabled.");
+        println!("  The agent will no longer offer this key for signing or auth.");
+        println!("  To re-enable: sshenc enable {label}");
+    }
     Ok(())
 }
 

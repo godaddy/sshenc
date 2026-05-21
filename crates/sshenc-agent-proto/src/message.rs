@@ -64,6 +64,12 @@ pub const SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER: u8 = 0xF6;
 /// meta-tag. The CLI must NOT modify `.meta` directly — every meta
 /// mutation goes through the agent so the keychain tag stays in sync.
 pub const SSH_AGENTC_SSHENC_SET_IDENTITY: u8 = 0xF7;
+/// `SSH_AGENTC_SSHENC_SET_KEY_ENABLED`: toggle a key's
+/// enabled/disabled state in its `.meta` and re-stamp the meta-tag.
+/// Disabled keys are excluded from identity listings and sign
+/// requests. No key material is deleted. The `enabled` byte is 0
+/// for disable, non-zero for enable.
+pub const SSH_AGENTC_SSHENC_SET_KEY_ENABLED: u8 = 0xF8;
 
 // sshenc-specific response: carries the public-key bytes of a
 // freshly-generated key back to the CLI. On failure the agent uses
@@ -182,6 +188,15 @@ pub enum AgentRequest {
         name: Vec<u8>,
         email: Vec<u8>,
     },
+    /// `SSH_AGENTC_SSHENC_SET_KEY_ENABLED` (sshenc extension):
+    /// toggle a key's enabled/disabled state. Disabled keys are
+    /// excluded from identity listings and sign requests. No key
+    /// material is deleted.
+    SetKeyEnabled {
+        label: Vec<u8>,
+        /// 0 = disable, non-zero = enable.
+        enabled: u8,
+    },
     /// An unrecognized message type.
     Unknown(u8),
 }
@@ -292,6 +307,12 @@ pub fn parse_request(payload: &[u8]) -> Result<AgentRequest> {
             let email = wire::read_string(&mut cursor)?;
             Ok(AgentRequest::SetIdentity { label, name, email })
         }
+        SSH_AGENTC_SSHENC_SET_KEY_ENABLED => {
+            let mut cursor = Cursor::new(body);
+            let label = wire::read_string(&mut cursor)?;
+            let enabled = wire::read_u8(&mut cursor)?;
+            Ok(AgentRequest::SetKeyEnabled { label, enabled })
+        }
         other => Ok(AgentRequest::Unknown(other)),
     }
 }
@@ -396,6 +417,12 @@ pub fn serialize_request(request: &AgentRequest) -> Vec<u8> {
             wire::write_string(&mut buf, label);
             wire::write_string(&mut buf, name);
             wire::write_string(&mut buf, email);
+            buf
+        }
+        AgentRequest::SetKeyEnabled { label, enabled } => {
+            let mut buf = vec![SSH_AGENTC_SSHENC_SET_KEY_ENABLED];
+            wire::write_string(&mut buf, label);
+            buf.push(*enabled);
             buf
         }
         AgentRequest::Unknown(t) => vec![*t],
@@ -1255,6 +1282,52 @@ mod tests {
         let mut payload = vec![SSH_AGENTC_SSHENC_SET_IDENTITY];
         wire::write_string(&mut payload, b"label");
         // Missing name and email
+        assert!(parse_request(&payload).is_err());
+    }
+
+    // --- sshenc SetKeyEnabled extension ---
+
+    #[test]
+    fn roundtrip_set_key_enabled_disable() {
+        let original = AgentRequest::SetKeyEnabled {
+            label: b"github-personal".to_vec(),
+            enabled: 0,
+        };
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_SET_KEY_ENABLED);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::SetKeyEnabled { label, enabled } => {
+                assert_eq!(label, b"github-personal");
+                assert_eq!(enabled, 0);
+            }
+            other => panic!("expected SetKeyEnabled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_set_key_enabled_enable() {
+        let original = AgentRequest::SetKeyEnabled {
+            label: b"my-key".to_vec(),
+            enabled: 1,
+        };
+        let payload = serialize_request(&original);
+        assert_eq!(payload[0], SSH_AGENTC_SSHENC_SET_KEY_ENABLED);
+        let parsed = parse_request(&payload).unwrap();
+        match parsed {
+            AgentRequest::SetKeyEnabled { label, enabled } => {
+                assert_eq!(label, b"my-key");
+                assert_eq!(enabled, 1);
+            }
+            other => panic!("expected SetKeyEnabled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_truncated_set_key_enabled_request() {
+        let mut payload = vec![SSH_AGENTC_SSHENC_SET_KEY_ENABLED];
+        wire::write_string(&mut payload, b"label");
+        // Missing enabled byte
         assert!(parse_request(&payload).is_err());
     }
 }

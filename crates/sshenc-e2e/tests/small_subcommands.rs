@@ -94,8 +94,9 @@ fn identity_persists_through_metadata() {
     if skip_if_no_docker("identity_persists_through_metadata") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
     drop(shared_enclave_pubkey(&env).expect("shared key"));
+    env.start_agent().expect("agent start");
 
     let name = "Jay E2e Tester";
     let email = "jay-e2e@example.invalid";

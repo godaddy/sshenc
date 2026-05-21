@@ -349,12 +349,16 @@ fn gitenc_config_signs_commit_and_verifies() {
     if skip_if_no_docker("gitenc_config_signs_commit_and_verifies") {
         return;
     }
-    let env = SshencEnv::new().expect("env");
+    let mut env = SshencEnv::new().expect("env");
     let enclave = shared_enclave_pubkey(&env).expect("shared enclave");
 
     // Write the pub file so gitenc --config can reference it.
     let pub_path = env.ssh_dir().join(format!("{SHARED_ENCLAVE_LABEL}.pub"));
     std::fs::write(&pub_path, format!("{enclave}\n")).expect("write enclave pub");
+
+    // The agent must be running: `sshenc identity` routes through
+    // the agent IPC, and `git commit -S` needs it for signing.
+    env.start_agent().expect("agent start");
 
     // Set git identity on the sshenc key metadata. gitenc --config
     // copies user.name / user.email from there into the git config.

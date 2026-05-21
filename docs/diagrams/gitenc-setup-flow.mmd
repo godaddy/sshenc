@@ -1,0 +1,46 @@
+sequenceDiagram
+    autonumber
+    actor Dev as Developer
+    participant GE as gitenc CLI
+    participant Agent as sshenc-agent
+    participant SE as Secure Element<br/>(via libenclaveapp)
+    participant FS as Filesystem
+    participant Git as Git
+    participant Remote as Git Remote<br/>(GitHub / GitLab)
+
+    Note over Dev,Remote: SETUP: gitenc --config (one-time per repo)
+
+    Dev->>GE: gitenc --config --label my-key
+    GE->>FS: read ~/.sshenc/keys/my-key.meta
+    FS-->>GE: key metadata (label, public key path, git identity)
+    GE->>GE: validate label exists and has public key
+
+    GE->>FS: write .git/config entries
+    Note over FS: [core]<br/>  sshCommand = sshenc ssh --label my-key<br/>[gpg]<br/>  format = ssh<br/>[gpg "ssh"]<br/>  program = sshenc<br/>  defaultKeyCommand = sshenc default-key --label my-key
+
+    GE-->>Dev: repo configured for SSH transport + signing
+
+    Note over Dev,Remote: USE: git commit -S (SSH signature)
+
+    Dev->>Git: git commit -S -m "message"
+    Git->>Git: resolve gpg.ssh.program = sshenc
+    Git->>GE: sshenc -Y sign -n git (commit payload)
+    GE->>Agent: sign request via agent socket
+    Agent->>Agent: policy check (label allowed?)
+    Agent->>SE: ECDSA P-256 sign
+    SE-->>Agent: signature
+    Agent-->>GE: SSH signature blob
+    GE-->>Git: signed commit
+    Git-->>Dev: commit created (signed)
+
+    Note over Dev,Remote: USE: git push (SSH transport with sshenc key)
+
+    Dev->>Git: git push
+    Git->>Git: resolve core.sshCommand = sshenc ssh --label my-key
+    Git->>GE: sshenc ssh --label my-key remote-host
+    GE->>GE: set SSH_AUTH_SOCK to sshenc-agent socket
+    GE->>GE: exec ssh with IdentityAgent override
+    Note over GE,Remote: SSH auth uses sshenc-agent<br/>(same flow as ssh-sign-flow.mmd)
+    GE->>Remote: SSH connection (key-based auth)
+    Remote-->>Git: push accepted
+    Git-->>Dev: push complete

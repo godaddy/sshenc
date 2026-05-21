@@ -1,0 +1,111 @@
+%%{ init: { "theme": "base", "themeVariables": { "primaryColor": "#DBEAFE", "primaryTextColor": "#1E3A8A", "primaryBorderColor": "#2563EB", "lineColor": "#64748B" } } }%%
+flowchart TB
+    %% External entities
+    dev(["fa:fa-user Developer"]):::external
+    remote(["fa:fa-server SSH Server / Git Remote"]):::external
+
+    subgraph workstation["Developer Workstation"]
+        direction TB
+
+        subgraph tools["Userland Tools"]
+            direction LR
+            sshenc_cli["sshenc CLI\nsshenc-keygen"]:::process
+            gitenc["gitenc"]:::process
+            pkcs11["sshenc-pkcs11\n(launcher)"]:::process
+            openssh["OpenSSH\n(ssh / scp / sftp)"]:::thirdparty
+            git["Git\n(transport + signing)"]:::thirdparty
+        end
+
+        subgraph agentproc["sshenc-agent Process (hardened)"]
+            direction TB
+            parser["SSH Agent Protocol Parser\n(RequestIdentities, SignRequest)"]:::process
+            policy["Policy Engine\n(allowed_labels, user-presence rules)"]:::policyprocess
+            backend["sshenc-se (SshencBackend)\nlibenclaveapp integration"]:::cryptoprocess
+            mgmt["Key Management\n(keygen / delete / rename)"]:::process
+        end
+
+        subgraph ipc["Local IPC (owner-restricted)"]
+            direction LR
+            socket["Unix Socket\n(0600 private dir)"]:::ipcnode
+            pipe["Windows Named Pipe\n(owner + SYSTEM DACL)"]:::ipcnode
+        end
+
+        subgraph crypto["libenclaveapp Crypto Boundary"]
+            direction TB
+            libea["libenclaveapp"]:::cryptoprocess
+            subgraph hwsecure["Platform Secure Element"]
+                direction LR
+                se["Secure Enclave\n(macOS)"]:::hw
+                tpm["TPM 2.0\n(Windows/Linux)"]:::hw
+                sw["Software Fallback\n(Linux keyring)"]:::weakbackend
+            end
+        end
+
+        subgraph disk["Local Key Storage (~/.sshenc/keys/)"]
+            direction LR
+            keymeta[("Key Metadata\n.meta")]:::disknode
+            keypub[("Public Keys\n.pub / .ssh.pub")]:::disknode
+            keyhandle[("Key Handles\n.handle")]:::disknode
+        end
+
+        subgraph config["Configuration Files"]
+            direction LR
+            sshconfig[("~/.ssh/config\nIdentityAgent")]:::disknode
+            sshencconf[("sshenc config.toml")]:::disknode
+            gitconf[(".git/config\ncore.sshCommand\ngpg.ssh.program")]:::disknode
+        end
+    end
+
+    %% Flows
+    dev -->|"keygen / list / delete"| sshenc_cli
+    dev -->|"ssh / git push"| openssh
+    dev -->|"gitenc --config"| gitenc
+
+    sshenc_cli -->|"keygen/delete RPC\nvia agent socket"| socket
+    gitenc -->|"GIT_SSH_COMMAND\ngpg.ssh.program"| git
+    gitenc -->|"write repo config"| gitconf
+    pkcs11 -->|"ensure agent running"| agentproc
+
+    openssh -->|"SSH agent protocol\n(IdentityAgent)"| socket
+    git -->|"SSH transport"| openssh
+    git -->|"gpg.ssh.program=sshenc -Y sign"| sshenc_cli
+
+    socket --> parser
+    pipe --> parser
+    parser -->|"check allowed_labels"| policy
+    policy -->|"approved sign request"| backend
+    mgmt -->|"generate / delete via libenclaveapp"| libea
+    backend -->|"ECDSA sign"| libea
+    libea --> se
+    libea --> tpm
+    libea --> sw
+
+    backend -->|"read metadata + public keys"| keymeta
+    backend -->|"read public keys"| keypub
+
+    openssh -->|"SSH / TLS"| remote
+    git -->|"SSH transport"| remote
+
+    sshenc_cli -->|"export public key"| keypub
+    sshenc_cli -->|"install IdentityAgent block"| sshconfig
+    sshenc_cli -->|"read/write config"| sshencconf
+
+    %% Styles
+    classDef external fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,color:#1E3A8A,font-weight:bold
+    classDef process fill:#DBEAFE,stroke:#2563EB,stroke-width:1.5px,color:#1E3A8A,font-weight:bold
+    classDef thirdparty fill:#F1F5F9,stroke:#64748B,stroke-width:1.5px,color:#334155,font-weight:bold
+    classDef policyprocess fill:#FEF3C7,stroke:#D97706,stroke-width:1.5px,color:#78350F,font-weight:bold
+    classDef cryptoprocess fill:#E9D5FF,stroke:#7C3AED,stroke-width:1.5px,color:#5B21B6,font-weight:bold
+    classDef hw fill:#DDD6FE,stroke:#7C3AED,stroke-width:2px,color:#5B21B6,font-weight:bold
+    classDef weakbackend fill:#FEE2E2,stroke:#DC2626,stroke-width:1.5px,stroke-dasharray:5 3,color:#7F1D1D
+    classDef ipcnode fill:#ECFEFF,stroke:#0891B2,stroke-width:1.5px,color:#164E63
+    classDef disknode fill:#F1F5F9,stroke:#64748B,stroke-width:1px,color:#334155
+
+    style workstation fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,stroke-dasharray:8 4,color:#1E3A8A
+    style tools fill:#E0F2FE,stroke:#0891B2,stroke-width:1.5px,stroke-dasharray:5 3,color:#164E63
+    style agentproc fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,color:#14532D
+    style ipc fill:#ECFEFF,stroke:#0891B2,stroke-width:1.5px,stroke-dasharray:5 3,color:#164E63
+    style crypto fill:#FEF3C7,stroke:#D97706,stroke-width:2px,stroke-dasharray:5 3,color:#78350F
+    style hwsecure fill:#F5F3FF,stroke:#7C3AED,stroke-width:2px,color:#5B21B6
+    style disk fill:#F8FAFC,stroke:#64748B,stroke-width:1.5px,stroke-dasharray:5 3,color:#475569
+    style config fill:#F8FAFC,stroke:#64748B,stroke-width:1px,stroke-dasharray:5 3,color:#475569

@@ -1,0 +1,59 @@
+sequenceDiagram
+    autonumber
+    actor Dev as Developer
+    participant SSH as OpenSSH<br/>(ssh / scp / sftp)
+    participant Socket as Agent Socket<br/>(Unix / Named Pipe)
+    participant Parser as Protocol Parser
+    participant Policy as Policy Engine<br/>(allowed_labels)
+    participant Backend as sshenc-se<br/>(SshencBackend)
+    participant Lib as libenclaveapp
+    participant SE as Secure Element<br/>(SE / TPM)
+    participant Remote as SSH Server
+
+    Dev->>SSH: ssh user@host (or git push)
+    SSH->>SSH: Read ~/.ssh/config (IdentityAgent)
+
+    SSH->>Socket: SSH_AGENTC_REQUEST_IDENTITIES
+    Socket->>Parser: parse message
+    Parser->>Backend: list public keys
+    Backend->>Backend: read ~/.sshenc/keys/*.pub
+    Backend-->>Parser: public key list
+    Parser-->>Socket: SSH_AGENT_IDENTITIES_ANSWER
+    Socket-->>SSH: available public keys
+
+    SSH->>Remote: TCP connect + key exchange
+    Remote-->>SSH: server hello + challenge
+
+    SSH->>Socket: SSH_AGENTC_SIGN_REQUEST (key_blob, data)
+    Socket->>Parser: parse sign request
+
+    Parser->>Policy: check key label against allowed_labels
+
+    alt Key not in allowed_labels
+        Policy-->>Parser: DENY
+        Parser-->>Socket: SSH_AGENT_FAILURE
+        Socket-->>SSH: sign refused
+    else Key allowed
+        Policy-->>Parser: ALLOW
+
+        opt User-presence policy requires prompt
+            Parser->>Dev: Touch ID / Hello / platform prompt
+            Dev-->>Parser: biometric confirmed
+        end
+
+        Parser->>Backend: sign(key_handle, data, flags)
+        Backend->>Lib: ECDSA P-256 sign
+        Lib->>SE: hardware sign operation
+        SE-->>Lib: raw ECDSA signature (r, s)
+        Lib-->>Backend: signature bytes
+        Backend-->>Parser: SSH signature blob
+
+        Parser-->>Socket: SSH_AGENT_SIGN_RESPONSE
+        Socket-->>SSH: signature
+    end
+
+    SSH->>Remote: signed authentication response
+    Remote-->>SSH: authentication success
+    SSH-->>Dev: connected / push complete
+
+    Note over SSH,SE: Private key material NEVER leaves the Secure Element.<br/>Only public keys and signatures cross the agent boundary.

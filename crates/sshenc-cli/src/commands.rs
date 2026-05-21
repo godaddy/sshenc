@@ -2422,11 +2422,21 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
         &signed_data,
     )
     .map_err(|e| match e {
-        sshenc_agent_proto::client::SignAttemptError::IdentityNotFound => anyhow!(
-            "sshenc-agent has no identity matching {}; verify the key is listed \
-             by `sshenc list` and that allowed_labels in the agent config includes it",
-            sign_args.key_file.display()
-        ),
+        sshenc_agent_proto::client::SignAttemptError::IdentityNotFound => {
+            if let Some(label) = find_disabled_key_for_pub_file(&sign_args.key_file) {
+                anyhow!(
+                    "key '{}' is disabled; re-enable it with: sshenc enable {}",
+                    label,
+                    label
+                )
+            } else {
+                anyhow!(
+                    "sshenc-agent has no identity matching {}; verify the key is listed \
+                     by `sshenc list` and that allowed_labels in the agent config includes it",
+                    sign_args.key_file.display()
+                )
+            }
+        }
         sshenc_agent_proto::client::SignAttemptError::SignRefused => anyhow!(
             "sshenc-agent refused the sign request; check sshenc.log for details \
              (common causes: keychain access denied, biometric cancelled, or \
@@ -2441,6 +2451,33 @@ pub fn ssh_sign(args: &[String]) -> Result<()> {
     tracing::debug!("ssh_sign: signed via agent proxy");
     let sig_blob = build_ssh_signature_from_ssh_sig(&pubkey_blob, &sign_args.namespace, &ssh_sig);
     write_sshsig_pem_file(&sig_blob, &sign_args.data_file)
+}
+
+fn find_disabled_key_for_pub_file(pub_file: &Path) -> Option<String> {
+    let canonical = pub_file.canonicalize().ok()?;
+    let keys_dir = sshenc_keys_dir();
+    let entries = std::fs::read_dir(&keys_dir).ok()?;
+    for entry in entries.flatten() {
+        if !entry.file_type().ok()?.is_dir() {
+            continue;
+        }
+        let label = entry.file_name().to_string_lossy().to_string();
+        let meta = sshenc_se::compat::load_sshenc_meta(&keys_dir, &label).ok()?;
+        let is_disabled = meta.app_specific.get("disabled").and_then(|v| v.as_bool()) == Some(true);
+        if !is_disabled {
+            continue;
+        }
+        if let Some(stored_path) = meta
+            .app_specific
+            .get("pub_file_path")
+            .and_then(|v| v.as_str())
+        {
+            if Path::new(stored_path).canonicalize().ok().as_ref() == Some(&canonical) {
+                return Some(label);
+            }
+        }
+    }
+    None
 }
 
 fn read_pubkey_from_openssh_file(path: &Path) -> Result<SignablePubkey> {

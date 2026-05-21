@@ -69,6 +69,10 @@ pub trait KeyBackend: Send + Sync {
         self.sign(label, data)
     }
 
+    /// Evict cached wrapping key and LAContext for `label`, forcing the
+    /// next sign to reload from the keychain with fresh authentication.
+    fn evict_wrapping_key_cache(&self, _label: &str) {}
+
     /// Check if the backend is available (e.g., Secure Enclave hardware present).
     fn is_available(&self) -> bool;
 

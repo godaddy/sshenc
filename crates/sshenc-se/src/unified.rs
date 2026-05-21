@@ -934,6 +934,10 @@ impl KeyBackend for SshencBackend {
             .map_err(|e| map_err("sign_with_presence", e))
     }
 
+    fn evict_wrapping_key_cache(&self, label: &str) {
+        self.signer().evict_wrapping_key_cache(label);
+    }
+
     fn is_available(&self) -> bool {
         self.key_manager().is_available()
     }

@@ -83,6 +83,18 @@ impl Error {
             _ => false,
         }
     }
+
+    /// Whether this error is a transient keychain access failure that may
+    /// succeed after evicting cached wrapping keys and LAContexts.
+    pub fn is_keychain_recoverable(&self) -> bool {
+        match self {
+            Error::SecureEnclave { detail, .. } => {
+                detail.contains("keychain interaction required")
+                    || detail.contains("no window server access")
+            }
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -237,5 +249,38 @@ mod tests {
             other => panic!("expected Error::Json, got: {other}"),
         }
         assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn is_keychain_recoverable_matches_interaction_required() {
+        let e = Error::SecureEnclave {
+            operation: "sign_with_presence".into(),
+            detail:
+                "keychain interaction required for 'default': the item needs user authentication"
+                    .into(),
+        };
+        assert!(e.is_keychain_recoverable());
+    }
+
+    #[test]
+    fn is_keychain_recoverable_matches_no_window_server() {
+        let e = Error::SecureEnclave {
+            operation: "sign_with_presence".into(),
+            detail: "no window server access for 'default': Touch ID requires a GUI session".into(),
+        };
+        assert!(e.is_keychain_recoverable());
+    }
+
+    #[test]
+    fn is_keychain_recoverable_rejects_unrelated_errors() {
+        let e = Error::SecureEnclave {
+            operation: "sign".into(),
+            detail: "timeout".into(),
+        };
+        assert!(!e.is_keychain_recoverable());
+        let e = Error::KeyNotFound { label: "x".into() };
+        assert!(!e.is_keychain_recoverable());
+        let e = Error::Other("anything".into());
+        assert!(!e.is_keychain_recoverable());
     }
 }

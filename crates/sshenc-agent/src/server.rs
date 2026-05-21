@@ -1398,6 +1398,74 @@ async fn handle_request(
             );
             let der_sig = match sign_result {
                 Ok(sig) => sig,
+                Err(e) if e.is_keychain_recoverable() => {
+                    tracing::warn!(
+                        label = label.as_str(),
+                        error = %e,
+                        "sign_with_presence failed with recoverable keychain error, evicting cache and retrying"
+                    );
+                    let backend_evict = backend.clone();
+                    let label_evict = label.clone();
+                    tokio::task::spawn_blocking(move || {
+                        backend_evict.evict_wrapping_key_cache(&label_evict);
+                    })
+                    .await
+                    .ok();
+
+                    let retry_started = Instant::now();
+                    let backend_retry = backend.clone();
+                    let label_retry = label.clone();
+                    let data_retry = data.clone();
+                    let reason_retry = reason.clone();
+                    let retry_result = tokio::task::spawn_blocking(move || {
+                        backend_retry.sign_with_presence(
+                            &label_retry,
+                            &data_retry,
+                            effective_mode,
+                            0,
+                            &reason_retry,
+                        )
+                    })
+                    .await;
+
+                    let retry_result = match retry_result {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::error!(label = label.as_str(), error = %e, "retry spawn_blocking panicked");
+                            return Ok(AgentResponse::Failure);
+                        }
+                    };
+                    let retry_error_msg = retry_result
+                        .as_ref()
+                        .err()
+                        .map(|e| format!("sign_with_presence retry failed: {e}"));
+                    crate::op_log::record(
+                        "sign_retry",
+                        Some(label.as_str()),
+                        None,
+                        retry_started.elapsed(),
+                        retry_result.is_ok(),
+                        retry_error_msg.as_deref(),
+                        Some(reason.as_str()),
+                    );
+                    match retry_result {
+                        Ok(sig) => {
+                            tracing::info!(
+                                label = label.as_str(),
+                                "sign retry succeeded after cache eviction"
+                            );
+                            sig
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                label = label.as_str(),
+                                error = %e,
+                                "sign retry also failed"
+                            );
+                            return Ok(AgentResponse::Failure);
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(
                         label = label.as_str(),

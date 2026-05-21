@@ -11,9 +11,9 @@ sequenceDiagram
     Note over Dev,Remote: SETUP: gitenc --config (one-time per repo)
 
     Dev->>GE: gitenc --config --label my-key
-    GE->>Agent: verify key "my-key" exists (RPC)
-    Agent->>Agent: lookup label in ~/.sshenc/keys/
-    Agent-->>GE: key exists, public key blob
+    GE->>FS: read ~/.sshenc/keys/my-key.meta
+    FS-->>GE: key metadata (label, public key path, git identity)
+    GE->>GE: validate label exists and has public key
 
     GE->>FS: write .git/config entries
     Note over FS: [core]<br/>  sshCommand = sshenc ssh --label my-key<br/>[gpg]<br/>  format = ssh<br/>[gpg "ssh"]<br/>  program = sshenc<br/>  defaultKeyCommand = sshenc default-key --label my-key

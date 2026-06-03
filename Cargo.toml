@@ -30,12 +30,7 @@ sshenc-agent = { path = "crates/sshenc-agent" }
 sshenc-test-support = { path = "crates/sshenc-test-support" }
 
 # hardware-enclave (published crate replacing the libenclaveapp path deps)
-hardware-enclave = { version = "0.2.0", features = ["signing", "encryption"] }
-# Test-only software signer. Gated into sshenc by the `force-software`
-# Cargo feature; never compiled into production builds. Not published on
-# crates.io — kept as a local path dep.
-enclaveapp-test-software = { path = "../libenclaveapp/crates/enclaveapp-test-software", features = ["signing"] }
-
+hardware-enclave = { version = "0.2.1", features = ["signing", "encryption"] }
 # Test-only temp directories (rotation tests, e2e fixtures).
 tempfile = "3"
 
@@ -160,4 +155,5 @@ unimplemented = "warn"
 unneeded_field_pattern = "warn"
 unseparated_literal_suffix = "warn"
 used_underscore_binding = "warn"
+
 

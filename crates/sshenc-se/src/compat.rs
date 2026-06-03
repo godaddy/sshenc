@@ -17,6 +17,7 @@ use std::path::Path;
 /// Local error type for metadata operations.
 #[derive(Debug)]
 pub enum MetaError {
+    KeyNotFound(String),
     Io(std::io::Error),
     Serialization(String),
 }
@@ -24,6 +25,7 @@ pub enum MetaError {
 impl std::fmt::Display for MetaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            MetaError::KeyNotFound(label) => write!(f, "key not found: {label}"),
             MetaError::Io(e) => write!(f, "I/O error: {e}"),
             MetaError::Serialization(s) => write!(f, "serialization error: {s}"),
         }
@@ -96,6 +98,9 @@ pub fn save_meta(keys_dir: &Path, label: &str, meta: &KeyMeta) -> Result<(), Met
 /// Load a raw public key from `<keys_dir>/<label>.pub`.
 pub fn load_pub_key(keys_dir: &Path, label: &str) -> Result<Vec<u8>, MetaError> {
     let path = keys_dir.join(format!("{label}.pub"));
+    if !path.exists() {
+        return Err(MetaError::KeyNotFound(label.to_string()));
+    }
     hardware_enclave::fs::read_no_follow(&path)
         .map_err(|e| MetaError::Io(std::io::Error::other(e.to_string())))
 }

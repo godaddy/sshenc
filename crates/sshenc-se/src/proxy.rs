@@ -365,9 +365,12 @@ impl AgentProxyBackend {
 }
 
 fn map_meta_err(operation: &str, e: crate::compat::MetaError) -> Error {
-    Error::SecureEnclave {
-        operation: operation.into(),
-        detail: e.to_string(),
+    match e {
+        crate::compat::MetaError::KeyNotFound(label) => Error::KeyNotFound { label },
+        other => Error::SecureEnclave {
+            operation: operation.into(),
+            detail: other.to_string(),
+        },
     }
 }
 

@@ -37,6 +37,9 @@ fn sw_err(e: enclaveapp_core::Error, operation: &str) -> hardware_enclave::Error
         enclaveapp_core::Error::DuplicateLabel { label } => {
             hardware_enclave::Error::DuplicateLabel { label }
         }
+        enclaveapp_core::Error::InvalidLabel { reason } => {
+            hardware_enclave::Error::InvalidLabel { reason }
+        }
         other => hardware_enclave::Error::KeyOperation {
             operation: operation.into(),
             detail: other.to_string(),
@@ -345,6 +348,15 @@ impl SshencBackend {
     }
 
     fn be_list_keys(&self) -> std::result::Result<Vec<String>, hardware_enclave::Error> {
+        // NOTE — list divergence: Platform enumerates keys based on the
+        // platform backend's native store (Apple: .handle files; keyring:
+        // .meta files). Software (force-software) enumerates via
+        // SoftwareSigner which scans .meta files. AgentProxyBackend::list
+        // (the CLI-side read path) scans .pub files via compat::list_labels.
+        // A key with .pub but no .meta appears in the proxy list but NOT in
+        // the software-backend list. This asymmetry is intentional for
+        // force-software CI mode but should be addressed if the software
+        // backend is ever used in production.
         match &self.backend {
             BackendImpl::Platform(h) => {
                 // SignerHandle::list_keys returns Vec<KeyInfo>; extract labels.
@@ -377,10 +389,7 @@ impl SshencBackend {
             #[cfg(feature = "force-software")]
             BackendImpl::Software(s) => {
                 use enclaveapp_core::traits::EnclaveSigner as _;
-                s.sign(label, data)
-                    .map_err(|e| hardware_enclave::Error::SignFailed {
-                        detail: e.to_string(),
-                    })
+                s.sign(label, data).map_err(|e| sw_err(e, "sign"))
             }
         }
     }
@@ -407,9 +416,7 @@ impl SshencBackend {
                 use enclaveapp_core::traits::EnclaveSigner as _;
                 let sw_mode = hw_presence_to_sw(mode);
                 s.sign_with_presence(label, data, sw_mode, cache_ttl_secs, reason)
-                    .map_err(|e| hardware_enclave::Error::SignFailed {
-                        detail: e.to_string(),
-                    })
+                    .map_err(|e| sw_err(e, "sign_with_presence"))
             }
         }
     }
@@ -832,10 +839,14 @@ impl KeyBackend for SshencBackend {
             .be_generate(label_str, opts.access_policy)
             .map_err(|e| map_err("generate", e))?;
 
-        // Save app-specific metadata (comment, git_name, git_email,
-        // presence_mode)
-        let mut meta = compat::load_sshenc_meta(&self.keys_dir, label_str)
-            .map_err(|e| map_meta_err("load_meta", e))?;
+        // Build fresh metadata for the newly-generated key. We use KeyMeta::new
+        // rather than loading any pre-existing .meta because:
+        //   1. be_generate may not write a local .meta on all backends (WSL bridge).
+        //   2. load_sshenc_meta now errors on missing .meta (security: treats
+        //      missing metadata as potential tampering), which would break the
+        //      WSL bridge path where .meta is written later.
+        //   3. The access_policy must match what was requested, not whatever was on disk.
+        let mut meta = KeyMeta::new(label_str, KeyType::Signing, opts.access_policy);
         if let Some(ref comment) = opts.comment {
             meta.set_app_field("comment", comment.clone());
         }

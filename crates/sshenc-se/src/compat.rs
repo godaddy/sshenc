@@ -96,6 +96,17 @@ pub fn save_meta(keys_dir: &Path, label: &str, meta: &KeyMeta) -> Result<(), Met
 }
 
 /// Load a raw public key from `<keys_dir>/<label>.pub`.
+///
+/// Returns `MetaError::KeyNotFound` when the file is absent.
+///
+/// # Note on TOCTOU
+/// The `path.exists()` pre-check followed by `read_no_follow` has a
+/// theoretically narrow check-then-act race. `read_no_follow` uses
+/// `O_NOFOLLOW` on Unix to block symlink-replacement attacks, so the
+/// residual is: file deleted between the check and the read → `ENOENT`
+/// I/O error instead of `KeyNotFound`. Within sshenc's threat model
+/// (write access to keys_dir is game-over for the keys themselves) this
+/// race is acceptable; documenting it here for completeness.
 pub fn load_pub_key(keys_dir: &Path, label: &str) -> Result<Vec<u8>, MetaError> {
     let path = keys_dir.join(format!("{label}.pub"));
     if !path.exists() {
@@ -236,7 +247,18 @@ pub fn rename_key_files(
 pub fn load_sshenc_meta(keys_dir: &Path, label: &str) -> Result<KeyMeta, MetaError> {
     let meta_path = keys_dir.join(format!("{label}.meta"));
     if !meta_path.exists() {
-        return Ok(KeyMeta::new(label, KeyType::Signing, AccessPolicy::None));
+        // A missing .meta file is either "key never existed" (neither .pub
+        // nor .meta) or "metadata was deleted" (possible tampering — .pub
+        // present but .meta absent). Both are errors: the old AppSigningBackend
+        // treated missing metadata as an error condition, and deletion of .meta
+        // is a recognised attack that strips access-policy enforcement.
+        let pub_path = keys_dir.join(format!("{label}.pub"));
+        if !pub_path.exists() {
+            return Err(MetaError::KeyNotFound(label.to_string()));
+        }
+        return Err(MetaError::Io(std::io::Error::other(format!(
+            "metadata file missing for key '{label}' but public-key cache              exists — possible tampering; run `sshenc migrate-meta` to repair"
+        ))));
     }
 
     let content = std::fs::read_to_string(&meta_path)?;
@@ -343,7 +365,7 @@ mod tests {
     fn load_new_format_basic_fields() {
         let dir = test_dir();
         let json = serde_json::json!({
-            "warning": "do not edit",
+            "_warning": "do not edit",
             "label": "newkey",
             "key_type": "signing",
             "access_policy": "any",
@@ -362,19 +384,45 @@ mod tests {
         assert_eq!(meta.created, "1700000001");
         assert_eq!(meta.get_app_field("comment"), Some("new comment"));
         assert_eq!(meta.get_app_field("git_name"), Some("New Name"));
+        assert!(
+            !meta.warning.is_empty(),
+            "warning field should be populated from _warning key"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn load_missing_file_returns_default() {
+    fn load_missing_file_returns_key_not_found_when_pub_also_absent() {
         let dir = test_dir();
+        // When neither .meta nor .pub exists, the key is absent.
+        let err = load_sshenc_meta(&dir, "nonexistent").unwrap_err();
+        assert!(
+            matches!(err, MetaError::KeyNotFound(_)),
+            "expected KeyNotFound, got: {err:?}"
+        );
+    }
 
-        let meta = load_sshenc_meta(&dir, "nonexistent").unwrap();
-        assert_eq!(meta.label, "nonexistent");
-        assert_eq!(meta.key_type, KeyType::Signing);
-        assert_eq!(meta.access_policy, AccessPolicy::None);
-
+    #[test]
+    fn warning_field_serializes_to_underscore_warning() {
+        // Regression: KeyMeta must serialize "warning" field as "_warning" on disk
+        // so new code can read files written by hardware-enclave's internal KeyMeta.
+        let meta = KeyMeta::new("roundtrip", KeyType::Signing, AccessPolicy::None);
+        let json = serde_json::to_string_pretty(&meta).expect("serialize");
+        assert!(
+            json.contains(r#""_warning""#),
+            "serialized KeyMeta must use '_warning' key, got:
+{json}"
+        );
+        assert!(
+            !json.contains(r#""warning":"#) || json.contains(r#""_warning":"#),
+            "must not emit bare 'warning' key"
+        );
+        // Round-trip: what we write, we can read back.
+        let dir = test_dir();
+        std::fs::write(dir.join("roundtrip.meta"), &json).unwrap();
+        let loaded = load_sshenc_meta(&dir, "roundtrip").unwrap();
+        assert_eq!(loaded.warning, meta.warning);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -510,7 +558,7 @@ mod tests {
     fn new_format_encryption_key_type() {
         let dir = test_dir();
         let json = serde_json::json!({
-            "warning": "do not edit",
+            "_warning": "do not edit",
             "label": "enckey",
             "key_type": "encryption",
             "access_policy": "biometric_only",
@@ -530,7 +578,7 @@ mod tests {
     fn new_format_with_empty_app_specific() {
         let dir = test_dir();
         let json = serde_json::json!({
-            "warning": "do not edit",
+            "_warning": "do not edit",
             "label": "bare",
             "key_type": "signing",
             "access_policy": "none",

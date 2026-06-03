@@ -12,7 +12,7 @@ default = ["webauthn-sk"]
 # Compiles in a software-only signing backend and lets the runtime
 # `SSHENC_FORCE_SOFTWARE=1` env var select it instead of the platform
 # hardware backend. Test-only — never enabled in shipping builds.
-force-software = ["dep:enclaveapp-test-software", "dep:enclaveapp-core-internal"]
+force-software = ["dep:enclaveapp-test-software", "dep:enclaveapp-core"]
 # Compiles in the FIDO2 SK / WebAuthn key path (`sshenc keygen --strong`).
 # When disabled, sshenc only knows the legacy ecdsa-sha2-nistp256 path.
 # Default-on; gate exists so build profiles that don't want the WebAuthn
@@ -28,7 +28,7 @@ serde_json = { workspace = true }
 enclaveapp-test-software = { workspace = true, optional = true }
 # enclaveapp-core is needed only for the force-software test feature to access
 # the EnclaveKeyManager/EnclaveSigner trait bounds on SoftwareSigner.
-enclaveapp-core-internal = { package = "enclaveapp-core", path = "../../../libenclaveapp/crates/enclaveapp-core", optional = true }
+enclaveapp-core = { path = "../../../libenclaveapp/crates/enclaveapp-core", optional = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 thiserror = { workspace = true }

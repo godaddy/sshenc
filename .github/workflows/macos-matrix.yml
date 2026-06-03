@@ -25,7 +25,7 @@ jobs:
       - name: Clone libenclaveapp
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/godaddy/libenclaveapp.git ../libenclaveapp
+          git clone --depth 1 https://github.com/godaddy/hardware-enclave.git ../libenclaveapp
           cp -r ../libenclaveapp/crates ../crates
           cp ../libenclaveapp/Cargo.toml ../Cargo.toml
 

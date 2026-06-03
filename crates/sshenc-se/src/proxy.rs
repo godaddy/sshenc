@@ -173,17 +173,19 @@ impl AgentProxyBackend {
         metadata::save_pub_key(&self.keys_dir, opts.label.as_str(), public_bytes)
             .map_err(|e| map_meta_err("save_pub_key", e))?;
 
-        // JSON `.meta`. Mirror the field set written by
-        // `SshencBackend::generate`: comment, pub_file_path,
-        // presence_mode. Use the same load-or-init helper so we
-        // preserve any unexpected app-specific fields a future agent
-        // may have already written on a shared filesystem.
-        let mut meta = crate::compat::load_sshenc_meta(&self.keys_dir, opts.label.as_str())
-            .map_err(|e| map_meta_err("load_meta", e))?;
-        // `load_sshenc_meta` returns a default with AccessPolicy::None
-        // when the file is absent — overwrite with the policy we just
-        // generated under so subsequent `inspect` shows the right value.
-        meta.access_policy = opts.access_policy;
+        // JSON `.meta`. Build a fresh KeyMeta for the just-generated key
+        // rather than loading any existing .meta. Reasons:
+        //   1. save_pub_key (above) has already written .pub, so
+        //      load_sshenc_meta would now return a "possible tampering"
+        //      error because .pub exists but .meta does not yet.
+        //   2. This is always a fresh keygen; there are no pre-existing
+        //      app-specific fields to preserve at this point.
+        //   3. access_policy must reflect what was just generated.
+        let mut meta = KeyMeta::new(
+            opts.label.as_str(),
+            hardware_enclave::KeyType::Signing,
+            opts.access_policy,
+        );
         if let Some(ref comment) = opts.comment {
             meta.set_app_field("comment", comment.clone());
         }

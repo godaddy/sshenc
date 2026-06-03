@@ -9,7 +9,7 @@
 use crate::error::{Error, Result};
 use hardware_enclave::fs::ensure_dir;
 use hardware_enclave::shell::{
-    self as config_block, quote_path_for_config as quote_ssh_path, BlockMarkers,
+    self as config_block, quote_path_for_ssh_config as quote_ssh_path, BlockMarkers,
 };
 use std::path::Path;
 

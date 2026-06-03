@@ -3,7 +3,7 @@
 
 //! Key domain models and metadata types.
 
-use enclaveapp_core::types::{AccessPolicy, PresenceMode};
+use hardware_enclave::{AccessPolicy, PresenceMode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;

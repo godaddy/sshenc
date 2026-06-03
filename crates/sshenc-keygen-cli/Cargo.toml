@@ -17,7 +17,7 @@ name = "sshenc-keygen"
 path = "src/main.rs"
 
 [dependencies]
-enclaveapp-core = { workspace = true }
+hardware-enclave = { workspace = true }
 sshenc-core = { workspace = true }
 sshenc-se = { workspace = true }
 sshenc-agent-proto = { workspace = true }

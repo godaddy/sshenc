@@ -20,7 +20,7 @@
 
 #![cfg(windows)]
 
-use enclaveapp_wsl::install::{LinuxReleaseSpec, WslInstallConfig};
+use hardware_enclave::wsl::{LinuxReleaseSpec, WslInstallConfig};
 
 /// Tag of the matching sshenc release. Bumped per release; pinned to
 /// the workspace version rather than read from `CARGO_PKG_VERSION`
@@ -151,7 +151,7 @@ fi"#;
 /// Configure all detected WSL distros for sshenc.
 pub fn configure_wsl_distros() {
     let config = make_config();
-    let results = enclaveapp_wsl::install::configure_all_distros(&config);
+    let results = hardware_enclave::wsl::configure_all_distros(&config);
 
     if results.is_empty() {
         return;
@@ -178,7 +178,7 @@ pub fn configure_wsl_distros() {
 /// Remove sshenc configuration from all WSL distros.
 pub fn unconfigure_wsl_distros() {
     let config = make_config();
-    let results = enclaveapp_wsl::install::unconfigure_all_distros(&config);
+    let results = hardware_enclave::wsl::unconfigure_all_distros(&config);
 
     for result in &results {
         match &result.outcome {

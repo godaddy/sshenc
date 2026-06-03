@@ -4,7 +4,7 @@
 //! Configuration model for sshenc.
 
 use crate::error::{Error, Result};
-use enclaveapp_core::metadata::{atomic_write, ensure_dir, restrict_file_permissions};
+use hardware_enclave::fs::{atomic_write, ensure_dir, restrict_file_permissions};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 

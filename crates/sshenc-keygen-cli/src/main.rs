@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use enclaveapp_core::types::PresenceMode;
+use hardware_enclave::PresenceMode;
 use sshenc_core::backup;
 use sshenc_core::key::{KeyGenOptions, KeyLabel};
 use sshenc_core::pubkey::SshPublicKey;
@@ -64,7 +64,7 @@ struct Cli {
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn main() -> Result<()> {
-    enclaveapp_core::process::harden_process();
+    hardware_enclave::process::harden_process();
 
     let cli = Cli::parse();
 

@@ -7,12 +7,10 @@
 //! implementation that delegates platform detection to `AppSigningBackend`.
 
 use crate::backend::KeyBackend;
-use crate::compat;
-use enclaveapp_app_storage::{
-    AccessPolicy, AppSigningBackend, BackendKind, EnclaveKeyManager, EnclaveSigner, StorageConfig,
+use crate::compat::{self, KeyMeta};
+use hardware_enclave::{
+    AccessPolicy, BackendKind, EnclaveConfig, KeyType, PresenceMode, PresenceOptions, SignerHandle,
 };
-use enclaveapp_core::metadata;
-use enclaveapp_core::types::{KeyType, PresenceMode};
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;
 use sshenc_core::key::{KeyGenOptions, KeyInfo, KeyLabel, KeyMetadata};
@@ -28,17 +26,39 @@ use std::path::PathBuf;
 #[cfg(feature = "force-software")]
 pub const FORCE_SOFTWARE_ENV: &str = "SSHENC_FORCE_SOFTWARE";
 
+/// Convert a `hardware_enclave::AccessPolicy` to `enclaveapp_core::AccessPolicy`.
+/// Used only in the `force-software` path to bridge between the two type sets.
+#[cfg(feature = "force-software")]
+fn hw_policy_to_sw(p: AccessPolicy) -> enclaveapp_core::types::AccessPolicy {
+    match p {
+        AccessPolicy::None => enclaveapp_core::types::AccessPolicy::None,
+        AccessPolicy::Any => enclaveapp_core::types::AccessPolicy::Any,
+        AccessPolicy::BiometricOnly => enclaveapp_core::types::AccessPolicy::BiometricOnly,
+        AccessPolicy::PasswordOnly => enclaveapp_core::types::AccessPolicy::PasswordOnly,
+    }
+}
+
+/// Convert a `hardware_enclave::PresenceMode` to `enclaveapp_core::types::PresenceMode`.
+#[cfg(feature = "force-software")]
+fn hw_presence_to_sw(m: PresenceMode) -> enclaveapp_core::types::PresenceMode {
+    match m {
+        PresenceMode::None => enclaveapp_core::types::PresenceMode::None,
+        PresenceMode::Cached => enclaveapp_core::types::PresenceMode::Cached,
+        PresenceMode::Strict => enclaveapp_core::types::PresenceMode::Strict,
+    }
+}
+
 #[cfg(feature = "force-software")]
 #[derive(Debug)]
 enum BackendImpl {
-    Platform(AppSigningBackend),
+    Platform(SignerHandle),
     Software(enclaveapp_test_software::SoftwareSigner),
 }
 
 #[cfg(not(feature = "force-software"))]
 #[derive(Debug)]
 enum BackendImpl {
-    Platform(AppSigningBackend),
+    Platform(SignerHandle),
 }
 
 /// Unified sshenc backend using `AppSigningBackend` for platform dispatch.
@@ -128,7 +148,7 @@ impl SshencBackend {
     pub fn new(
         pub_dir: PathBuf,
         force_keyring: bool,
-    ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
+    ) -> std::result::Result<Self, hardware_enclave::Error> {
         Self::with_cache_ttl(pub_dir, force_keyring, default_wrapping_key_cache_ttl())
     }
 
@@ -141,16 +161,17 @@ impl SshencBackend {
         pub_dir: PathBuf,
         force_keyring: bool,
         cache_ttl: std::time::Duration,
-    ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
+    ) -> std::result::Result<Self, hardware_enclave::Error> {
         let keys_dir = sshenc_keys_dir();
 
         #[cfg(feature = "force-software")]
         {
             if force_software_selected() {
-                metadata::ensure_dir(&keys_dir).map_err(|e| {
-                    enclaveapp_app_storage::StorageError::KeyInitFailed(format!(
-                        "prepare keys_dir for force-software: {e}"
-                    ))
+                hardware_enclave::fs::ensure_dir(&keys_dir).map_err(|e| {
+                    hardware_enclave::Error::KeyOperation {
+                        operation: "prepare keys_dir for force-software".into(),
+                        detail: e.to_string(),
+                    }
                 })?;
                 let signer = enclaveapp_test_software::SoftwareSigner::with_keys_dir(
                     "sshenc",
@@ -169,42 +190,54 @@ impl SshencBackend {
             }
         }
 
-        let backend = AppSigningBackend::init(StorageConfig {
+        let config = EnclaveConfig {
             app_name: "sshenc".into(),
-            key_label: String::new(), // sshenc manages multiple keys, no single label
-            access_policy: AccessPolicy::None, // per-key policy, not global
-            extra_bridge_paths: vec![],
+            default_key_label: String::new(), // sshenc manages multiple keys, no single label
+            access_policy: Some(AccessPolicy::None), // per-key policy, not global
             keys_dir: Some(keys_dir.clone()),
-            force_keyring,
-            wrapping_key_user_presence: true,
-            wrapping_key_cache_ttl: cache_ttl,
-            // Data Protection keychain access group. Released sshenc
-            // ships as a `.app` bundle (`com.godaddy.sshenc`) signed
-            // with the GoDaddy team's Developer ID Application
-            // identity and an embedded provisioning profile that
-            // entitles `7UMADG39Z9.*` keychain access groups, so
-            // SecItemAdd accepts `kSecUseDataProtectionKeychain: true`
-            // + `kSecAttrAccessGroup` and the wrapping-key
-            // `.userPresence` ACL actually fires.
-            //
-            // Ad-hoc / unsigned local builds fall back to the legacy
-            // keychain via the bridge's `errSecMissingEntitlement`
-            // handler — same UX as before this opt-in. See
-            // `libenclaveapp/docs/macos-app-bundle-distribution.md`
-            // for the full pattern and `docs/macos-unsigned-ux.md` for
-            // why CLI distribution can't reach the DP keychain
-            // without the .app-bundle pattern.
-            keychain_access_group: Some("7UMADG39Z9.com.godaddy.sshenc".into()),
-            // sshenc doesn't use libenclaveapp's Windows encryption path —
-            // its Hello UX on Windows comes from the SK/WebAuthn signing
-            // path. Keep the soft-Hello-UX opt-in off for the signing
-            // backend; it's a no-op on macOS/Linux regardless.
-            prefer_windows_hello_ux: false,
-            // sshenc has its own software fallback (enclaveapp-software)
-            // controlled by $SSHENC_FORCE_SOFTWARE in bin_discovery.rs.
-            // Don't let libenclaveapp auto-downgrade on Windows.
-            windows_software_fallback: enclaveapp_app_storage::WindowsSoftwareFallback::Disabled,
-        })?;
+            platform: hardware_enclave::PlatformConfig::MacOs(hardware_enclave::MacOsConfig {
+                wrapping_key_user_presence: true,
+                wrapping_key_cache_ttl: cache_ttl,
+                // Data Protection keychain access group. Released sshenc
+                // ships as a `.app` bundle (`com.godaddy.sshenc`) signed
+                // with the GoDaddy team's Developer ID Application
+                // identity and an embedded provisioning profile that
+                // entitles `7UMADG39Z9.*` keychain access groups, so
+                // SecItemAdd accepts `kSecUseDataProtectionKeychain: true`
+                // + `kSecAttrAccessGroup` and the wrapping-key
+                // `.userPresence` ACL actually fires.
+                //
+                // Ad-hoc / unsigned local builds fall back to the legacy
+                // keychain via the bridge's `errSecMissingEntitlement`
+                // handler — same UX as before this opt-in. See
+                // `libenclaveapp/docs/macos-app-bundle-distribution.md`
+                // for the full pattern and `docs/macos-unsigned-ux.md` for
+                // why CLI distribution can't reach the DP keychain
+                // without the .app-bundle pattern.
+                keychain_access_group: Some("7UMADG39Z9.com.godaddy.sshenc".into()),
+                extra_bridge_paths: vec![],
+            }),
+        };
+
+        // On non-macOS platforms, override platform config to use Default
+        // (which handles Windows/Linux force_keyring logic).
+        #[cfg(not(target_os = "macos"))]
+        let config = {
+            let mut c = config;
+            c.platform = if force_keyring {
+                hardware_enclave::PlatformConfig::Linux(hardware_enclave::LinuxConfig {
+                    force_keyring: true,
+                    extra_bridge_paths: vec![],
+                })
+            } else {
+                hardware_enclave::PlatformConfig::Default
+            };
+            c
+        };
+        #[cfg(target_os = "macos")]
+        let _ = force_keyring; // unused on macOS
+
+        let backend = hardware_enclave::create_signer(&config)?;
 
         Ok(Self {
             pub_dir,
@@ -223,19 +256,166 @@ impl SshencBackend {
         }
     }
 
-    fn signer(&self) -> &dyn EnclaveSigner {
+    // ── Backend dispatch helpers ─────────────────────────────────────────────
+    //
+    // These route each key operation to either the `SignerHandle` (Platform)
+    // or the test-only `SoftwareSigner` (force-software feature).
+
+    fn be_generate(
+        &self,
+        label: &str,
+        policy: AccessPolicy,
+    ) -> std::result::Result<Vec<u8>, hardware_enclave::Error> {
         match &self.backend {
-            BackendImpl::Platform(b) => b.signer(),
+            BackendImpl::Platform(h) => h.generate_key(label, policy),
             #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => s,
+            BackendImpl::Software(s) => {
+                use enclaveapp_core::traits::EnclaveKeyManager as _;
+                let sw_policy = hw_policy_to_sw(policy);
+                s.generate(label, enclaveapp_core::types::KeyType::Signing, sw_policy)
+                    .map_err(|e| hardware_enclave::Error::KeyOperation {
+                        operation: "generate".into(),
+                        detail: e.to_string(),
+                    })
+            }
         }
     }
 
-    fn key_manager(&self) -> &dyn EnclaveKeyManager {
+    fn be_public_key(&self, label: &str) -> std::result::Result<Vec<u8>, hardware_enclave::Error> {
         match &self.backend {
-            BackendImpl::Platform(b) => b.key_manager(),
+            BackendImpl::Platform(h) => h.public_key(label),
             #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => s,
+            BackendImpl::Software(s) => {
+                use enclaveapp_core::traits::EnclaveKeyManager as _;
+                s.public_key(label)
+                    .map_err(|e| hardware_enclave::Error::KeyOperation {
+                        operation: "public_key".into(),
+                        detail: e.to_string(),
+                    })
+            }
+        }
+    }
+
+    fn be_key_exists(&self, label: &str) -> std::result::Result<bool, hardware_enclave::Error> {
+        match &self.backend {
+            BackendImpl::Platform(h) => h.key_exists(label),
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(s) => {
+                use enclaveapp_core::traits::EnclaveKeyManager as _;
+                s.key_exists(label)
+                    .map_err(|e| hardware_enclave::Error::KeyOperation {
+                        operation: "key_exists".into(),
+                        detail: e.to_string(),
+                    })
+            }
+        }
+    }
+
+    fn be_delete_key(&self, label: &str) -> std::result::Result<(), hardware_enclave::Error> {
+        match &self.backend {
+            BackendImpl::Platform(h) => h.delete_key(label),
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(s) => {
+                use enclaveapp_core::traits::EnclaveKeyManager as _;
+                s.delete_key(label)
+                    .map_err(|e| hardware_enclave::Error::KeyOperation {
+                        operation: "delete_key".into(),
+                        detail: e.to_string(),
+                    })
+            }
+        }
+    }
+
+    fn be_rename_key(
+        &self,
+        old: &str,
+        new: &str,
+    ) -> std::result::Result<(), hardware_enclave::Error> {
+        match &self.backend {
+            BackendImpl::Platform(h) => h.rename_key(old, new),
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(s) => {
+                use enclaveapp_core::traits::EnclaveKeyManager as _;
+                s.rename_key(old, new)
+                    .map_err(|e| hardware_enclave::Error::KeyOperation {
+                        operation: "rename_key".into(),
+                        detail: e.to_string(),
+                    })
+            }
+        }
+    }
+
+    fn be_list_keys(&self) -> std::result::Result<Vec<String>, hardware_enclave::Error> {
+        match &self.backend {
+            BackendImpl::Platform(h) => {
+                // SignerHandle::list_keys returns Vec<KeyInfo>; extract labels.
+                h.list_keys()
+                    .map(|infos| infos.into_iter().map(|i| i.label).collect())
+            }
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(s) => {
+                use enclaveapp_core::traits::EnclaveKeyManager as _;
+                s.list_keys()
+                    .map_err(|e| hardware_enclave::Error::KeyOperation {
+                        operation: "list_keys".into(),
+                        detail: e.to_string(),
+                    })
+            }
+        }
+    }
+
+    fn be_is_available(&self) -> bool {
+        match &self.backend {
+            BackendImpl::Platform(_) => true,
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(_) => true,
+        }
+    }
+
+    fn be_sign(
+        &self,
+        label: &str,
+        data: &[u8],
+    ) -> std::result::Result<Vec<u8>, hardware_enclave::Error> {
+        match &self.backend {
+            BackendImpl::Platform(h) => h.sign(label, data),
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(s) => {
+                use enclaveapp_core::traits::EnclaveSigner as _;
+                s.sign(label, data)
+                    .map_err(|e| hardware_enclave::Error::SignFailed {
+                        detail: e.to_string(),
+                    })
+            }
+        }
+    }
+
+    fn be_sign_with_presence(
+        &self,
+        label: &str,
+        data: &[u8],
+        mode: PresenceMode,
+        cache_ttl_secs: u64,
+        reason: &str,
+    ) -> std::result::Result<Vec<u8>, hardware_enclave::Error> {
+        match &self.backend {
+            BackendImpl::Platform(h) => {
+                let opts = PresenceOptions {
+                    mode,
+                    cache_ttl_secs,
+                    reason: reason.to_string(),
+                };
+                h.sign_with_presence(label, data, &opts)
+            }
+            #[cfg(feature = "force-software")]
+            BackendImpl::Software(s) => {
+                use enclaveapp_core::traits::EnclaveSigner as _;
+                let sw_mode = hw_presence_to_sw(mode);
+                s.sign_with_presence(label, data, sw_mode, cache_ttl_secs, reason)
+                    .map_err(|e| hardware_enclave::Error::SignFailed {
+                        detail: e.to_string(),
+                    })
+            }
         }
     }
 
@@ -261,11 +441,11 @@ impl SshencBackend {
     /// for that call.
     fn get_disk_only(&self, label: &str) -> Result<KeyInfo> {
         let owned_label = KeyLabel::new(label)?;
-        let meta =
-            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        let meta = compat::load_sshenc_meta(&self.keys_dir, label)
+            .map_err(|e| map_meta_err("load_meta", e))?;
         let comment = meta.get_app_field("comment").map(|s| s.to_string());
-        let public_bytes = metadata::load_pub_key(&self.keys_dir, label)
-            .map_err(|e| map_err("load_pub_key", e))?;
+        let public_bytes = compat::load_pub_key(&self.keys_dir, label)
+            .map_err(|e| map_meta_err("load_pub_key", e))?;
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
         let pub_file_path = self.persisted_pub_file_path(&meta, label);
@@ -286,7 +466,7 @@ impl SshencBackend {
     }
 
     #[allow(clippy::match_same_arms)] // arms kept separate for intent documentation
-    fn persisted_pub_file_path(&self, meta: &metadata::KeyMeta, label: &str) -> Option<PathBuf> {
+    fn persisted_pub_file_path(&self, meta: &KeyMeta, label: &str) -> Option<PathBuf> {
         match meta.app_specific.get("pub_file_path") {
             // Explicit path recorded — use it
             Some(value) if value.is_string() => value.as_str().map(PathBuf::from),
@@ -323,7 +503,7 @@ impl SshencBackend {
         // string they don't understand and fall through to legacy
         // assumptions; new loaders pivot on it. base64 the
         // credential_id for a human-inspectable .meta file.
-        let mut meta = metadata::KeyMeta::new(label_str, KeyType::Signing, AccessPolicy::Any);
+        let mut meta = KeyMeta::new(label_str, KeyType::Signing, AccessPolicy::Any);
         meta.set_app_field("algorithm", "sk-ecdsa-sha2-nistp256");
         if let Some(ref cid) = info.metadata.credential_id {
             use base64::engine::general_purpose::STANDARD;
@@ -347,8 +527,8 @@ impl SshencBackend {
             ),
             None => meta.set_app_field("pub_file_path", serde_json::Value::Null),
         }
-        metadata::save_meta(&self.keys_dir, label_str, &meta)
-            .map_err(|e| map_err("save_meta", e))?;
+        compat::save_meta(&self.keys_dir, label_str, &meta)
+            .map_err(|e| map_meta_err("save_meta", e))?;
 
         // Stamp the per-key trust-anchor tag against the SK
         // `.meta` we just wrote. The legacy ECDSA path gets this
@@ -367,36 +547,12 @@ impl SshencBackend {
         // will fail with `Legacy` until the user runs
         // `sshenc migrate-meta`. Same posture as the legacy keygen
         // path's fallback.
-        const SSHENC_APP_NAME: &str = "sshenc";
-        #[cfg(target_os = "macos")]
+        // Stamp the per-key trust-anchor tag via TamperEvidentHandle.
         {
-            if let Ok(Some(hk)) = enclaveapp_apple::meta_hmac::load_existing(SSHENC_APP_NAME) {
-                let meta_path = self.keys_dir.join(format!("{label_str}.meta"));
-                if let Ok(meta_bytes) = std::fs::read(&meta_path) {
-                    let tag = metadata::compute_meta_hmac_bytes(hk.as_slice(), &meta_bytes);
-                    if let Err(e) =
-                        enclaveapp_apple::meta_tag::store(SSHENC_APP_NAME, label_str, &tag)
-                    {
-                        tracing::warn!(
-                            label = label_str,
-                            error = %e,
-                            "post-sk-keygen meta-tag stamp failed; \
-                             first sk_sign will refuse with Legacy until \
-                             user runs `sshenc migrate-meta`"
-                        );
-                    }
-                }
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(Some(hk)) = enclaveapp_windows::meta_hmac::load_or_create(SSHENC_APP_NAME) {
-                if let Err(e) = enclaveapp_windows::meta_tag::stamp_from_disk(
-                    SSHENC_APP_NAME,
-                    label_str,
-                    &self.keys_dir,
-                    hk.as_slice(),
-                ) {
+            let meta_path = self.keys_dir.join(format!("{label_str}.meta"));
+            if let Ok(handle) = hardware_enclave::create_tamper_evident("sshenc") {
+                let handle = handle.with_trust_anchor();
+                if let Err(e) = handle.migrate(&meta_path) {
                     tracing::warn!(
                         label = label_str,
                         error = %e,
@@ -407,27 +563,6 @@ impl SshencBackend {
                 }
             }
         }
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(Some(hk)) = enclaveapp_keyring::meta_hmac_key_existing(SSHENC_APP_NAME) {
-                if let Err(e) = enclaveapp_keyring::meta_tag::stamp_from_disk(
-                    SSHENC_APP_NAME,
-                    label_str,
-                    &self.keys_dir,
-                    hk.as_slice(),
-                ) {
-                    tracing::warn!(
-                        label = label_str,
-                        error = %e,
-                        "post-sk-keygen meta-tag stamp failed; \
-                         first sk_sign will refuse with Legacy until \
-                         user runs `sshenc migrate-meta`"
-                    );
-                }
-            }
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        let _ = SSHENC_APP_NAME;
 
         Ok(info)
     }
@@ -457,8 +592,8 @@ impl SshencBackend {
     #[allow(clippy::same_name_method)]
     pub fn sk_get(&self, label: &str) -> Result<KeyInfo> {
         drop(KeyLabel::new(label)?);
-        let meta =
-            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        let meta = compat::load_sshenc_meta(&self.keys_dir, label)
+            .map_err(|e| map_meta_err("load_meta", e))?;
         if meta.get_app_field("algorithm") != Some("sk-ecdsa-sha2-nistp256") {
             return Err(Error::Other(format!("key '{label}' is not an SK key")));
         }
@@ -559,17 +694,29 @@ impl SshencBackend {
         // `check_meta_integrity` is platform-dispatching (macOS
         // Keychain, Windows Credential Manager, Linux Secret
         // Service) and read-only on every backend.
-        const SSHENC_APP_NAME: &str = "sshenc";
-        if let Err(e) = enclaveapp_app_storage::platform::check_meta_integrity(
-            SSHENC_APP_NAME,
-            label,
-            &self.keys_dir,
-        ) {
-            return Err(Error::Other(format!("sk_sign: {e}")));
+        // Per-op trust-anchor check using TamperEvidentHandle in TrustAnchor mode.
+        // Fail-closed on Tamper; pass through Legacy (pre-migration) and StoreUnavailable.
+        {
+            let meta_path = self.keys_dir.join(format!("{label}.meta"));
+            if let Ok(handle) = hardware_enclave::create_tamper_evident("sshenc") {
+                let handle = handle.with_trust_anchor();
+                match handle.verify(&meta_path) {
+                    Ok(hardware_enclave::VerifyOutcome::Tamper) => {
+                        return Err(Error::Other(format!(
+                            "sk_sign: meta-integrity check failed for '{label}' — \
+                             metadata may have been tampered with"
+                        )));
+                    }
+                    Ok(_) => {} // Match, Legacy, StoreUnavailable, NotFound all pass
+                    Err(e) => {
+                        return Err(Error::Other(format!("sk_sign: integrity check error: {e}")));
+                    }
+                }
+            }
         }
 
-        let meta =
-            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        let meta = compat::load_sshenc_meta(&self.keys_dir, label)
+            .map_err(|e| map_meta_err("load_meta", e))?;
         if meta.get_app_field("algorithm") != Some("sk-ecdsa-sha2-nistp256") {
             return Err(Error::Other(format!("key '{label}' is not an SK key")));
         }
@@ -593,8 +740,8 @@ impl SshencBackend {
     #[cfg(feature = "webauthn-sk")]
     pub fn sk_delete(&self, label: &str) -> Result<()> {
         drop(KeyLabel::new(label)?);
-        let meta =
-            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        let meta = compat::load_sshenc_meta(&self.keys_dir, label)
+            .map_err(|e| map_meta_err("load_meta", e))?;
         if meta.get_app_field("algorithm") != Some("sk-ecdsa-sha2-nistp256") {
             return Err(Error::Other(format!("key '{label}' is not an SK key")));
         }
@@ -648,8 +795,16 @@ impl SshencBackend {
     }
 }
 
-/// Map an enclaveapp_core error to an sshenc_core error.
-fn map_err(operation: &str, e: enclaveapp_core::Error) -> Error {
+/// Map a hardware_enclave error to an sshenc_core error.
+fn map_err(operation: &str, e: hardware_enclave::Error) -> Error {
+    Error::SecureEnclave {
+        operation: operation.into(),
+        detail: e.to_string(),
+    }
+}
+
+/// Map a compat::MetaError to an sshenc_core error.
+fn map_meta_err(operation: &str, e: compat::MetaError) -> Error {
     Error::SecureEnclave {
         operation: operation.into(),
         detail: e.to_string(),
@@ -666,8 +821,7 @@ impl KeyBackend for SshencBackend {
         // it for the check would both falsely report "duplicate" and
         // leave behind a TPM key.
         if self
-            .key_manager()
-            .key_exists(label_str)
+            .be_key_exists(label_str)
             .map_err(|e| map_err("key_exists", e))?
         {
             return Err(Error::DuplicateLabel {
@@ -677,14 +831,13 @@ impl KeyBackend for SshencBackend {
 
         // Generate key via platform backend
         let public_bytes = self
-            .key_manager()
-            .generate(label_str, KeyType::Signing, opts.access_policy)
+            .be_generate(label_str, opts.access_policy)
             .map_err(|e| map_err("generate", e))?;
 
         // Save app-specific metadata (comment, git_name, git_email,
         // presence_mode)
         let mut meta = compat::load_sshenc_meta(&self.keys_dir, label_str)
-            .map_err(|e| map_err("load_meta", e))?;
+            .map_err(|e| map_meta_err("load_meta", e))?;
         if let Some(ref comment) = opts.comment {
             meta.set_app_field("comment", comment.clone());
         }
@@ -708,8 +861,8 @@ impl KeyBackend for SshencBackend {
             "presence_mode",
             crate::proxy::presence_mode_to_app_specific_str(opts.presence_mode),
         );
-        metadata::save_meta(&self.keys_dir, label_str, &meta)
-            .map_err(|e| map_err("save_meta", e))?;
+        compat::save_meta(&self.keys_dir, label_str, &meta)
+            .map_err(|e| map_meta_err("save_meta", e))?;
 
         // Re-stamp the per-key meta-integrity tag against the FINAL
         // on-disk meta. The platform backend (`TpmSigner::generate` /
@@ -734,16 +887,14 @@ impl KeyBackend for SshencBackend {
         // SshencBackend hardcodes the "sshenc" app namespace (see
         // `SshencBackend::new` / test fixture); the platform
         // secure-store paths share that namespace.
-        const SSHENC_APP_NAME: &str = "sshenc";
-        #[cfg(target_os = "windows")]
+        // Re-stamp the per-key meta-integrity tag against the FINAL
+        // on-disk meta using TamperEvidentHandle (replaces the old
+        // platform-specific enclaveapp_apple/windows/keyring meta_tag API).
         {
-            if let Ok(Some(hk)) = enclaveapp_windows::meta_hmac::load_or_create(SSHENC_APP_NAME) {
-                if let Err(e) = enclaveapp_windows::meta_tag::stamp_from_disk(
-                    SSHENC_APP_NAME,
-                    label_str,
-                    &self.keys_dir,
-                    hk.as_slice(),
-                ) {
+            let meta_path = self.keys_dir.join(format!("{label_str}.meta"));
+            if let Ok(handle) = hardware_enclave::create_tamper_evident("sshenc") {
+                let handle = handle.with_trust_anchor();
+                if let Err(e) = handle.migrate(&meta_path) {
                     tracing::warn!(
                         label = label_str,
                         error = %e,
@@ -754,47 +905,6 @@ impl KeyBackend for SshencBackend {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(Some(hk)) = enclaveapp_apple::meta_hmac::load_existing(SSHENC_APP_NAME) {
-                let meta_path = self.keys_dir.join(format!("{label_str}.meta"));
-                if let Ok(meta_bytes) = std::fs::read(&meta_path) {
-                    let tag = metadata::compute_meta_hmac_bytes(hk.as_slice(), &meta_bytes);
-                    if let Err(e) =
-                        enclaveapp_apple::meta_tag::store(SSHENC_APP_NAME, label_str, &tag)
-                    {
-                        tracing::warn!(
-                            label = label_str,
-                            error = %e,
-                            "post-app-specific meta-tag re-stamp failed; \
-                             platform-backend inline tag remains as fallback — \
-                             user should run `sshenc migrate-meta` to recover"
-                        );
-                    }
-                }
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(Some(hk)) = enclaveapp_keyring::meta_hmac_key_existing(SSHENC_APP_NAME) {
-                if let Err(e) = enclaveapp_keyring::meta_tag::stamp_from_disk(
-                    SSHENC_APP_NAME,
-                    label_str,
-                    &self.keys_dir,
-                    hk.as_slice(),
-                ) {
-                    tracing::warn!(
-                        label = label_str,
-                        error = %e,
-                        "post-app-specific meta-tag re-stamp failed; \
-                         platform-backend inline tag remains as fallback — \
-                         user should run `sshenc migrate-meta` to recover"
-                    );
-                }
-            }
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        let _ = SSHENC_APP_NAME;
 
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, opts.comment.clone())?;
         let (fp_sha256, fp_md5) = fingerprint::fingerprints(&ssh_pubkey);
@@ -840,10 +950,7 @@ impl KeyBackend for SshencBackend {
     /// during a bulk `list` triggered by `RequestIdentities` from a
     /// passing SSH client or by the agent's startup warmup.
     fn list(&self) -> Result<Vec<KeyInfo>> {
-        let labels = self
-            .key_manager()
-            .list_keys()
-            .map_err(|e| map_err("list_keys", e))?;
+        let labels = self.be_list_keys().map_err(|e| map_err("list_keys", e))?;
 
         let mut keys = Vec::new();
         for label_str in labels {
@@ -861,13 +968,12 @@ impl KeyBackend for SshencBackend {
         drop(KeyLabel::new(label)?);
 
         let public_bytes = self
-            .key_manager()
-            .public_key(label)
+            .be_public_key(label)
             .map_err(|e| map_err("load_pub_key", e))?;
 
         // Load persisted metadata (handles old and new format)
-        let meta =
-            compat::load_sshenc_meta(&self.keys_dir, label).map_err(|e| map_err("load_meta", e))?;
+        let meta = compat::load_sshenc_meta(&self.keys_dir, label)
+            .map_err(|e| map_meta_err("load_meta", e))?;
 
         let comment = meta.get_app_field("comment").map(|s| s.to_string());
         let ssh_pubkey = SshPublicKey::from_sec1_bytes(&public_bytes, comment.clone())?;
@@ -891,24 +997,20 @@ impl KeyBackend for SshencBackend {
 
     fn delete(&self, label: &str) -> Result<()> {
         drop(KeyLabel::new(label)?);
-        self.key_manager()
-            .delete_key(label)
+        self.be_delete_key(label)
             .map_err(|e| map_err("delete_key", e))
     }
 
     fn rename(&self, old_label: &str, new_label: &str) -> Result<()> {
         drop(KeyLabel::new(old_label)?);
         drop(KeyLabel::new(new_label)?);
-        self.key_manager()
-            .rename_key(old_label, new_label)
+        self.be_rename_key(old_label, new_label)
             .map_err(|e| map_err("rename_key", e))
     }
 
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         drop(KeyLabel::new(label)?);
-        self.signer()
-            .sign(label, data)
-            .map_err(|e| map_err("sign", e))
+        self.be_sign(label, data).map_err(|e| map_err("sign", e))
     }
 
     fn sign_with_presence(
@@ -929,13 +1031,12 @@ impl KeyBackend for SshencBackend {
         } else {
             cache_ttl_secs
         };
-        self.signer()
-            .sign_with_presence(label, data, mode, effective_ttl, reason)
+        self.be_sign_with_presence(label, data, mode, effective_ttl, reason)
             .map_err(|e| map_err("sign_with_presence", e))
     }
 
     fn is_available(&self) -> bool {
-        self.key_manager().is_available()
+        self.be_is_available()
     }
 
     // SK trait method overrides delegate to the inherent methods of
@@ -988,20 +1089,14 @@ mod tests {
     /// Try to create a test backend. Returns None if hardware is unavailable
     /// (e.g., no TPM on Windows CI, no SE on macOS CI).
     fn try_test_backend(pub_dir: PathBuf) -> Option<SshencBackend> {
-        let backend = AppSigningBackend::init(StorageConfig {
+        let config = EnclaveConfig {
             app_name: "sshenc-test".into(),
-            key_label: String::new(),
-            access_policy: AccessPolicy::None,
-            extra_bridge_paths: vec![],
+            default_key_label: String::new(),
+            access_policy: Some(AccessPolicy::None),
             keys_dir: None,
-            force_keyring: false,
-            wrapping_key_user_presence: false,
-            wrapping_key_cache_ttl: std::time::Duration::ZERO,
-            keychain_access_group: None,
-            prefer_windows_hello_ux: false,
-            windows_software_fallback: enclaveapp_app_storage::WindowsSoftwareFallback::Disabled,
-        })
-        .ok()?;
+            platform: hardware_enclave::PlatformConfig::Default,
+        };
+        let backend = hardware_enclave::create_signer(&config).ok()?;
         Some(SshencBackend {
             pub_dir,
             keys_dir: sshenc_keys_dir(),
@@ -1076,7 +1171,7 @@ mod tests {
             return;
         };
 
-        let mut meta = metadata::KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
+        let mut meta = KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", "/custom/path/test-key.pub");
 
         let result = backend.persisted_pub_file_path(&meta, "test-key");
@@ -1094,7 +1189,7 @@ mod tests {
             return;
         };
 
-        let mut meta = metadata::KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
+        let mut meta = KeyMeta::new("test-key", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", serde_json::Value::Null);
 
         let result = backend.persisted_pub_file_path(&meta, "test-key");
@@ -1114,7 +1209,7 @@ mod tests {
         };
 
         // Legacy metadata has no pub_file_path field at all
-        let meta = metadata::KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
+        let meta = KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
 
         let result = backend.persisted_pub_file_path(&meta, "legacy");
         assert!(result.is_some());
@@ -1131,7 +1226,7 @@ mod tests {
             return;
         };
 
-        let mut meta = metadata::KeyMeta::new("no-pub", KeyType::Signing, AccessPolicy::None);
+        let mut meta = KeyMeta::new("no-pub", KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("pub_file_path", serde_json::Value::Null);
 
         let result = backend.persisted_pub_file_path(&meta, "no-pub");
@@ -1165,10 +1260,10 @@ mod tests {
         public.extend_from_slice(&[0xAA; 64]);
 
         let label = "disk-only-test";
-        metadata::save_pub_key(&keys_dir, label, &public).unwrap();
-        let mut meta = metadata::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
+        compat::save_pub_key(&keys_dir, label, &public).unwrap();
+        let mut meta = KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
         meta.set_app_field("comment", "disk-only-test-comment");
-        metadata::save_meta(&keys_dir, label, &meta).unwrap();
+        compat::save_meta(&keys_dir, label, &meta).unwrap();
 
         // Build a SshencBackend WITHOUT going through `with_cache_ttl`
         // (which would require either real keychain or the
@@ -1211,8 +1306,8 @@ mod tests {
 
         // .meta only, no .pub
         let label = "missing-pub";
-        let meta = metadata::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
-        metadata::save_meta(&keys_dir, label, &meta).unwrap();
+        let meta = KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
+        compat::save_meta(&keys_dir, label, &meta).unwrap();
 
         let Some(mut backend) = try_test_backend(pub_dir.clone()) else {
             std::fs::remove_dir_all(&pub_dir).unwrap();

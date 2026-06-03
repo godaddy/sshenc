@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 dirs = { workspace = true }
-enclaveapp-core = { workspace = true }
+hardware-enclave = { workspace = true }
 sshenc-core = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

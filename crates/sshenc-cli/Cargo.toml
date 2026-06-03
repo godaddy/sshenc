@@ -26,7 +26,7 @@ webauthn-sk = ["sshenc-se/webauthn-sk"]
 sshenc-core = { workspace = true }
 sshenc-se = { workspace = true }
 sshenc-agent = { workspace = true }
-enclaveapp-core = { workspace = true }
+hardware-enclave = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }
@@ -41,21 +41,9 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 sshenc-agent-proto = { workspace = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-enclaveapp-apple = { workspace = true }
-
 [target.'cfg(windows)'.dependencies]
-enclaveapp-windows = { workspace = true }
-enclaveapp-wsl = { workspace = true }
 reqwest = { workspace = true }
 zip = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-enclaveapp-keyring = { workspace = true }
-enclaveapp-linux-tpm = { workspace = true }
-
-[build-dependencies]
-enclaveapp-build-support = { workspace = true }
 
 [dev-dependencies]
 sshenc-test-support = { workspace = true }

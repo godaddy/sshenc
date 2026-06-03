@@ -16,7 +16,7 @@ pub mod shell_env;
 pub mod ssh_config;
 
 pub use config::{Config, PromptPolicy};
-pub use enclaveapp_core::types::{AccessPolicy, PresenceMode};
 pub use error::Error;
+pub use hardware_enclave::{AccessPolicy, PresenceMode};
 pub use key::{KeyInfo, KeyLabel, KeyMetadata};
 pub use pubkey::SshPublicKey;

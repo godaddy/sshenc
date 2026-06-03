@@ -324,7 +324,7 @@ fn check_window_server_or_relaunch() {
 
     // Touch ID available → we have a window server session. The user may be
     // running a secondary agent intentionally (custom socket, testing, etc.).
-    if enclaveapp_apple::touch_id_available() {
+    if hardware_enclave::auth::platform_auth_capabilities().biometric_available {
         return;
     }
 
@@ -406,7 +406,7 @@ fn check_window_server_or_relaunch() {
 }
 
 fn main() -> Result<()> {
-    enclaveapp_core::process::harden_process();
+    hardware_enclave::process::harden_process();
 
     let cli = Cli::parse();
 

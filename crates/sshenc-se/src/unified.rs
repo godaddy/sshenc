@@ -26,6 +26,24 @@ use std::path::PathBuf;
 #[cfg(feature = "force-software")]
 pub const FORCE_SOFTWARE_ENV: &str = "SSHENC_FORCE_SOFTWARE";
 
+/// Map an `enclaveapp_core::Error` to `hardware_enclave::Error`, preserving
+/// `KeyNotFound` so callers like `delete --if-exists` can detect missing keys.
+#[cfg(feature = "force-software")]
+fn sw_err(e: enclaveapp_core::Error, operation: &str) -> hardware_enclave::Error {
+    match e {
+        enclaveapp_core::Error::KeyNotFound { label } => {
+            hardware_enclave::Error::KeyNotFound { label }
+        }
+        enclaveapp_core::Error::DuplicateLabel { label } => {
+            hardware_enclave::Error::DuplicateLabel { label }
+        }
+        other => hardware_enclave::Error::KeyOperation {
+            operation: operation.into(),
+            detail: other.to_string(),
+        },
+    }
+}
+
 /// Convert a `hardware_enclave::AccessPolicy` to `enclaveapp_core::AccessPolicy`.
 /// Used only in the `force-software` path to bridge between the two type sets.
 #[cfg(feature = "force-software")]
@@ -273,10 +291,7 @@ impl SshencBackend {
                 use enclaveapp_core::traits::EnclaveKeyManager as _;
                 let sw_policy = hw_policy_to_sw(policy);
                 s.generate(label, enclaveapp_core::types::KeyType::Signing, sw_policy)
-                    .map_err(|e| hardware_enclave::Error::KeyOperation {
-                        operation: "generate".into(),
-                        detail: e.to_string(),
-                    })
+                    .map_err(|e| sw_err(e, "generate"))
             }
         }
     }
@@ -287,11 +302,7 @@ impl SshencBackend {
             #[cfg(feature = "force-software")]
             BackendImpl::Software(s) => {
                 use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.public_key(label)
-                    .map_err(|e| hardware_enclave::Error::KeyOperation {
-                        operation: "public_key".into(),
-                        detail: e.to_string(),
-                    })
+                s.public_key(label).map_err(|e| sw_err(e, "public_key"))
             }
         }
     }
@@ -302,11 +313,7 @@ impl SshencBackend {
             #[cfg(feature = "force-software")]
             BackendImpl::Software(s) => {
                 use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.key_exists(label)
-                    .map_err(|e| hardware_enclave::Error::KeyOperation {
-                        operation: "key_exists".into(),
-                        detail: e.to_string(),
-                    })
+                s.key_exists(label).map_err(|e| sw_err(e, "key_exists"))
             }
         }
     }
@@ -317,11 +324,7 @@ impl SshencBackend {
             #[cfg(feature = "force-software")]
             BackendImpl::Software(s) => {
                 use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.delete_key(label)
-                    .map_err(|e| hardware_enclave::Error::KeyOperation {
-                        operation: "delete_key".into(),
-                        detail: e.to_string(),
-                    })
+                s.delete_key(label).map_err(|e| sw_err(e, "delete_key"))
             }
         }
     }
@@ -336,11 +339,7 @@ impl SshencBackend {
             #[cfg(feature = "force-software")]
             BackendImpl::Software(s) => {
                 use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.rename_key(old, new)
-                    .map_err(|e| hardware_enclave::Error::KeyOperation {
-                        operation: "rename_key".into(),
-                        detail: e.to_string(),
-                    })
+                s.rename_key(old, new).map_err(|e| sw_err(e, "rename_key"))
             }
         }
     }
@@ -355,11 +354,7 @@ impl SshencBackend {
             #[cfg(feature = "force-software")]
             BackendImpl::Software(s) => {
                 use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.list_keys()
-                    .map_err(|e| hardware_enclave::Error::KeyOperation {
-                        operation: "list_keys".into(),
-                        detail: e.to_string(),
-                    })
+                s.list_keys().map_err(|e| sw_err(e, "list_keys"))
             }
         }
     }

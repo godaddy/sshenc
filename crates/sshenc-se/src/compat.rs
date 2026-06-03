@@ -42,6 +42,7 @@ impl From<std::io::Error> for MetaError {
 /// `created`, `app_specific`. This struct must match it exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyMeta {
+    #[serde(rename = "_warning", default = "meta_warning_default")]
     pub warning: String,
     pub label: String,
     #[serde(with = "key_type_serde")]

@@ -18,7 +18,7 @@
 //! [`crate::ssh_config`]. Idempotent install/uninstall.
 
 use crate::error::{Error, Result};
-use enclaveapp_core::config_block::{self, BlockMarkers};
+use hardware_enclave::shell::{self as config_block, BlockMarkers};
 use std::path::{Path, PathBuf};
 
 fn markers() -> BlockMarkers {
@@ -447,7 +447,7 @@ fn write_rc(path: &Path, content: &str) -> Result<()> {
     // them on every interactive session). atomic_write handles the
     // rename-into-place; we don't tighten the bits because doing
     // so would block multi-user shells that share rc files.
-    enclaveapp_core::metadata::atomic_write(path, content.as_bytes())
+    hardware_enclave::fs::atomic_write(path, content.as_bytes())
         .map_err(|e| Error::Config(e.to_string()))
 }
 

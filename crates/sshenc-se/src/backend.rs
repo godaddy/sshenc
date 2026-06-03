@@ -6,7 +6,7 @@
 //! This allows the real Secure Enclave backend to be swapped out with a mock
 //! for testing on non-macOS systems or in CI without hardware access.
 
-use enclaveapp_core::types::PresenceMode;
+use hardware_enclave::PresenceMode;
 use sshenc_core::error::Result;
 use sshenc_core::key::{KeyGenOptions, KeyInfo};
 

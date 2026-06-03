@@ -355,7 +355,7 @@ enum OpensshAction {
 
 #[allow(clippy::print_stderr)]
 fn main() -> Result<()> {
-    enclaveapp_core::process::harden_process();
+    hardware_enclave::process::harden_process();
 
     // Intercept ssh-keygen-compatible mode before clap parsing.
     // Git calls us with -Y sign, -Y verify, -Y find-principals, etc.
@@ -640,8 +640,8 @@ fn selected_access_and_presence(
     auth_policy: Option<&str>,
     strict: bool,
     no_user_presence: bool,
-) -> Result<(AccessPolicy, enclaveapp_core::types::PresenceMode)> {
-    use enclaveapp_core::types::PresenceMode;
+) -> Result<(AccessPolicy, hardware_enclave::PresenceMode)> {
+    use hardware_enclave::PresenceMode;
 
     // Explicit --auth-policy wins over the strict / no-presence flags.
     // The presence mode is then derived from whether the chosen access

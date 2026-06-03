@@ -386,7 +386,7 @@ fn apply_windows_actions(actions: &[WindowsAction]) -> Result<()> {
     // known to hang on wedged services. Cap at 30s so install/uninstall can
     // never block the terminal indefinitely.
     fn command_output(program: &str, args: &[&str]) -> Result<std::process::Output> {
-        use enclaveapp_core::timeout::{run_with_timeout, TimeoutResult};
+        use hardware_enclave::process::{run_with_timeout, TimeoutResult};
         use std::time::Duration;
         let mut cmd = std::process::Command::new(program);
         cmd.args(args);
@@ -515,7 +515,7 @@ fn parse_reg_query_value(text: &str) -> Option<String> {
 
 #[cfg(windows)]
 fn run_bounded(program: &str, args: &[&str]) -> Result<std::process::Output> {
-    use enclaveapp_core::timeout::{run_with_timeout, TimeoutResult};
+    use hardware_enclave::process::{run_with_timeout, TimeoutResult};
     use std::time::Duration;
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
@@ -565,7 +565,7 @@ fn save_windows_install_state(state: &WindowsInstallState) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    enclaveapp_core::metadata::atomic_write(&path, &contents).map_err(|e| anyhow!(e.to_string()))
+    hardware_enclave::fs::atomic_write(&path, &contents).map_err(|e| anyhow!(e.to_string()))
 }
 
 #[cfg(windows)]
@@ -683,7 +683,7 @@ pub fn keygen(
     write_pub: Option<PathBuf>,
     print_pub: bool,
     access_policy: AccessPolicy,
-    presence_mode: enclaveapp_core::types::PresenceMode,
+    presence_mode: hardware_enclave::PresenceMode,
     json: bool,
 ) -> Result<()> {
     let key_label = KeyLabel::new(label)?;
@@ -919,10 +919,9 @@ pub fn list(backend: &dyn KeyBackend, json: bool) -> Result<()> {
         println!(
             "  User presence: {}",
             match key.metadata.effective_presence_mode() {
-                enclaveapp_core::types::PresenceMode::Cached => "required (cached)",
-                enclaveapp_core::types::PresenceMode::Strict =>
-                    "required (strict, prompt per sign)",
-                enclaveapp_core::types::PresenceMode::None => "not required",
+                hardware_enclave::PresenceMode::Cached => "required (cached)",
+                hardware_enclave::PresenceMode::Strict => "required (strict, prompt per sign)",
+                hardware_enclave::PresenceMode::None => "not required",
             }
         );
         println!("  App tag:       {}", key.metadata.app_tag);
@@ -1522,7 +1521,7 @@ fn find_agent_binary() -> Result<PathBuf> {
     let agent_name = "sshenc-agent.exe";
     #[cfg(not(windows))]
     let agent_name = "sshenc-agent";
-    enclaveapp_core::bin_discovery::find_trusted_binary(agent_name, "sshenc")
+    hardware_enclave::process::find_trusted_binary(agent_name, "sshenc")
         .ok_or_else(|| anyhow!("sshenc-agent not found in trusted install locations"))
 }
 
@@ -1778,7 +1777,7 @@ fn write_atomic_file(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    enclaveapp_core::metadata::atomic_write(path, data).map_err(|e| anyhow!(e.to_string()))
+    hardware_enclave::fs::atomic_write(path, data).map_err(|e| anyhow!(e.to_string()))
 }
 
 fn unique_temp_identity_path(identity_dir: &Path, label: &str) -> PathBuf {
@@ -1902,7 +1901,7 @@ fn unique_backup_path(path: &Path) -> PathBuf {
 
 #[cfg(not(windows))]
 fn load_label_public_key(keys_dir: &Path, label: &str) -> Result<SshPublicKey> {
-    let pub_bytes = enclaveapp_core::metadata::load_pub_key(keys_dir, label)
+    let pub_bytes = sshenc_se::compat::load_pub_key(keys_dir, label)
         .map_err(|_| anyhow!("key '{label}' not found"))?;
     let meta = sshenc_se::compat::load_sshenc_meta(keys_dir, label)
         .map_err(|e| anyhow!("failed to load metadata for '{label}': {e}"))?;
@@ -2618,7 +2617,7 @@ pub fn migrate_meta(yes: bool, force_rerun: bool) -> Result<()> {
             _ => continue,
         };
         let bytes = std::fs::read(&path).map_err(|e| anyhow!("read {}: {e}", path.display()))?;
-        let parsed: enclaveapp_core::metadata::KeyMeta =
+        let parsed: sshenc_se::compat::KeyMeta =
             serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))?;
         let presence_mode = sshenc_se::proxy::presence_mode_from_app_specific(&parsed.app_specific)
             .unwrap_or(sshenc_core::PresenceMode::Cached);
@@ -2764,7 +2763,7 @@ fn format_policy(access: AccessPolicy, presence: sshenc_core::PresenceMode) -> S
 mod tests {
     use super::*;
     #[cfg(not(windows))]
-    use enclaveapp_core::KeyType;
+    use hardware_enclave::KeyType;
     use sshenc_test_support::MockKeyBackend;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
@@ -2934,15 +2933,14 @@ mod tests {
     fn seed_promote_key(keys_dir: &Path, label: &str, comment: Option<&str>) {
         let backend = backend_with_key(label, comment.map(str::to_owned));
         let info = backend.get(label).unwrap();
-        enclaveapp_core::metadata::ensure_dir(keys_dir).unwrap();
-        enclaveapp_core::metadata::save_pub_key(keys_dir, label, &info.public_key_bytes).unwrap();
+        sshenc_se::compat::ensure_dir(keys_dir).unwrap();
+        sshenc_se::compat::save_pub_key(keys_dir, label, &info.public_key_bytes).unwrap();
 
-        let mut meta =
-            enclaveapp_core::metadata::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
+        let mut meta = sshenc_se::compat::KeyMeta::new(label, KeyType::Signing, AccessPolicy::None);
         if let Some(comment) = comment {
             meta.set_app_field("comment", comment);
         }
-        enclaveapp_core::metadata::save_meta(keys_dir, label, &meta).unwrap();
+        sshenc_se::compat::save_meta(keys_dir, label, &meta).unwrap();
     }
 
     // -----------------------------------------------------------------------
@@ -3920,7 +3918,7 @@ HKEY_CURRENT_USER\Environment
 
         let keys_dir_for_rename = keys_dir.clone();
         let rename_on_disk = move |old: &str, new: &str| -> Result<()> {
-            enclaveapp_core::metadata::rename_key_files(&keys_dir_for_rename, old, new, None)
+            sshenc_se::compat::rename_key_files(&keys_dir_for_rename, old, new, None)
                 .map_err(|e| anyhow!("metadata rename: {e}"))
         };
         let error = promote_to_default_with_dirs(
@@ -3963,7 +3961,7 @@ HKEY_CURRENT_USER\Environment
 
         let keys_dir_for_rename = keys_dir.clone();
         let rename_on_disk = move |old: &str, new: &str| -> Result<()> {
-            enclaveapp_core::metadata::rename_key_files(&keys_dir_for_rename, old, new, None)
+            sshenc_se::compat::rename_key_files(&keys_dir_for_rename, old, new, None)
                 .map_err(|e| anyhow!("metadata rename: {e}"))
         };
         let error = promote_to_default_with_dirs(

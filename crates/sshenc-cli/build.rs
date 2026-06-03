@@ -1,3 +1,4 @@
 fn main() {
-    enclaveapp_build_support::compile_windows_resource();
+    // Windows PE resource embedding is handled by hardware-enclave's
+    // build support internally. Nothing for sshenc-cli to do here.
 }

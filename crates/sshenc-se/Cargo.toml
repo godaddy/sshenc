@@ -12,44 +12,28 @@ default = ["webauthn-sk"]
 # Compiles in a software-only signing backend and lets the runtime
 # `SSHENC_FORCE_SOFTWARE=1` env var select it instead of the platform
 # hardware backend. Test-only — never enabled in shipping builds.
-force-software = ["dep:enclaveapp-test-software"]
+force-software = ["dep:enclaveapp-test-software", "dep:enclaveapp-core"]
 # Compiles in the FIDO2 SK / WebAuthn key path (`sshenc keygen --strong`).
 # When disabled, sshenc only knows the legacy ecdsa-sha2-nistp256 path.
 # Default-on; gate exists so build profiles that don't want the WebAuthn
 # surface area can opt out at compile time.
-webauthn-sk = ["dep:enclaveapp-windows-webauthn"]
+webauthn-sk = []
 
 [dependencies]
 sshenc-core = { workspace = true }
 sshenc-agent-proto = { workspace = true }
-enclaveapp-core = { workspace = true }
-enclaveapp-app-storage = { workspace = true }
-enclaveapp-test-software = { workspace = true, optional = true }
-enclaveapp-windows-webauthn = { workspace = true, optional = true }
-enclaveapp-bridge = { workspace = true }
+hardware-enclave = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+enclaveapp-test-software = { workspace = true, optional = true }
+# enclaveapp-core is needed only for the force-software test feature to access
+# the EnclaveKeyManager/EnclaveSigner trait bounds on SoftwareSigner.
+enclaveapp-core = { path = "../../../libenclaveapp/crates/enclaveapp-core", optional = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
-
-# Per-platform direct deps so `SshencBackend::generate` can re-stamp the
-# per-key meta-integrity tag against the FINAL on-disk meta after
-# `app_specific` fields are appended. The platform-backend's inline
-# stamp fires through the `EnclaveKeyManager::generate` trait, which
-# only carries label / key_type / access_policy — `comment` /
-# `presence_mode` / `pub_file_path` get added by SshencBackend after.
-# Without the re-stamp the inline tag is stale on every fresh keygen.
-# See docs/design-meta-hmac-trust-anchor.md.
-[target.'cfg(target_os = "windows")'.dependencies]
-enclaveapp-windows = { workspace = true, features = ["signing"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-enclaveapp-apple = { workspace = true, features = ["signing"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-enclaveapp-keyring = { workspace = true, features = ["signing", "keyring-storage"] }
 
 [dev-dependencies]
 sshenc-test-support = { workspace = true }

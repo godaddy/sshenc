@@ -41,6 +41,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -523,57 +524,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclaveapp-app-storage"
-version = "0.1.0"
-dependencies = [
- "enclaveapp-apple",
- "enclaveapp-bridge",
- "enclaveapp-core",
- "enclaveapp-keyring",
- "enclaveapp-linux-tpm",
- "enclaveapp-windows",
- "enclaveapp-wsl",
- "thiserror",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "enclaveapp-apple"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
- "dirs",
- "enclaveapp-core",
- "libc",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "tracing",
- "zeroize",
-]
-
-[[package]]
 name = "enclaveapp-bridge"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "enclaveapp-core",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "enclaveapp-build-support"
-version = "0.1.0"
-dependencies = [
- "winresource",
 ]
 
 [[package]]
 name = "enclaveapp-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "fs2",
@@ -588,44 +550,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclaveapp-keyring"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "dirs",
- "elliptic-curve",
- "enclaveapp-core",
- "keyring",
- "p256",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "enclaveapp-linux-tpm"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "dirs",
- "elliptic-curve",
- "enclaveapp-core",
- "enclaveapp-keyring",
- "p256",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2",
- "tracing",
- "tss-esapi",
-]
-
-[[package]]
 name = "enclaveapp-test-software"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -641,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-tpm-bridge"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "enclaveapp-bridge",
@@ -654,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-windows"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -672,19 +598,12 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-windows-webauthn"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ciborium",
  "enclaveapp-core",
  "thiserror",
  "windows",
-]
-
-[[package]]
-name = "enclaveapp-wsl"
-version = "0.1.0"
-dependencies = [
- "enclaveapp-core",
 ]
 
 [[package]]
@@ -772,6 +691,16 @@ checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
 dependencies = [
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "fs4"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8c6b3bd49c37d2aa3f3f2220233b29a7cd23f79d1fe70e5337d25fb390793de"
+dependencies = [
+ "rustix 0.38.44",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -891,6 +820,39 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
+]
+
+[[package]]
+name = "hardware-enclave"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c43bd4ac0166758dd6ac8cf5140f050d1ac60b1559577fd44783b98d7b2bbf78"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64 0.22.1",
+ "ciborium",
+ "dirs",
+ "elliptic-curve",
+ "fs2",
+ "fs4",
+ "keyring",
+ "libc",
+ "p256",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shlex",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "toml 0.8.23",
+ "tracing",
+ "tss-esapi",
+ "windows",
+ "winresource",
+ "zeroize",
 ]
 
 [[package]]
@@ -1223,6 +1185,12 @@ checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1786,6 +1754,19 @@ checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "rustix"
+version = "0.38.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
+dependencies = [
+ "bitflags",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -1793,7 +1774,7 @@ dependencies = [
  "bitflags",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]
 
@@ -2095,10 +2076,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
- "enclaveapp-apple",
- "enclaveapp-core",
- "enclaveapp-keyring",
- "enclaveapp-windows",
+ "hardware-enclave",
  "libc",
  "serde",
  "serde_json",
@@ -2120,7 +2098,7 @@ version = "0.0.0-dev"
 dependencies = [
  "byteorder",
  "bytes",
- "enclaveapp-core",
+ "hardware-enclave",
  "p256",
  "sshenc-core",
  "thiserror",
@@ -2137,13 +2115,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "dirs",
- "enclaveapp-apple",
- "enclaveapp-build-support",
- "enclaveapp-core",
- "enclaveapp-keyring",
- "enclaveapp-linux-tpm",
- "enclaveapp-windows",
- "enclaveapp-wsl",
+ "hardware-enclave",
  "reqwest",
  "serde",
  "serde_json",
@@ -2168,7 +2140,7 @@ dependencies = [
  "base64 0.22.1",
  "byteorder",
  "dirs",
- "enclaveapp-core",
+ "hardware-enclave",
  "md-5",
  "serde",
  "serde_json",
@@ -2192,7 +2164,7 @@ version = "0.0.0-dev"
 dependencies = [
  "clap",
  "dirs",
- "enclaveapp-core",
+ "hardware-enclave",
  "serde_json",
  "sshenc-core",
  "tempfile",
@@ -2205,7 +2177,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
- "enclaveapp-core",
+ "hardware-enclave",
  "sshenc-agent-proto",
  "sshenc-core",
  "sshenc-se",
@@ -2218,7 +2190,7 @@ name = "sshenc-pkcs11"
 version = "0.0.0-dev"
 dependencies = [
  "dirs",
- "enclaveapp-core",
+ "hardware-enclave",
  "libc",
  "sshenc-core",
 ]
@@ -2229,14 +2201,10 @@ version = "0.0.0-dev"
 dependencies = [
  "base64 0.22.1",
  "dirs",
- "enclaveapp-app-storage",
- "enclaveapp-apple",
- "enclaveapp-bridge",
  "enclaveapp-core",
- "enclaveapp-keyring",
  "enclaveapp-test-software",
- "enclaveapp-windows",
- "enclaveapp-windows-webauthn",
+ "hardware-enclave",
+ "serde",
  "serde_json",
  "sha2",
  "sshenc-agent-proto",
@@ -2259,8 +2227,8 @@ dependencies = [
 name = "sshenc-tpm-bridge"
 version = "0.0.0-dev"
 dependencies = [
- "enclaveapp-core",
  "enclaveapp-tpm-bridge",
+ "hardware-enclave",
 ]
 
 [[package]]
@@ -2327,7 +2295,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.3.4",
  "once_cell",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 

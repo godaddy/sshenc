@@ -33,8 +33,8 @@
 //! agent-only contract.
 
 use crate::backend::KeyBackend;
-use enclaveapp_core::metadata;
-use enclaveapp_core::types::PresenceMode;
+use crate::compat::{self as metadata, KeyMeta};
+use hardware_enclave::PresenceMode;
 use sshenc_agent_proto::client;
 use sshenc_core::error::{Error, Result};
 use sshenc_core::fingerprint;
@@ -122,7 +122,7 @@ impl AgentProxyBackend {
     pub fn new(
         pub_dir: PathBuf,
         socket_path: PathBuf,
-    ) -> std::result::Result<Self, enclaveapp_app_storage::StorageError> {
+    ) -> std::result::Result<Self, hardware_enclave::Error> {
         Ok(Self {
             keys_dir: crate::unified::sshenc_keys_dir(),
             pub_dir,
@@ -163,7 +163,10 @@ impl AgentProxyBackend {
         public_bytes: &[u8],
         pub_file_path: Option<&std::path::Path>,
     ) -> Result<()> {
-        metadata::ensure_dir(&self.keys_dir).map_err(|e| map_meta_err("ensure_keys_dir", e))?;
+        hardware_enclave::fs::ensure_dir(&self.keys_dir).map_err(|e| Error::SecureEnclave {
+            operation: "ensure_keys_dir".into(),
+            detail: e.to_string(),
+        })?;
 
         // SEC1 public-key cache — `metadata::load_pub_key` reads this
         // back during `get` and would otherwise fail with KeyNotFound.
@@ -204,11 +207,7 @@ impl AgentProxyBackend {
     /// prefer an explicit `pub_file_path` recorded in metadata,
     /// otherwise probe `pub_dir/<label>.pub`. Disk-only; never
     /// reaches into the keychain.
-    fn persisted_pub_file_path(
-        &self,
-        meta: &enclaveapp_core::KeyMeta,
-        label: &str,
-    ) -> Option<PathBuf> {
+    fn persisted_pub_file_path(&self, meta: &KeyMeta, label: &str) -> Option<PathBuf> {
         match meta.app_specific.get("pub_file_path") {
             Some(value) if value.is_string() => value.as_str().map(PathBuf::from),
             Some(_) | None => {
@@ -226,7 +225,7 @@ impl AgentProxyBackend {
     fn sk_keyinfo_from_meta(
         keys_dir: &std::path::Path,
         label: &KeyLabel,
-        meta: &enclaveapp_core::KeyMeta,
+        meta: &KeyMeta,
         comment: Option<String>,
     ) -> Result<KeyInfo> {
         use base64::engine::general_purpose::STANDARD;
@@ -365,16 +364,19 @@ impl AgentProxyBackend {
     }
 }
 
-fn map_meta_err(operation: &str, e: enclaveapp_core::Error) -> Error {
-    Error::SecureEnclave {
-        operation: operation.into(),
-        detail: e.to_string(),
+fn map_meta_err(operation: &str, e: crate::compat::MetaError) -> Error {
+    match e {
+        crate::compat::MetaError::KeyNotFound(label) => Error::KeyNotFound { label },
+        other => Error::SecureEnclave {
+            operation: operation.into(),
+            detail: other.to_string(),
+        },
     }
 }
 
 fn rewrite_meta_label(path: &std::path::Path, new_label: &str) -> std::io::Result<()> {
     let bytes = std::fs::read(path)?;
-    let mut meta: enclaveapp_core::KeyMeta = serde_json::from_slice(&bytes)
+    let mut meta: KeyMeta = serde_json::from_slice(&bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     meta.label = new_label.to_string();
     let json = serde_json::to_string_pretty(&meta)
@@ -793,7 +795,7 @@ mod tests {
         let opts = KeyGenOptions {
             label: KeyLabel::new("ub-test").unwrap(),
             comment: Some("test@host".into()),
-            access_policy: enclaveapp_core::AccessPolicy::None,
+            access_policy: hardware_enclave::AccessPolicy::None,
             presence_mode: PresenceMode::None,
             write_pub_path: None,
             record_pub_path: None,
@@ -839,7 +841,7 @@ mod tests {
         let opts = KeyGenOptions {
             label: KeyLabel::new("with-pub").unwrap(),
             comment: None,
-            access_policy: enclaveapp_core::AccessPolicy::Any,
+            access_policy: hardware_enclave::AccessPolicy::Any,
             presence_mode: PresenceMode::Cached,
             write_pub_path: None,
             record_pub_path: None,
@@ -851,7 +853,7 @@ mod tests {
             .unwrap();
 
         let meta = crate::compat::load_sshenc_meta(&keys_dir, "with-pub").unwrap();
-        assert_eq!(meta.access_policy, enclaveapp_core::AccessPolicy::Any);
+        assert_eq!(meta.access_policy, hardware_enclave::AccessPolicy::Any);
         assert_eq!(
             meta.app_specific
                 .get("pub_file_path")
@@ -880,7 +882,7 @@ mod tests {
         let opts = KeyGenOptions {
             label: KeyLabel::new("ren-old").unwrap(),
             comment: Some("renamed@host".into()),
-            access_policy: enclaveapp_core::AccessPolicy::None,
+            access_policy: hardware_enclave::AccessPolicy::None,
             presence_mode: PresenceMode::None,
             write_pub_path: None,
             record_pub_path: None,
@@ -946,7 +948,7 @@ mod tests {
         let opts = KeyGenOptions {
             label: KeyLabel::new("rt-key").unwrap(),
             comment: Some("round@trip".into()),
-            access_policy: enclaveapp_core::AccessPolicy::None,
+            access_policy: hardware_enclave::AccessPolicy::None,
             presence_mode: PresenceMode::None,
             write_pub_path: None,
             record_pub_path: None,
@@ -1156,7 +1158,7 @@ mod tests {
             let opts = KeyGenOptions {
                 label: KeyLabel::new("drop-gen").unwrap(),
                 comment: None,
-                access_policy: enclaveapp_core::AccessPolicy::None,
+                access_policy: hardware_enclave::AccessPolicy::None,
                 presence_mode: PresenceMode::None,
                 write_pub_path: None,
                 record_pub_path: None,
@@ -1209,7 +1211,7 @@ mod tests {
             let opts = KeyGenOptions {
                 label: KeyLabel::new("drop-sign").unwrap(),
                 comment: None,
-                access_policy: enclaveapp_core::AccessPolicy::None,
+                access_policy: hardware_enclave::AccessPolicy::None,
                 presence_mode: PresenceMode::None,
                 write_pub_path: None,
                 record_pub_path: None,
@@ -1244,7 +1246,7 @@ mod tests {
             let opts = KeyGenOptions {
                 label: KeyLabel::new("del-me").unwrap(),
                 comment: None,
-                access_policy: enclaveapp_core::AccessPolicy::None,
+                access_policy: hardware_enclave::AccessPolicy::None,
                 presence_mode: PresenceMode::None,
                 write_pub_path: None,
                 record_pub_path: None,
@@ -1289,7 +1291,7 @@ mod tests {
             let opts = KeyGenOptions {
                 label: KeyLabel::new("ren-src").unwrap(),
                 comment: Some("rename-test".into()),
-                access_policy: enclaveapp_core::AccessPolicy::None,
+                access_policy: hardware_enclave::AccessPolicy::None,
                 presence_mode: PresenceMode::None,
                 write_pub_path: None,
                 record_pub_path: None,
@@ -1337,7 +1339,7 @@ mod tests {
             let opts = KeyGenOptions {
                 label: KeyLabel::new("sign-me").unwrap(),
                 comment: None,
-                access_policy: enclaveapp_core::AccessPolicy::None,
+                access_policy: hardware_enclave::AccessPolicy::None,
                 presence_mode: PresenceMode::None,
                 write_pub_path: None,
                 record_pub_path: None,

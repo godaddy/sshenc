@@ -7,9 +7,10 @@
 //! `IdentityAgent` to point at the sshenc agent socket for all hosts.
 
 use crate::error::{Error, Result};
-use enclaveapp_core::config_block::{self, BlockMarkers};
-use enclaveapp_core::metadata::ensure_dir;
-use enclaveapp_core::quoting::quote_ssh_path;
+use hardware_enclave::fs::ensure_dir;
+use hardware_enclave::shell::{
+    self as config_block, quote_path_for_config as quote_ssh_path, BlockMarkers,
+};
 use std::path::Path;
 
 fn markers() -> BlockMarkers {
@@ -136,7 +137,7 @@ pub fn uninstall_block(ssh_config_path: &Path) -> Result<UninstallResult> {
 /// SSH config files need to be world-readable (unlike secrets which use 0o600),
 /// because `~/.ssh/config` is a configuration file, not a private key.
 fn write_ssh_config(path: &Path, content: &str) -> Result<()> {
-    enclaveapp_core::metadata::atomic_write(path, content.as_bytes())
+    hardware_enclave::fs::atomic_write(path, content.as_bytes())
         .map_err(|e| Error::Config(e.to_string()))?;
     #[cfg(unix)]
     {

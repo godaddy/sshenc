@@ -110,14 +110,7 @@ pub type AgentStream = PipeStream;
 /// so would violate the centralization invariant.
 #[cfg(unix)]
 pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
-    // Delegates to the shared helper in `enclaveapp_core::daemon`.
-    // sshenc is the reference consumer of that pattern; awsenc and
-    // any future enclaveapp CLI gets the same semantics (trusted
-    // bin discovery, exponential readiness backoff, fixed
-    // `--socket <path>` invoke shape) without reimplementing.
-    enclaveapp_core::daemon::ensure_daemon_ready("sshenc-agent", "sshenc", socket_path)
-        .map(|_| ())
-        .map_err(|e| e.to_string())?;
+    ensure_daemon_ready_unix("sshenc-agent", "sshenc", socket_path)?;
 
     // Verify the agent is actually responding to requests, not just
     // accepting connections. The agent's socket binds and accepts
@@ -127,6 +120,84 @@ pub fn ensure_agent_ready(socket_path: &Path) -> Result<(), String> {
     // test RequestIdentities here blocks until the agent is ready
     // to serve real traffic.
     verify_agent_responsive(socket_path)
+}
+
+/// Readiness backoff schedule in milliseconds (total ~15s).
+#[cfg(unix)]
+static READINESS_BACKOFF_MS: &[u64] = &[
+    50, 100, 100, 200, 200, 200, 500, 500, 500, 500, 1000, 1000, 1000, 2000, 2000,
+];
+
+#[cfg(unix)]
+fn is_socket_ready(path: &Path) -> bool {
+    path.exists() && UnixStream::connect(path).is_ok()
+}
+
+/// Inline daemon-spawn helper: discovers the binary via
+/// `hardware_enclave::process::find_trusted_binary`, spawns it with
+/// `--socket <path>`, and polls until the socket accepts connections.
+#[cfg(unix)]
+fn ensure_daemon_ready_unix(
+    binary_name: &str,
+    app_name: &str,
+    socket_path: &Path,
+) -> Result<(), String> {
+    if is_socket_ready(socket_path) {
+        return Ok(());
+    }
+
+    let binary =
+        hardware_enclave::process::find_trusted_binary(binary_name, app_name).ok_or_else(|| {
+            format!(
+                "{binary_name} not found in trusted install locations; \
+                 have you run `sshenc install`?"
+            )
+        })?;
+
+    if let Some(parent) = socket_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create socket dir {}: {e}", parent.display()))?;
+        }
+    }
+
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(&binary)
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("failed to spawn {}: {e}", binary.display()))?;
+
+    for &backoff_ms in READINESS_BACKOFF_MS {
+        std::thread::sleep(Duration::from_millis(backoff_ms));
+        if is_socket_ready(socket_path) {
+            drop(child.try_wait());
+            return Ok(());
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            if status.success() {
+                std::thread::sleep(Duration::from_millis(50));
+                if is_socket_ready(socket_path) {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "sshenc-agent exited cleanly but socket is not ready: {}",
+                    socket_path.display()
+                ));
+            }
+            return Err(format!(
+                "sshenc-agent exited with status {} before becoming ready",
+                status.code().unwrap_or(-1)
+            ));
+        }
+    }
+    Err(format!(
+        "timed out waiting for sshenc-agent to become ready at {}",
+        socket_path.display()
+    ))
 }
 
 /// Windows readiness check: probe the named pipe. The agent on

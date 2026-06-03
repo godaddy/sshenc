@@ -152,8 +152,8 @@ fn dylib_path() -> Option<PathBuf> {
 /// not the hosting process's siblings — which on a homebrew Mac
 /// would be ssh's sibling directory and pick up an outdated
 /// homebrew sshenc-agent.
-fn discovery_context() -> enclaveapp_core::bin_discovery::BinaryDiscoveryContext {
-    let mut ctx = enclaveapp_core::bin_discovery::BinaryDiscoveryContext::current();
+fn discovery_context() -> hardware_enclave::process::BinaryDiscoveryContext {
+    let mut ctx = hardware_enclave::process::BinaryDiscoveryContext::current();
     if let Some(my_path) = dylib_path() {
         ctx.current_exe = Some(my_path);
     }
@@ -162,7 +162,7 @@ fn discovery_context() -> enclaveapp_core::bin_discovery::BinaryDiscoveryContext
 
 #[cfg(unix)]
 fn find_agent_binary() -> Result<PathBuf, String> {
-    enclaveapp_core::bin_discovery::find_trusted_binary_with_context(
+    hardware_enclave::process::find_trusted_binary_with_context(
         "sshenc-agent",
         "sshenc",
         &discovery_context(),
@@ -172,7 +172,7 @@ fn find_agent_binary() -> Result<PathBuf, String> {
 
 #[cfg(windows)]
 fn find_agent_binary() -> Result<PathBuf, String> {
-    enclaveapp_core::bin_discovery::find_trusted_binary_with_context(
+    hardware_enclave::process::find_trusted_binary_with_context(
         "sshenc-agent.exe",
         "sshenc",
         &discovery_context(),

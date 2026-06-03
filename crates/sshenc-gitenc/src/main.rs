@@ -33,7 +33,22 @@
 //! does not expose an alternative.
 
 use clap::Parser;
-use enclaveapp_core::types::validate_label;
+// Validate a key label: non-empty, ASCII alphanumeric + hyphens/underscores, ≤64 chars.
+fn validate_label(label: &str) -> Result<(), String> {
+    if label.is_empty() {
+        return Err("label cannot be empty".into());
+    }
+    if label.len() > 64 {
+        return Err("label cannot exceed 64 characters".into());
+    }
+    if !label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("label must be ASCII alphanumeric, hyphens, or underscores".into());
+    }
+    Ok(())
+}
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,7 +89,7 @@ struct Cli {
 }
 
 fn main() {
-    enclaveapp_core::process::harden_process();
+    hardware_enclave::process::harden_process();
 
     let cli = Cli::parse();
 
@@ -113,8 +128,7 @@ fn resolve_config_label(
 #[cfg(windows)]
 #[allow(clippy::print_stderr, clippy::exit)]
 fn run_upgrade(extra_args: &[String]) -> ! {
-    let Some(sshenc_bin) =
-        enclaveapp_core::bin_discovery::find_trusted_binary("sshenc.exe", "sshenc")
+    let Some(sshenc_bin) = hardware_enclave::process::find_trusted_binary("sshenc.exe", "sshenc")
     else {
         eprintln!("gitenc: trusted sshenc binary not found; cannot run upgrade");
         std::process::exit(1);
@@ -242,8 +256,7 @@ fn inline_signing_args_if_unconfigured(label: Option<&str>) -> Vec<String> {
     } else {
         "sshenc"
     };
-    let Some(sshenc_bin) =
-        enclaveapp_core::bin_discovery::find_trusted_binary(binary_name, "sshenc")
+    let Some(sshenc_bin) = hardware_enclave::process::find_trusted_binary(binary_name, "sshenc")
     else {
         return Vec::new();
     };
@@ -433,7 +446,7 @@ fn configure_repo(label: Option<&str>) {
         let binary_name = "sshenc.exe";
         #[cfg(not(windows))]
         let binary_name = "sshenc";
-        enclaveapp_core::bin_discovery::find_trusted_binary(binary_name, "sshenc")
+        hardware_enclave::process::find_trusted_binary(binary_name, "sshenc")
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| {
                 eprintln!("gitenc: trusted sshenc binary not found");
@@ -520,7 +533,7 @@ struct GitKeyMetadata {
 fn build_ssh_command(label: Option<&str>) -> Result<String, String> {
     match label {
         Some(label) => {
-            validate_label(label).map_err(|e| e.to_string())?;
+            validate_label(label)?;
             Ok(format!("sshenc ssh --label {label} --"))
         }
         None => Ok("sshenc ssh --".to_string()),
@@ -532,7 +545,7 @@ fn signing_key_path(home: &str, label: &str) -> Result<String, String> {
         return Ok(format!("{home}/.ssh/id_ecdsa.pub"));
     }
 
-    validate_label(label).map_err(|e| e.to_string())?;
+    validate_label(label)?;
     Ok(format!("{home}/.ssh/{label}.pub"))
 }
 

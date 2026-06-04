@@ -26,57 +26,6 @@ use std::path::PathBuf;
 #[cfg(feature = "force-software")]
 pub const FORCE_SOFTWARE_ENV: &str = "SSHENC_FORCE_SOFTWARE";
 
-/// Map an `enclaveapp_core::Error` to `hardware_enclave::Error`, preserving
-/// `KeyNotFound` so callers like `delete --if-exists` can detect missing keys.
-#[cfg(feature = "force-software")]
-fn sw_err(e: enclaveapp_core::Error, operation: &str) -> hardware_enclave::Error {
-    match e {
-        enclaveapp_core::Error::KeyNotFound { label } => {
-            hardware_enclave::Error::KeyNotFound { label }
-        }
-        enclaveapp_core::Error::DuplicateLabel { label } => {
-            hardware_enclave::Error::DuplicateLabel { label }
-        }
-        enclaveapp_core::Error::InvalidLabel { reason } => {
-            hardware_enclave::Error::InvalidLabel { reason }
-        }
-        other => hardware_enclave::Error::KeyOperation {
-            operation: operation.into(),
-            detail: other.to_string(),
-        },
-    }
-}
-
-/// Convert a `hardware_enclave::AccessPolicy` to `enclaveapp_core::AccessPolicy`.
-/// Used only in the `force-software` path to bridge between the two type sets.
-#[cfg(feature = "force-software")]
-fn hw_policy_to_sw(p: AccessPolicy) -> enclaveapp_core::types::AccessPolicy {
-    match p {
-        AccessPolicy::None => enclaveapp_core::types::AccessPolicy::None,
-        AccessPolicy::Any => enclaveapp_core::types::AccessPolicy::Any,
-        AccessPolicy::BiometricOnly => enclaveapp_core::types::AccessPolicy::BiometricOnly,
-        AccessPolicy::PasswordOnly => enclaveapp_core::types::AccessPolicy::PasswordOnly,
-    }
-}
-
-/// Convert a `hardware_enclave::PresenceMode` to `enclaveapp_core::types::PresenceMode`.
-#[cfg(feature = "force-software")]
-fn hw_presence_to_sw(m: PresenceMode) -> enclaveapp_core::types::PresenceMode {
-    match m {
-        PresenceMode::None => enclaveapp_core::types::PresenceMode::None,
-        PresenceMode::Cached => enclaveapp_core::types::PresenceMode::Cached,
-        PresenceMode::Strict => enclaveapp_core::types::PresenceMode::Strict,
-    }
-}
-
-#[cfg(feature = "force-software")]
-#[derive(Debug)]
-enum BackendImpl {
-    Platform(SignerHandle),
-    Software(enclaveapp_test_software::SoftwareSigner),
-}
-
-#[cfg(not(feature = "force-software"))]
 #[derive(Debug)]
 enum BackendImpl {
     Platform(SignerHandle),
@@ -186,29 +135,15 @@ impl SshencBackend {
         let keys_dir = sshenc_keys_dir();
 
         #[cfg(feature = "force-software")]
-        {
-            if force_software_selected() {
-                hardware_enclave::fs::ensure_dir(&keys_dir).map_err(|e| {
-                    hardware_enclave::Error::KeyOperation {
-                        operation: "prepare keys_dir for force-software".into(),
-                        detail: e.to_string(),
-                    }
-                })?;
-                let signer = enclaveapp_test_software::SoftwareSigner::with_keys_dir(
-                    "sshenc",
-                    keys_dir.clone(),
-                );
-                tracing::debug!(
-                    keys_dir = %keys_dir.display(),
-                    "sshenc using test-software signing backend (SSHENC_FORCE_SOFTWARE)"
-                );
-                return Ok(Self {
-                    pub_dir,
-                    keys_dir,
-                    backend: BackendImpl::Software(signer),
-                    cache_ttl,
-                });
-            }
+        if force_software_selected() {
+            // Route through hardware-enclave's built-in mock signer.
+            // On Linux (the only platform where `mock` is active) this
+            // returns a SoftwareSigner instead of the real hardware backend.
+            std::env::set_var("ENCLAVEAPP_MOCK_STORAGE", "1");
+            tracing::debug!(
+                keys_dir = %keys_dir.display(),
+                "sshenc using mock signing backend (SSHENC_FORCE_SOFTWARE)"
+            );
         }
 
         let config = EnclaveConfig {
@@ -272,8 +207,6 @@ impl SshencBackend {
     pub fn backend_kind(&self) -> BackendKind {
         match &self.backend {
             BackendImpl::Platform(b) => b.backend_kind(),
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(_) => BackendKind::Keyring,
         }
     }
 
@@ -287,49 +220,23 @@ impl SshencBackend {
         label: &str,
         policy: AccessPolicy,
     ) -> std::result::Result<Vec<u8>, hardware_enclave::Error> {
-        match &self.backend {
-            BackendImpl::Platform(h) => h.generate_key(label, policy),
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => {
-                use enclaveapp_core::traits::EnclaveKeyManager as _;
-                let sw_policy = hw_policy_to_sw(policy);
-                s.generate(label, enclaveapp_core::types::KeyType::Signing, sw_policy)
-                    .map_err(|e| sw_err(e, "generate"))
-            }
-        }
+        let BackendImpl::Platform(h) = &self.backend;
+        h.generate_key(label, policy)
     }
 
     fn be_public_key(&self, label: &str) -> std::result::Result<Vec<u8>, hardware_enclave::Error> {
-        match &self.backend {
-            BackendImpl::Platform(h) => h.public_key(label),
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => {
-                use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.public_key(label).map_err(|e| sw_err(e, "public_key"))
-            }
-        }
+        let BackendImpl::Platform(h) = &self.backend;
+        h.public_key(label)
     }
 
     fn be_key_exists(&self, label: &str) -> std::result::Result<bool, hardware_enclave::Error> {
-        match &self.backend {
-            BackendImpl::Platform(h) => h.key_exists(label),
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => {
-                use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.key_exists(label).map_err(|e| sw_err(e, "key_exists"))
-            }
-        }
+        let BackendImpl::Platform(h) = &self.backend;
+        h.key_exists(label)
     }
 
     fn be_delete_key(&self, label: &str) -> std::result::Result<(), hardware_enclave::Error> {
-        match &self.backend {
-            BackendImpl::Platform(h) => h.delete_key(label),
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => {
-                use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.delete_key(label).map_err(|e| sw_err(e, "delete_key"))
-            }
-        }
+        let BackendImpl::Platform(h) = &self.backend;
+        h.delete_key(label)
     }
 
     fn be_rename_key(
@@ -337,46 +244,20 @@ impl SshencBackend {
         old: &str,
         new: &str,
     ) -> std::result::Result<(), hardware_enclave::Error> {
-        match &self.backend {
-            BackendImpl::Platform(h) => h.rename_key(old, new),
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => {
-                use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.rename_key(old, new).map_err(|e| sw_err(e, "rename_key"))
-            }
-        }
+        let BackendImpl::Platform(h) = &self.backend;
+        h.rename_key(old, new)
     }
 
     fn be_list_keys(&self) -> std::result::Result<Vec<String>, hardware_enclave::Error> {
-        // NOTE — list divergence: Platform enumerates keys based on the
-        // platform backend's native store (Apple: .handle files; keyring:
-        // .meta files). Software (force-software) enumerates via
-        // SoftwareSigner which scans .meta files. AgentProxyBackend::list
-        // (the CLI-side read path) scans .pub files via compat::list_labels.
-        // A key with .pub but no .meta appears in the proxy list but NOT in
-        // the software-backend list. This asymmetry is intentional for
-        // force-software CI mode but should be addressed if the software
-        // backend is ever used in production.
-        match &self.backend {
-            BackendImpl::Platform(h) => {
-                // SignerHandle::list_keys returns Vec<KeyInfo>; extract labels.
-                h.list_keys()
-                    .map(|infos| infos.into_iter().map(|i| i.label).collect())
-            }
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => {
-                use enclaveapp_core::traits::EnclaveKeyManager as _;
-                s.list_keys().map_err(|e| sw_err(e, "list_keys"))
-            }
-        }
+        let BackendImpl::Platform(h) = &self.backend;
+        // SignerHandle::list_keys returns Vec<KeyInfo>; extract labels.
+        h.list_keys()
+            .map(|infos| infos.into_iter().map(|i| i.label).collect())
     }
 
     fn be_is_available(&self) -> bool {
-        match &self.backend {
-            BackendImpl::Platform(_) => true,
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(_) => true,
-        }
+        let BackendImpl::Platform(_) = &self.backend;
+        true
     }
 
     fn be_sign(
@@ -384,14 +265,8 @@ impl SshencBackend {
         label: &str,
         data: &[u8],
     ) -> std::result::Result<Vec<u8>, hardware_enclave::Error> {
-        match &self.backend {
-            BackendImpl::Platform(h) => h.sign(label, data),
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => {
-                use enclaveapp_core::traits::EnclaveSigner as _;
-                s.sign(label, data).map_err(|e| sw_err(e, "sign"))
-            }
-        }
+        let BackendImpl::Platform(h) = &self.backend;
+        h.sign(label, data)
     }
 
     fn be_sign_with_presence(
@@ -402,23 +277,13 @@ impl SshencBackend {
         cache_ttl_secs: u64,
         reason: &str,
     ) -> std::result::Result<Vec<u8>, hardware_enclave::Error> {
-        match &self.backend {
-            BackendImpl::Platform(h) => {
-                let opts = PresenceOptions {
-                    mode,
-                    cache_ttl_secs,
-                    reason: reason.to_string(),
-                };
-                h.sign_with_presence(label, data, &opts)
-            }
-            #[cfg(feature = "force-software")]
-            BackendImpl::Software(s) => {
-                use enclaveapp_core::traits::EnclaveSigner as _;
-                let sw_mode = hw_presence_to_sw(mode);
-                s.sign_with_presence(label, data, sw_mode, cache_ttl_secs, reason)
-                    .map_err(|e| sw_err(e, "sign_with_presence"))
-            }
-        }
+        let BackendImpl::Platform(h) = &self.backend;
+        let opts = PresenceOptions {
+            mode,
+            cache_ttl_secs,
+            reason: reason.to_string(),
+        };
+        h.sign_with_presence(label, data, &opts)
     }
 
     fn find_pub_file(&self, label: &str) -> Option<PathBuf> {

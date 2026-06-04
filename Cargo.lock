@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-bridge"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "base64 0.22.1",
  "enclaveapp-core",
@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-core"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "dirs",
  "fs2",
@@ -550,24 +550,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclaveapp-test-software"
-version = "0.2.0"
-dependencies = [
- "aes-gcm",
- "dirs",
- "elliptic-curve",
- "enclaveapp-core",
- "p256",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2",
- "zeroize",
-]
-
-[[package]]
 name = "enclaveapp-tpm-bridge"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "base64 0.22.1",
  "enclaveapp-bridge",
@@ -580,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-windows"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -598,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-windows-webauthn"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "ciborium",
  "enclaveapp-core",
@@ -824,9 +808,9 @@ dependencies = [
 
 [[package]]
 name = "hardware-enclave"
-version = "0.2.0"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f29bb21b2c20bfd917520ef910a74b9dded66a14cab0f2478c81f2893ed43ef"
+checksum = "5a390dd0e8d62de6231994636163dd63c4e47304ad345afa9f31be05cb590795"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2201,8 +2185,6 @@ version = "0.0.0-dev"
 dependencies = [
  "base64 0.22.1",
  "dirs",
- "enclaveapp-core",
- "enclaveapp-test-software",
  "hardware-enclave",
  "serde",
  "serde_json",

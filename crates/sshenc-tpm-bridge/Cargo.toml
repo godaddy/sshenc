@@ -13,5 +13,3 @@ workspace = true
 
 [dependencies]
 hardware-enclave = { workspace = true }
-# BridgeServer is not in hardware-enclave's public API; keep as direct path dep.
-enclaveapp-tpm-bridge = { path = "../../../libenclaveapp/crates/enclaveapp-tpm-bridge" }

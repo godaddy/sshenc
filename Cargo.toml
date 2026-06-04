@@ -30,7 +30,7 @@ sshenc-agent = { path = "crates/sshenc-agent" }
 sshenc-test-support = { path = "crates/sshenc-test-support" }
 
 # hardware-enclave (published crate replacing the libenclaveapp path deps)
-hardware-enclave = { version = "0.2.4", features = ["signing", "encryption"] }
+hardware-enclave = { version = "0.2.5", features = ["signing", "encryption"] }
 # Test-only temp directories (rotation tests, e2e fixtures).
 tempfile = "3"
 

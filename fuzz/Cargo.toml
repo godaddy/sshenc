@@ -13,8 +13,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 sshenc-agent-proto = { path = "../crates/sshenc-agent-proto" }
 sshenc-core = { path = "../crates/sshenc-core" }
-enclaveapp-core = { path = "../../libenclaveapp/crates/enclaveapp-core" }
-enclaveapp-bridge = { path = "../../libenclaveapp/crates/enclaveapp-bridge" }
+hardware-enclave = { version = "0.2.5", features = ["signing"] }
 serde_json = "1"
 
 [[bin]]

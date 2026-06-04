@@ -23,7 +23,7 @@ fuzz_target!(|data: &[u8]| {
     // buffer never exceeds the cap; that's the property B2 added.
     let mut cursor = Cursor::new(data);
     let mut reader = std::io::BufReader::new(&mut cursor);
-    if let Ok(Some(line)) = enclaveapp_core::timeout::read_line_bounded(
+    if let Ok(Some(line)) = hardware_enclave::bridge_server::read_line_bounded(
         &mut reader,
         MAX_BRIDGE_RESPONSE_BYTES,
     ) {
@@ -34,6 +34,6 @@ fuzz_target!(|data: &[u8]| {
         // Best-effort: feed the line to the same deserializer the
         // production code uses. We don't care whether it succeeds;
         // we only care that it doesn't panic.
-        let _ = serde_json::from_str::<enclaveapp_bridge::BridgeResponse>(&line);
+        let _ = serde_json::from_str::<hardware_enclave::bridge_server::BridgeResponse>(&line);
     }
 });
